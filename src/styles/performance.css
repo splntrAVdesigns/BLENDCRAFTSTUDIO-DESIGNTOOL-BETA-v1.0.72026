@@ -1,0 +1,457 @@
+/**
+ * Performance-optimized CSS for Blendcraft Studio
+ * Includes smooth scrolling, slider enhancements, and GPU acceleration
+ *
+ * PATCH v1.85.1 — CRIT-01: Slider lag fix
+ *   Removed `transition: all 0.1s ease-out` from [data-slot="slider-range"].
+ *   That transition made the fill bar chase the native thumb with a 100ms delay,
+ *   producing the "cursor lag" effect. Fill now tracks the thumb instantly.
+ *   `will-change` scoped to :hover/:active only — permanent promotion of 30-40
+ *   slider layers was creating unnecessary GPU compositor overhead.
+ */
+
+/* ========================================
+   SMOOTH SCROLLING
+   ======================================== */
+
+/* Custom scrollbar styling for all scroll containers */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99, 102, 241, 0.5) rgba(38, 38, 38, 0.3);
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: rgba(38, 38, 38, 0.3);
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.5);
+  border-radius: 4px;
+  transition: background 0.2s ease;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.7);
+}
+
+*::-webkit-scrollbar-thumb:active {
+  background: rgba(99, 102, 241, 0.9);
+}
+
+/* Smooth scroll behavior for all containers */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Performance-optimized scroll containers */
+.scroll-container {
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+  /* Removed permanent will-change: scroll-position — promotes on interaction below */
+}
+
+/* Hardware acceleration for scroll areas */
+[data-radix-scroll-area-viewport] {
+  /* FIX: Removed permanent will-change: transform.
+   * Permanent GPU layer promotion on every scroll area adds compositor
+   * overhead with no benefit when not actively scrolling.
+   * Stacking context is still established via transform: translateZ(0). */
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+}
+
+/* Promote scroll areas only while actively scrolling */
+[data-radix-scroll-area-viewport]:focus-within {
+  will-change: transform;
+}
+
+/* ========================================
+   SLIDER ENHANCEMENTS — PATCHED v1.85.1
+   ======================================== */
+
+/* Slider container */
+[data-slot="slider"] {
+  cursor: pointer;
+  /* FIX: Removed permanent will-change: transform — promoted on :active below */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Enhanced slider track */
+[data-slot="slider-track"] {
+  position: relative;
+  /* FIX: Removed transition + will-change — track bg does not animate */
+}
+
+/* ─── CRITICAL FIX: Slider range fill ────────────────────────────────────────
+ * BEFORE: `transition: all 0.1s ease-out`
+ *   The fill bar animated 100ms behind the native <input type="range"> thumb.
+ *   Since the thumb is driven by hardware pointer events at 60fps, and the fill
+ *   was chasing via CSS animation, users saw the thumb always ahead of the fill —
+ *   the exact "lags behind cursor" symptom.
+ *
+ * AFTER: No transition during drag. The fill width is set inline via React
+ *   state at pointer-event rate and must track instantly. A subtle 50ms ease
+ *   is re-applied ONLY when not dragging (programmatic value changes) via the
+ *   :not([data-dragging]) selector below.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+[data-slot="slider-range"] {
+  /* NO transition here — fill tracks thumb at hardware speed */
+  will-change: width; /* scoped, intentional — width is the only changing property */
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+}
+
+/* Subtle ease ONLY on non-drag value changes (e.g. programmatic updates, reset) */
+[data-slot="slider"]:not([data-dragging]) [data-slot="slider-range"] {
+  transition: width 0.05s ease-out;
+}
+
+/* ─── Slider thumb ──────────────────────────────────────────────────────────*/
+[data-slot="slider-thumb"] {
+  cursor: grab;
+  /* FIX: Removed permanent will-change — promoted on hover/active only */
+  transform: translateZ(0); /* establish stacking context without layer promotion */
+  backface-visibility: hidden;
+}
+
+[data-slot="slider-thumb"]:hover {
+  will-change: transform, box-shadow; /* promote on hover only */
+  transform: scale(1.1) translateZ(0);
+  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2);
+  transition:
+    transform 0.15s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-slot="slider-thumb"]:active {
+  cursor: grabbing;
+  will-change: transform, box-shadow;
+  transform: scale(1.15) translateZ(0);
+  box-shadow: 0 0 0 6px rgba(99, 102, 241, 0.25);
+}
+
+/* Focus visible styles for accessibility */
+[data-slot="slider-thumb"]:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+}
+
+/* Kill ALL transitions during active drag — zero-latency thumb tracking */
+[data-slot="slider"][data-dragging] [data-slot="slider-thumb"],
+[data-slot="slider"][data-dragging] [data-slot="slider-range"],
+[data-slot="slider-thumb"][data-dragging] {
+  transition: none !important;
+  will-change: auto;
+}
+
+/* ========================================
+   GPU ACCELERATION
+   ======================================== */
+
+/* Accelerate frequently animated elements */
+.gpu-accelerated {
+  will-change: transform;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Canvas and gradient rendering optimization */
+canvas {
+  will-change: contents;
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+}
+
+/* ========================================
+   ANIMATION PERFORMANCE
+   ======================================== */
+
+/* Optimize common animated properties */
+.smooth-animate {
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform, opacity;
+}
+
+/* Reduce motion for accessibility */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  
+  [data-slot="slider-thumb"] {
+    transition: none !important;
+  }
+}
+
+/* ========================================
+   LAYER PANEL OPTIMIZATIONS
+   ======================================== */
+
+/* Smooth layer transitions */
+.layer-item {
+  transition: 
+    transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.2s ease,
+    background-color 0.15s ease;
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+}
+
+.layer-item:hover {
+  transform: translateX(2px) translateZ(0);
+}
+
+/* Drag and drop performance */
+.layer-item[data-dragging="true"] {
+  opacity: 0.5;
+  transform: scale(0.98) translateZ(0);
+  transition: none;
+  cursor: grabbing;
+}
+
+/* ========================================
+   CONTROL PANEL OPTIMIZATIONS
+   ======================================== */
+
+/* Smooth panel transitions */
+.control-panel {
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform;
+  backface-visibility: hidden;
+}
+
+/* Accordion smooth expand/collapse */
+[data-radix-accordion-content] {
+  overflow: hidden;
+  transition: height 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: height;
+}
+
+/* ========================================
+   INPUT OPTIMIZATIONS
+   ======================================== */
+
+/* Smooth input focus transitions */
+input,
+textarea,
+select {
+  transition: 
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background-color 0.15s ease;
+  will-change: border-color, box-shadow;
+}
+
+/* Number input optimizations */
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ========================================
+   BUTTON OPTIMIZATIONS
+   ======================================== */
+
+/* Smooth button interactions */
+button {
+  transition: 
+    background-color 0.15s ease,
+    transform 0.1s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.15s ease;
+  will-change: transform, background-color;
+  backface-visibility: hidden;
+}
+
+button:active {
+  transform: scale(0.97) translateZ(0);
+}
+
+/* Prevent double-tap zoom on mobile */
+button,
+[role="button"],
+input[type="submit"],
+input[type="button"] {
+  touch-action: manipulation;
+}
+
+/* ========================================
+   TOOLTIP OPTIMIZATIONS
+   ======================================== */
+
+/* Smooth tooltip appearance */
+[data-radix-tooltip-content] {
+  animation: tooltipFadeIn 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: opacity, transform;
+}
+
+@keyframes tooltipFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(2px) translateZ(0);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) translateZ(0);
+  }
+}
+
+/* ========================================
+   DIALOG/MODAL OPTIMIZATIONS
+   ======================================== */
+
+/* Smooth modal backdrop */
+[data-radix-dialog-overlay],
+[data-radix-alert-dialog-overlay] {
+  animation: overlayFadeIn 0.2s ease;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  will-change: opacity;
+}
+
+@keyframes overlayFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Smooth modal content */
+[data-radix-dialog-content],
+[data-radix-alert-dialog-content] {
+  animation: contentSlideIn 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform, opacity;
+}
+
+@keyframes contentSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98) translateZ(0);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1) translateZ(0);
+  }
+}
+
+/* ========================================
+   MOBILE OPTIMIZATIONS
+   ======================================== */
+
+@media (max-width: 768px) {
+  /* Reduce animation complexity on mobile */
+  .layer-item,
+  button,
+  [data-slot="slider-thumb"] {
+    will-change: auto;
+  }
+  
+  /* Simplify scrollbar on mobile */
+  *::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+}
+
+/* ========================================
+   LOADING STATES
+   ======================================== */
+
+/* Skeleton loading animation */
+.skeleton-loader {
+  background: linear-gradient(
+    90deg,
+    rgba(38, 38, 38, 0.8) 0%,
+    rgba(55, 55, 55, 0.8) 50%,
+    rgba(38, 38, 38, 0.8) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* ========================================
+   FOCUS MANAGEMENT
+   ======================================== */
+
+/* High visibility focus indicators */
+*:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+  transition: outline-offset 0.1s ease;
+}
+
+/* Remove focus outline on mouse interactions */
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+/* ========================================
+   SCROLL PERFORMANCE OPTIMIZATIONS
+   ======================================== */
+
+/* Promote sidebar scroll containers to compositor layers.
+   This lets the browser handle scroll on the GPU compositor thread,
+   independent of the JS main thread (which runs the RAF loop).
+   Without this, expensive RAF callbacks (Frosted Glass, HeatMelt)
+   block scroll events and cause laggy panel scrolling. */
+/* NOTE: will-change: transform intentionally NOT applied to .overflow-hidden
+   Blanket application to overflow-hidden containers wraps WebGL canvas elements
+   and breaks their rendering context in sandboxed iframe environments (Figma).
+   Scroll performance is handled by the specific scrollable containers below. */
+
+/* Prevent scroll from propagating out of panels into the page.
+   Eliminates jitter when user reaches the end of a scrollable panel. */
+.overflow-y-auto,
+.overflow-auto,
+[class*="overflow-y"] {
+  overscroll-behavior: contain;
+  will-change: scroll-position;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Sliders and range inputs: ensure pointer events are handled 
+   at compositor level, not on the JS main thread */
+input[type="range"] {
+  will-change: transform;
+  touch-action: pan-x;
+}
+
+/* Dropdown/select: isolate stacking context to avoid repaints */
+select {
+  will-change: auto;
+  contain: layout style;
+}

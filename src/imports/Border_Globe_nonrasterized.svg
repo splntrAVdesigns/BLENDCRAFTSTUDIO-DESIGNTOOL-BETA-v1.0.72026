@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="100%" height="100%" viewBox="0 0 1651 1651" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-miterlimit:10;">
+    <g>
+        <circle cx="825.17" cy="825.17" r="500" style="fill:none;stroke:white;stroke-width:64.71px;"/>
+        <g>
+            <path d="M825.17,1212.03C611.83,1212.03 438.31,1038.51 438.31,825.17C438.31,611.83 611.83,438.31 825.17,438.31C1038.51,438.31 1212.03,611.83 1212.03,825.17C1212.03,1038.51 1038.51,1212.03 825.17,1212.03ZM825.17,470.49C629.75,470.49 470.49,629.75 470.49,825.17C470.49,1020.59 629.75,1179.85 825.17,1179.85C1020.59,1179.85 1179.85,1020.59 1179.85,825.17C1179.85,629.75 1020.59,470.49 825.17,470.49Z" style="fill:rgb(235,235,235);fill-rule:nonzero;stroke:white;stroke-width:12.5px;stroke-linejoin:round;stroke-miterlimit:2;"/>
+            <path d="M825.17,1212.03C700.75,1212.03 603.21,1041.83 603.21,825.17C603.21,608.52 700.75,438.31 825.17,438.31C949.59,438.31 1047.14,608.52 1047.14,825.17C1047.14,1041.83 949.59,1212.03 825.17,1212.03ZM825.17,470.49C720.66,470.49 635.06,629.75 635.06,825.17C635.06,1020.59 720.33,1179.85 825.17,1179.85C930.02,1179.85 1015.28,1020.59 1015.28,825.17C1015.28,629.75 929.35,470.49 825.17,470.49Z" style="fill:rgb(235,235,235);fill-rule:nonzero;stroke:white;stroke-width:12.5px;stroke-linejoin:round;stroke-miterlimit:2;"/>
+            <path d="M516.94,603.21L1133.4,603.21L1133.4,635.39L516.94,635.39L516.94,603.21ZM516.94,1015.28L1133.4,1015.28L1133.4,1047.47L516.94,1047.47L516.94,1015.28ZM454.24,808.91L1195.77,808.91L1195.77,841.1L454.24,841.1L454.24,808.91Z" style="fill:rgb(235,235,235);fill-rule:nonzero;stroke:white;stroke-width:12.5px;stroke-linejoin:round;stroke-miterlimit:2;"/>
+            <rect x="808.91" y="454.24" width="32.18" height="741.54" style="fill:rgb(235,235,235);fill-rule:nonzero;stroke:white;stroke-width:12.5px;stroke-linejoin:round;stroke-miterlimit:2;"/>
+        </g>
+    </g>
+</svg>

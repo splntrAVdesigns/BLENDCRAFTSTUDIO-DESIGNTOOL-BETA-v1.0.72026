@@ -1,0 +1,101 @@
+╔══════════════════════════════════════════════════════════════════╗
+║         BLENDCRAFT STUDIO - VERSION RESTORATION QUICK REF        ║
+╚══════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 🔄 RESTORE A VERSION                                             │
+└──────────────────────────────────────────────────────────────────┘
+  1. Click "Restore to version XXX" in Figma Make
+  2. Edit /src/app/utils/versionManager.ts
+     → export const APP_VERSION = 'XXX-restored'
+  3. Reload browser (F5)
+  4. Look for green "Cache Cleared" badge ✅
+  5. Test performance
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 🔍 CHECK IF RESTORATION WORKED                                   │
+└──────────────────────────────────────────────────────────────────┘
+  In browser console (F12):
+  
+  window.checkAppVersion()
+  → Should show matching versions
+  
+  window.runDiagnostics()
+  → Check FPS, GPU, canvas settings
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 🧹 MANUAL CACHE CLEAR (if needed)                                │
+└──────────────────────────────────────────────────────────────────┘
+  In browser console:
+  
+  window.forceClearAllCache()
+  location.reload();
+
+  OR:
+  
+  localStorage.clear();
+  sessionStorage.clear();
+  location.reload();
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 🚨 STILL SLOW AFTER RESTORATION?                                 │
+└──────────────────────────────────────────────────────────────────┘
+  1. Test in Incognito mode (Ctrl+Shift+N)
+     → If fast: Browser extension or cache issue
+     → If slow: Continue to step 2
+  
+  2. Run diagnostics:
+     window.runDiagnostics()
+     → Check GPU renderer (should NOT be "SwiftShader")
+     → Check FPS (should be 30+)
+  
+  3. Hard refresh:
+     Ctrl+Shift+R (Windows)
+     Cmd+Shift+R (Mac)
+  
+  4. Check GPU acceleration:
+     Chrome: chrome://gpu
+     → All should say "Hardware accelerated"
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 📊 DIAGNOSTIC COMMANDS                                           │
+└──────────────────────────────────────────────────────────────────┘
+  window.runDiagnostics()      Full performance analysis
+  window.checkAppVersion()     Show version numbers
+  window.forceClearAllCache()  Nuclear cache reset
+
+┌──────────────────────────────────────────────────────────────────┐
+│ ✅ WHAT GOOD PERFORMANCE LOOKS LIKE                              │
+└──────────────────────────────────────────────────────────────────┘
+  Landing page:     Smooth gradient, no stutter
+  Slider movement:  Instant canvas response (< 16ms)
+  FPS:              40-60 (check with runDiagnostics)
+  Animations:       Smooth playback, no lag
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 📁 FILES TO KNOW                                                 │
+└──────────────────────────────────────────────────────────────────┘
+  /src/app/utils/versionManager.ts
+    → Update APP_VERSION here
+  
+  /VERSION_RESTORATION_SOLUTION.md
+    → Complete guide
+  
+  /QUICK_FIX_CHECKLIST.md
+    → Detailed troubleshooting
+  
+  /WHY_RESTORATION_FAILS.txt
+    → Technical explanation (this file)
+
+┌──────────────────────────────────────────────────────────────────┐
+│ 🎯 REMEMBER                                                      │
+└──────────────────────────────────────────────────────────────────┘
+  ❌ Before: Restore → Still slow (old data contamination)
+  ✅ Now:    Restore → Update version → Auto-clear → Perfect!
+
+  The green badge is your friend - if you see it, cache was
+  cleared and you have a TRUE restoration! 🎉
+
+╔══════════════════════════════════════════════════════════════════╗
+║  Need help? Run: window.runDiagnostics()                         ║
+╚══════════════════════════════════════════════════════════════════╝

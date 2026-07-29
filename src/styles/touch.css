@@ -1,0 +1,104 @@
+/**
+ * Touch-Optimized Styles for Tablets & Touch Devices
+ * Prevents unwanted zoom, bounce, and improves touch interactions
+ */
+
+/* Prevent iOS bounce/overscroll */
+html,
+body {
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Prevent double-tap zoom on iOS */
+* {
+  touch-action: manipulation;
+}
+
+/* Allow pan on specific elements that need it */
+.touch-pan-y {
+  touch-action: pan-y;
+}
+
+.touch-pan-x {
+  touch-action: pan-x;
+}
+
+/* Prevent text selection during touch interactions */
+.touch-no-select {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Improve touch target sizes (minimum 44x44px recommended) */
+@media (pointer: coarse) {
+  /* Increase button sizes on touch devices */
+  button,
+  [role="button"],
+  input[type="button"],
+  input[type="submit"] {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Increase slider thumb sizes */
+  input[type="range"]::-webkit-slider-thumb {
+    width: 20px !important;
+    height: 20px !important;
+  }
+
+  input[type="range"]::-moz-range-thumb {
+    width: 20px !important;
+    height: 20px !important;
+  }
+
+  /* Increase checkbox/radio sizes */
+  input[type="checkbox"],
+  input[type="radio"] {
+    min-width: 20px;
+    min-height: 20px;
+  }
+}
+
+/* Smooth momentum scrolling for sidebars */
+.sidebar-scroll {
+  -webkit-overflow-scrolling: touch;
+  overflow-y: auto;
+}
+
+/* Prevent zoom on input focus (iOS Safari) */
+input[type="text"],
+input[type="number"],
+input[type="email"],
+input[type="tel"],
+input[type="url"],
+textarea,
+select {
+  font-size: 16px; /* Prevents iOS zoom on focus */
+}
+
+/* Remove tap highlight on interactive elements */
+button,
+a,
+[role="button"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Optimize for Safari on iPad */
+@supports (-webkit-touch-callout: none) {
+  /* Fix iOS Safari viewport height issue */
+  .h-screen {
+    height: -webkit-fill-available;
+  }
+  
+  /* Fix iOS Safari overflow issues */
+  body {
+    position: fixed;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+}
