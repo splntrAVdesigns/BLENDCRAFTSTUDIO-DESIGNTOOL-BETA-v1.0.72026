@@ -2386,10 +2386,17 @@ export const blobGradientShader = `
       toCenter.x * sinR + toCenter.y * cosR
     ) + vec2(0.5);
 
-    // Blob geometry stays organic and radial. Applying the segmented twist field
-    // here can collapse the metaball field into invalid/empty output on some GPUs.
-    // Keep Blob independent from spiral-style twist and apply only the stable scale.
-    vec2 scaled = (rotated - vec2(0.5)) / max(uScale * max(scale, 0.01), 0.01) + vec2(0.5);
+    // Phase 7.4C: stable radial Blob twist. The earlier segmented twist helper
+    // could collapse the metaball field on some GPUs, so Blob uses a continuous
+    // distance-based rotation with no segment boundaries or singularities.
+    vec2 twistVector = rotated - vec2(0.5);
+    float twistDistance = length(twistVector);
+    float blobTwistAngle = uTwist * twistDistance * 2.25;
+    float twistCos = cos(blobTwistAngle);
+    float twistSin = sin(blobTwistAngle);
+    twistVector = mat2(twistCos, -twistSin, twistSin, twistCos) * twistVector;
+    vec2 twisted = twistVector + vec2(0.5);
+    vec2 scaled = (twisted - vec2(0.5)) / max(uScale * max(scale, 0.01), 0.01) + vec2(0.5);
     
     // Phase 7.4A Blob recovery: build the metaball field from deterministic
     // shader-local centers. This avoids driver-specific failures seen with

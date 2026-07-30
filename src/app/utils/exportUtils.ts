@@ -555,34 +555,45 @@ async function pickSupportedWebMEncoderConfig(
   // The lesson is recorded rather than re-litigated: encoder selection inside
   // this iframe host must be driven by measurement, not by reasoning about
   // what the browser "should" pick.
-  const hwPreferences: Array<HardwarePreference | undefined> = isIframeEnvironment()
-    ? [undefined, 'prefer-hardware', 'prefer-software']
-    : ['prefer-hardware', undefined, 'prefer-software'];
+  // PHASE 7.4C: probe acceleration as a cross-codec matrix, not codec-first.
+  // The old nested loop accepted software VP9 before it ever tested hardware VP8.
+  // That preserved the VP9 label but produced the measured 3-minute final drain.
+  // Explicit hardware acceleration now wins across both codecs; when only software
+  // is available, VP8 is preferred because it is the production speed fallback.
+  const vp8First = [vp8Candidate, ...vp9Candidates];
+  const explicitHardware = candidates;
+  const noPreference = isIframeEnvironment() ? candidates : vp8First;
+  const softwareFallback = vp8First;
+  const probePasses: Array<{
+    hardwareAcceleration: HardwarePreference | undefined;
+    candidates: WebMEncoderChoice[];
+  }> = [
+    { hardwareAcceleration: 'prefer-hardware', candidates: explicitHardware },
+    { hardwareAcceleration: undefined, candidates: noPreference },
+    { hardwareAcceleration: 'prefer-software', candidates: softwareFallback },
+  ];
 
-  for (const candidate of candidates) {
-    for (const hardwareAcceleration of hwPreferences) {
+  for (const pass of probePasses) {
+    for (const candidate of pass.candidates) {
+      const hardwareAcceleration = pass.hardwareAcceleration;
       const supported = await isVideoEncoderConfigSupported({
         codec: candidate.codec,
         width: evenWidth,
         height: evenHeight,
         bitrate,
         framerate: fps,
-        latencyMode: 'quality',
-        bitrateMode: 'constant',
+        latencyMode: hardwareAcceleration === 'prefer-software' ? 'realtime' : 'quality',
+        bitrateMode: hardwareAcceleration === 'prefer-software' ? 'variable' : 'constant',
         ...(hardwareAcceleration ? { hardwareAcceleration } : {}),
       } as VideoEncoderConfig);
       if (supported) {
-        // STAGE 2.8.2: make the selection observable — the single most useful
-        // datapoint for diagnosing export speed, and previously invisible.
         console.info('[Export] WebM encoder selected:', {
           codec: candidate.codec,
-          // STAGE 3.3: this should now be the MINIMUM level for the resolution
-          // (e.g. vp09.00.40.08 for 1440×810), not the old fixed 6.1. If you
-          // still see vp09.00.61.08 here for a sub-4K export, the level
-          // selection didn't take and the encoder is doing 4K-complexity work.
-          minLevelForSize: candidates[0]?.codec,
+          codecId: candidate.codecId,
+          minVp9LevelForSize: vp9Candidates[0]?.codec,
           resolution: `${evenWidth}×${evenHeight}@${fps}`,
           hardwareAcceleration: hardwareAcceleration ?? 'no-preference',
+          selectionPolicy: 'hardware-across-codecs → no-preference → VP8 software fallback',
           iframe: isIframeEnvironment(),
         });
         return { ...candidate, hardwareAcceleration };
@@ -1023,6 +1034,108 @@ function assertUsableEncodedBytes(bytes: Uint8Array | ArrayBuffer | BlobPart[] |
   if (size < 256) {
     throw new Error(`${label} produced an empty/suspicious encoded payload (${size} bytes).`);
   }
+}
+
+/**
+ * Phase 7.4C: certify the finalized WebM in the same browser that encoded it.
+ * Byte-size checks catch empty files, but not a container that has duration
+ * metadata and a poster frame yet cannot decode/seek. We validate metadata and
+ * one midpoint seek before handing the file to the download layer.
+ */
+async function assertPlayableVideoBlob(blob: Blob, label: string, signal?: AbortSignal): Promise<void> {
+  assertUsableVideoBlob(blob, label);
+  if (typeof document === 'undefined' || typeof URL === 'undefined') return;
+
+  const url = URL.createObjectURL(blob);
+  const video = document.createElement('video');
+  video.preload = 'auto';
+  video.muted = true;
+  video.playsInline = true;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        video.onloadedmetadata = null;
+        video.onseeked = null;
+        video.onerror = null;
+        signal?.removeEventListener('abort', onAbort);
+        error ? reject(error) : resolve();
+      };
+      const onAbort = () => finish(new DOMException('Export cancelled', 'AbortError'));
+      const timeout = setTimeout(
+        () => finish(new Error(`${label} could not be playback-certified before download.`)),
+        12000,
+      );
+
+      video.onerror = () => finish(new Error(`${label} finalized, but the browser could not decode it.`));
+      video.onloadedmetadata = () => {
+        if (!Number.isFinite(video.duration) || video.duration <= 0) {
+          finish(new Error(`${label} has invalid duration metadata.`));
+          return;
+        }
+        const midpoint = Math.min(Math.max(0.001, video.duration * 0.5), Math.max(0.001, video.duration - 0.01));
+        video.onseeked = () => finish();
+        try { video.currentTime = midpoint; }
+        catch { finish(new Error(`${label} metadata loaded, but its timeline is not seekable.`)); }
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      video.src = url;
+      video.load();
+    });
+  } finally {
+    video.removeAttribute('src');
+    try { video.load(); } catch {}
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
+ * Phase 7.4C: flush must continue making dequeue progress. An opaque multi-minute
+ * flush that never decreases encodeQueueSize is treated as an encoder failure,
+ * rather than downloading a frozen or undecodable container.
+ */
+async function flushEncoderWithLiveness(
+  encoder: VideoEncoder,
+  signal?: AbortSignal,
+  onQueue?: (remaining: number) => void,
+): Promise<void> {
+  let lastQueue = Math.max(0, (encoder as any).encodeQueueSize ?? 0);
+  let lastProgressAt = performance.now();
+  let finished = false;
+
+  const flushPromise = encoder.flush().finally(() => { finished = true; });
+  const watchdog = new Promise<never>((_, reject) => {
+    const poll = () => {
+      if (finished) return;
+      if (signal?.aborted) {
+        reject(new DOMException('Export cancelled', 'AbortError'));
+        return;
+      }
+      const queue = Math.max(0, (encoder as any).encodeQueueSize ?? 0);
+      onQueue?.(queue);
+      if (queue < lastQueue) {
+        lastQueue = queue;
+        lastProgressAt = performance.now();
+      }
+      const hiddenAllowance = typeof document !== 'undefined' && document.visibilityState === 'hidden' ? 90000 : 30000;
+      if (queue > 0 && performance.now() - lastProgressAt > hiddenAllowance) {
+        reject(new Error(
+          document.visibilityState === 'hidden'
+            ? 'Video encoding stalled while the BLENDCRAFT tab was in the background. Keep the tab visible during export and retry.'
+            : `Video encoder stalled with ${queue} frame${queue === 1 ? '' : 's'} remaining.`,
+        ));
+        return;
+      }
+      setTimeout(poll, 250);
+    };
+    poll();
+  });
+
+  await Promise.race([flushPromise, watchdog]);
 }
 
 export function cleanupExportResources(): void {
@@ -1625,7 +1738,13 @@ export async function exportWebMFromCanvas(options: {
           }, 250);
           const _flushStart = performance.now();
           try {
-            await encoder!.flush();
+            await flushEncoderWithLiveness(encoder!, options.signal, (remaining) => {
+              const drained = 1 - remaining / flushStartQueue;
+              onProgress?.(
+                88 + Math.max(0, Math.min(1, drained)) * 7,
+                `Encoding remaining frames... ${Math.max(0, remaining)} left`,
+              );
+            });
           } finally {
             phaseTimers.flushMs = performance.now() - _flushStart;
             flushDone = true;
@@ -1658,6 +1777,10 @@ export async function exportWebMFromCanvas(options: {
     const blobStartedAt = performance.now();
     const blob = new Blob([bytes], { type: 'video/webm' });
     finalizationTimers.blobMs = performance.now() - blobStartedAt;
+
+    throwIfExportAborted(options.signal);
+    onProgress?.(97, 'Certifying video playback...');
+    await assertPlayableVideoBlob(blob, 'WebCodecs WebM', options.signal);
 
     throwIfExportAborted(options.signal);
     const exportingFile = getExportFinalizationProgress('exporting-file');
