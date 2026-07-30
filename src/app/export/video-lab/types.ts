@@ -87,6 +87,7 @@ export interface RunMediabunnyMainThreadOptions {
   codec: VideoLabCodec;
   container: VideoLabContainer;
   bitrate?: number;
+  certifyFrames?: boolean;
   renderFrameAtTime: (timeSeconds: number) => Promise<void>;
   signal?: AbortSignal;
   onProgress?: (progress: VideoLabProgress) => void;

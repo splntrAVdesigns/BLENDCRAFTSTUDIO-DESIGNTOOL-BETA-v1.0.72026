@@ -13,3 +13,4 @@ export * from './GradientExportBridge';
 export * from './AuthoritativeExportFrameSource';
 
 export * from './ExportFrameTimingDiagnostics';
+export * from './MediabunnyProductionExporter';

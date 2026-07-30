@@ -24,13 +24,10 @@ import {
 import { toast } from 'sonner';
 import { Layer, CanvasSettings, type RenderApi } from '../../types/gradient';
 import { 
-  exportMP4FromCanvas,
-  exportWebMFromCanvas,
   verifyMP4EncodeSupport,
   exportPNGAtSize,
   exportAsSVG,
   generateCSSCode,
-  pickBestVideoMimeType,
   PNG_PRESETS,
   WEBM_PRESETS,
   VIDEO_QUALITY_PRESETS,
@@ -51,6 +48,7 @@ import {
 import { createLayerExportDurationPlan } from '../../export/ExportDurationPlan';
 import { isolatePreview } from '../../export/recording/PreviewIsolationController';
 import { VideoExportLabPanel } from './VideoExportLabPanel';
+import { exportVideoWithMediabunny } from '../../export/MediabunnyProductionExporter';
 
 interface ExportPanelProps {
   layers: Layer[];
@@ -149,7 +147,7 @@ export function ExportPanel({
   // Video container format — Stage 1 export fix wires the repaired
   // MP4/H.264 WebCodecs path (vendored muxer stco fix) into the UI.
   // MP4 gracefully falls back to WebM when the browser/GPU lacks a
-  // hardware H.264 encoder (handled inside exportMP4FromCanvas).
+  // H.264 availability is verified before Mediabunny MP4 export is offered.
   const [videoFormat, setVideoFormat] = useState<'webm' | 'mp4'>('webm');
   // MP4 v3: async REAL capability probe. The old sync check only verified
   // the WebCodecs classes exist — true even in environments (Figma desktop /
@@ -549,185 +547,100 @@ ${colorInterpExpanded}
       toast.error('Canvas not available. Please try again.');
       return;
     }
+
     const wantsMP4 = videoFormat === 'mp4';
-    if (!wantsMP4 && !pickBestVideoMimeType()) {
-      toast.error('WebM video not supported in this browser. Try Chrome or Firefox.');
-      return;
-    }
     if (wantsMP4 && mp4Supported !== true) {
-      toast.error('MP4 export not available in this environment — use WebM instead.');
+      toast.error('H.264 export is not available in this browser. Use WebM instead.');
       return;
     }
 
     const base = getWebmResolution();
-    // STAGE 3.2: apply render scale, keeping even dimensions (VP9 requires even).
-    const width  = Math.max(2, Math.round(base.width  * webmRenderScale / 2) * 2);
+    const width = Math.max(2, Math.round(base.width * webmRenderScale / 2) * 2);
     const height = Math.max(2, Math.round(base.height * webmRenderScale / 2) * 2);
     const plan = planWebMExport({
       width,
       height,
       fps: webmFps,
       targetDurationMs: webmDuration * 1000,
-      // Phase 7.3B: duration and Loop Lock are resolved once by the shared
-      // authority used by both the UI preview and the active export path.
       durationPlan,
       quality: webmQuality,
       loopLockEnabled: durationPlan.loopLockEnabled,
     });
     if (!confirmWebMExportPlan(plan)) return;
-    const durationMs = plan.durationMs;
 
     const exportAbortController = new AbortController();
     exportAbortControllerRef.current = exportAbortController;
-
     setIsExporting(true, 'video', () => {
-      safeSetExportState(Math.max(1, exportProgress), 'Cancelling export…');
+      safeSetExportState(Math.max(1, exportProgress), 'Cancelling Mediabunny export…');
       exportAbortController.abort('Export cancelled by user.');
     });
-    setExportProgress(0);
-    setExportMessage(`Preparing ${plan.estimateLabel}...`);
+    safeSetExportState(0, 'Preparing Mediabunny export…');
+
+    const previewIsolation = isolatePreview({
+      sourceCanvas: canvas,
+      readFramePixels: api.readFramePixels,
+    });
 
     try {
-      // Phase 7.3E.6 production cutover: MP4 retains its established encoder
-      // setup. WebM is now exclusively owned by the production recording bridge,
-      // including preview isolation, export timing, and renderer restoration.
-      if (wantsMP4) {
-        api.configureExportTimeline?.({
-          fps: plan.fps,
-          totalFrames: plan.totalFrames,
-          durationMs: plan.durationMs,
-          loopLockEnabled: durationPlan.loopLockEnabled,
-        });
-        if (durationPlan.loopLockEnabled) {
-          safeSetExportState(0, 'Resetting animation loop start...');
-        }
-        api.pauseAnimation?.({ resetExportPhase: durationPlan.loopLockEnabled });
-        await new Promise(r => setTimeout(r, 30));
-        if (exportAbortController.signal.aborted || !isMountedRef.current) return;
-
-        const bakeStatus = await api.prepareAudioExport?.();
-        if (bakeStatus) safeSetExportState(0, bakeStatus);
-        if (exportAbortController.signal.aborted || !isMountedRef.current) {
-          api.finishAudioExport?.();
-          return;
-        }
-      }
-
-      const sharedExportOptions = {
-        canvas,
-        renderFrameAtTime: (t: number) => api.renderAtTime(t, undefined),
+      api.configureExportTimeline?.({
         fps: plan.fps,
-        durationMs,
-        quality: plan.quality,
+        totalFrames: plan.totalFrames,
+        durationMs: plan.durationMs,
+        loopLockEnabled: durationPlan.loopLockEnabled,
+      });
+      api.pauseAnimation?.({ resetExportPhase: durationPlan.loopLockEnabled });
+      const bakeStatus = await api.prepareAudioExport?.();
+      if (bakeStatus) safeSetExportState(1, bakeStatus);
+
+      const container = wantsMP4 ? 'mp4' : 'webm';
+      const qualityPreset = wantsMP4 ? MP4_QUALITY_PRESETS[plan.quality] : VIDEO_QUALITY_PRESETS[plan.quality];
+      const bitrate = qualityPreset.bitrate(plan.width, plan.height);
+      const filename = `gradient-${plan.width}x${plan.height}-${plan.fps}fps.${container}`;
+
+      const result = await exportVideoWithMediabunny({
+        api,
         width: plan.width,
         height: plan.height,
-        getLiveCanvas: () => api.getCanvas(),
-        getReadFramePixels: () => api.readFramePixels?.() ?? null,
-        getFlashOverlayFrame: (t: number) => api.getExportFlashOverlay?.(t) ?? null,
-        // ── STAGE 2.8.4: LOOP VERIFICATION ──
-        // Only meaningful when loop lock is on — that's the setting that
-        // CLAIMS the export loops, so it's the claim we measure. Costs one
-        // extra rendered frame; reports a number instead of an assurance.
-        verifyLoop: loopPerfect,
-        onLoopVerified: (result: LoopVerificationResult) => {
-          if (!isMountedRef.current) return;
-          if (result.error) return; // check unavailable — say nothing rather than alarm
-          if (result.seamless) {
-            toast.success(`Loop verified — seamless wrap (${result.matchLabel} match)`);
-          } else {
-            // Honest, actionable, and not alarmist: the file is fine, the loop
-            // point just isn't clean, and the usual cause is a subsystem whose
-            // cycle doesn't divide into the locked duration.
-            toast.warning(
-              `Loop is not seamless (${result.matchLabel} match at the wrap). ` +
-              `The export is fine — but an animated layer, texture, or video ` +
-              `doesn't complete a whole cycle in ${(durationMs / 1000).toFixed(2)}s.`,
-            );
-          }
-        },
-        setExportSize: (w: number, h: number) => api.setExportSize?.(w, h),
-        restoreSize: () => api.restoreSize?.(),
-        codecSafety: plan.codecSafety,
+        fps: plan.fps,
+        durationMs: plan.durationMs,
+        container,
+        bitrate,
+        filename,
         signal: exportAbortController.signal,
-        onProgress: (progress: number, message?: string) => safeSetExportState(progress, message || ''),
-      };
+        onProgress: (progress, message) => safeSetExportState(progress, message),
+      });
 
-      if (wantsMP4) {
-        // Repaired MP4/H.264 path: WebCodecs encode → vendored muxer (stco
-        // offset fix). Falls back to VP9/WebM internally when the hardware
-        // H.264 encoder is unavailable — surface that to the user.
-        const mp4Options = {
-          ...sharedExportOptions,
-          filename: `gradient-${plan.width}x${plan.height}-${plan.fps}fps.mp4`,
-        };
-        await exportMP4FromCanvas(mp4Options);
-        if (isMountedRef.current && !exportAbortController.signal.aborted) {
-          if ((mp4Options as any).__fellBackToWebM) {
-            toast.warning(`H.264 encoder unavailable — exported as WebM instead: ${plan.estimateLabel}`);
-          } else {
-            toast.success(`MP4 exported: ${plan.estimateLabel}`);
-          }
-        }
-      } else {
-        // Phase 7.3E.8 production cutover: WebM is rendered offline and encoded
-        // with explicit per-frame timestamps. Render time can exceed playback
-        // duration without stretching or duplicating the exported timeline.
-        const previewIsolation = isolatePreview({
-          sourceCanvas: canvas,
-          readFramePixels: api.readFramePixels,
-        });
-        try {
-          api.configureExportTimeline?.({
-            fps: plan.fps,
-            totalFrames: plan.totalFrames,
-            durationMs: plan.durationMs,
-            loopLockEnabled: durationPlan.loopLockEnabled,
-          });
-          if (durationPlan.loopLockEnabled) {
-            safeSetExportState(0, 'Resetting animation loop start…');
-          }
-          api.pauseAnimation?.({ resetExportPhase: durationPlan.loopLockEnabled });
-          const bakeStatus = await api.prepareAudioExport?.();
-          if (bakeStatus) safeSetExportState(1, bakeStatus);
-
-          await exportWebMFromCanvas({
-            ...sharedExportOptions,
-            filename: `gradient-${plan.width}x${plan.height}-${plan.fps}fps.webm`,
-          });
-          safeSetExportState(100, 'Export complete');
-          if (isMountedRef.current && !exportAbortController.signal.aborted) {
-            toast.success(`Frame-accurate WebM exported: ${plan.estimateLabel}`);
-          }
-        } finally {
-          try { previewIsolation.dispose(); } catch {}
-        }
+      saveAs(result.blob, result.filename);
+      console.info('[BLENDCRAFT Export 7.4D]', {
+        engine: 'mediabunny',
+        codec: result.codec,
+        container,
+        ...result.benchmark,
+      });
+      safeSetExportState(100, 'Export complete');
+      if (isMountedRef.current && !exportAbortController.signal.aborted) {
+        toast.success(`${wantsMP4 ? 'MP4' : 'WebM'} exported with Mediabunny: ${plan.estimateLabel}`);
       }
     } catch (error) {
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        console.error('Video export error:', error);
+        console.error('[BLENDCRAFT Export 7.4D] Mediabunny export failed:', error);
         toast.error(`Video export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     } finally {
+      try { previewIsolation.dispose(); } catch {}
       if (exportAbortControllerRef.current === exportAbortController) {
         exportAbortControllerRef.current = null;
       }
-      {
-        api.finishAudioExport?.();
-        if (api.cleanupExportSession) {
-          await api.cleanupExportSession();
-        } else {
-          api.clearExportTimeline?.();
-          api.resumeAnimation?.();
-          api.restoreSize?.();
-        }
+      api.finishAudioExport?.();
+      if (api.cleanupExportSession) {
+        await api.cleanupExportSession();
+      } else {
+        api.clearExportTimeline?.();
+        api.resumeAnimation?.();
+        api.restoreSize?.();
       }
-      // STAGE 2.8.3: hold the completed overlay briefly. The bar previously
-      // vanished mid-count, so a long render ended with the panel simply
-      // blanking and a file appearing — no confirmation that anything
-      // succeeded. A short beat on "Export complete" closes the loop.
-      // Skipped on abort (nothing completed) and when unmounted.
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        await new Promise((r) => setTimeout(r, 700));
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
       if (isMountedRef.current) {
         setIsExporting(false);
@@ -736,7 +649,6 @@ ${colorInterpExpanded}
       }
     }
   };
-
 
   // ============================================================
   // SVG EXPORT

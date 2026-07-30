@@ -99,17 +99,21 @@ export async function runMediabunnyMainThread(
   const frameDuration = 1 / options.fps;
 
   abortIfNeeded(options.signal);
-  emit(options.onProgress, {
-    stage: 'certifying', frame: 0, totalFrames, message: 'Certifying animation frames…',
-  });
   const certificationStarted = now();
-  const certification = await certifyAnimationFrames({
-    canvas: options.canvas,
-    totalFrames,
-    fps: options.fps,
-    renderFrameAtTime: options.renderFrameAtTime,
-    signal: options.signal,
-  });
+  const certification = options.certifyFrames === false
+    ? { passed: true, samples: [], uniqueHashes: 0, reason: 'Production cutover uses post-encode playback certification.' }
+    : await (async () => {
+        emit(options.onProgress, {
+          stage: 'certifying', frame: 0, totalFrames, message: 'Certifying animation frames…',
+        });
+        return certifyAnimationFrames({
+          canvas: options.canvas,
+          totalFrames,
+          fps: options.fps,
+          renderFrameAtTime: options.renderFrameAtTime,
+          signal: options.signal,
+        });
+      })();
   const certificationMs = now() - certificationStarted;
   if (!certification.passed) throw new Error(certification.reason ?? 'Animation-frame certification failed.');
 
