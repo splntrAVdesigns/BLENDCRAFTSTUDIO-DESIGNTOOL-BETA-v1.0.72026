@@ -159,10 +159,17 @@ export function VideoExportLabPanel({ renderApiRef }: VideoExportLabPanelProps) 
         <div>
           <div className="flex items-center gap-2 text-cyan-300">
             <FlaskConical className="h-4 w-4" />
+<<<<<<< HEAD
             <span className="text-xs font-semibold uppercase tracking-[0.12em]">Video Export Lab · 7.3F.2</span>
           </div>
           <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
             Development-only 720p/30fps/5s main-thread proof. It does not replace the production exporter.
+=======
+            <span className="text-xs font-semibold uppercase tracking-[0.12em]">Video Export Lab · 7.3F.3</span>
+          </div>
+          <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
+            Vercel baseline: isolated 720p/30fps/5s main-thread proof. Production export remains frozen.
+>>>>>>> 5a9c7a05... Phase 7.3F.3 - Blob recovery, Wave AA fix and Vercel baseline
           </p>
         </div>
         <button className="text-[10px] text-zinc-600 hover:text-zinc-300" onClick={disableLab}>Hide lab</button>

@@ -2386,14 +2386,10 @@ export const blobGradientShader = `
       toCenter.x * sinR + toCenter.y * cosR
     ) + vec2(0.5);
 
-    // Apply twist (spiral distortion) — controlled by the Twist slider
-    vec2 twisted = rotated;
-    if (abs(uTwist) > 0.001) {
-      twisted = applyEnhancedTwist(rotated, vec2(0.5), uTwist, uDisplacementStrength);
-    }
-    
-    // Apply scale
-    vec2 scaled = (twisted - vec2(0.5)) / (uScale * max(scale, 0.01)) + vec2(0.5);
+    // Blob geometry stays organic and radial. Applying the segmented twist field
+    // here can collapse the metaball field into invalid/empty output on some GPUs.
+    // Keep Blob independent from spiral-style twist and apply only the stable scale.
+    vec2 scaled = (rotated - vec2(0.5)) / max(uScale * max(scale, 0.01), 0.01) + vec2(0.5);
     
     // Calculate non-uniform blob field with organic shapes
     float value = 0.0;
@@ -3057,16 +3053,10 @@ export const waveGradientShader2 = `
     // Combine base gradient with waves (normalized to 0-1 range)
     float t = fract(base + wave1 + wave2 + turbNoise);
     
-    // PHASE 7.3E.10 ANALYTIC EDGE AA: integrate the procedural gradient
-    // across the pixel footprint instead of sampling only the pixel centre.
-    // This removes staircase edges in both the live canvas and exports without blur.
-    float footprint = max(fwidth(t), 0.00035);
-    vec3 color = (
-      getGradientColor(fract(t - footprint * 0.375)) +
-      getGradientColor(fract(t - footprint * 0.125)) +
-      getGradientColor(fract(t + footprint * 0.125)) +
-      getGradientColor(fract(t + footprint * 0.375))
-    ) * 0.25 * intensity * uPulse;
+    // PHASE 7.3F.3 WAVE EDGE RECOVERY: sample the wrapped coordinate once.
+    // Multi-tap sampling across fract() boundaries mixed opposite ends of the
+    // gradient and produced visible pixel staircasing in preview and exports.
+    vec3 color = getGradientColor(t) * intensity * uPulse;
     
     // Apply texture overlay if enabled
     if (hasTexture > 0.5) {
