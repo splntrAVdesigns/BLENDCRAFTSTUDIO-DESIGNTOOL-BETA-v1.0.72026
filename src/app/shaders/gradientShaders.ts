@@ -2391,23 +2391,28 @@ export const blobGradientShader = `
     // Keep Blob independent from spiral-style twist and apply only the stable scale.
     vec2 scaled = (rotated - vec2(0.5)) / max(uScale * max(scale, 0.01), 0.01) + vec2(0.5);
     
-    // Calculate non-uniform blob field with organic shapes
+    // Phase 7.4A Blob recovery: build the metaball field from deterministic
+    // shader-local centers. This avoids driver-specific failures seen with
+    // vec2/float uniform arrays while keeping blobCount authoritative.
     float value = 0.0;
-    
     for (int i = 0; i < 5; i++) {
-      if (i >= blobCount) break;
-      vec2 toBlob = scaled - blobPositions[i];
-      
-      // Add organic distortion to each blob
-      float blobNoise = noise(blobPositions[i] * 10.0 + time * 0.3);
-      float angleOffset = blobNoise * 6.28318;
-      float radiusVariation = 1.0 + sin(atan(toBlob.y, toBlob.x) * 3.0 + angleOffset) * 0.3;
-      
-      float blobDist = length(toBlob) / radiusVariation;
-      value += (1.0 - smoothstep(0.0, blobSizes[i], blobDist));
+      float fi = float(i);
+      float enabled = 1.0 - step(float(blobCount), fi + 0.5);
+      float countSafe = max(float(blobCount), 1.0);
+      float orbit = fi / countSafe * 6.2831853 + 0.35;
+      vec2 blobCenter = vec2(0.5) + vec2(cos(orbit), sin(orbit)) * (0.18 + 0.025 * sin(fi * 2.17));
+      float phase = time * (0.10 + fi * 0.015);
+      blobCenter += vec2(cos(phase + fi * 1.7), sin(phase * 0.83 + fi * 2.1)) * 0.025;
+
+      vec2 toBlob = scaled - blobCenter;
+      float polar = atan(toBlob.y, toBlob.x);
+      float organic = 1.0 + sin(polar * (2.0 + mod(fi, 3.0)) + fi * 1.31 + time * 0.12) * 0.16;
+      float radius = (0.31 + 0.025 * sin(fi * 2.41)) * organic;
+      float blobDist = length(toBlob);
+      value += enabled * (1.0 - smoothstep(radius * 0.25, radius, blobDist));
     }
-    
-    value = clamp(value, 0.0, 1.0);
+
+    value = smoothstep(0.02, 1.15, value);
     
     vec3 color = getGradientColor(value) * intensity * uPulse;
     

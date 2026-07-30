@@ -1,4 +1,5 @@
 import type { RenderApi } from '../types/gradient.ts';
+import { createAuthoritativeExportFrameSource } from './AuthoritativeExportFrameSource.ts';
 import { MediaRecorderExportEngine } from './MediaRecorderExportEngine.ts';
 import {
   runExportRenderScheduler,
@@ -52,7 +53,7 @@ export async function exportWithNativeRecorder(
     onSlowFrame,
   } = input;
 
-  if (!api.renderAtTime) throw new Error('Render system is not ready.');
+  const frameSource = createAuthoritativeExportFrameSource(api);
   if (!api.setExportSize || !api.restoreSize) {
     throw new Error('Export-size renderer controls are unavailable.');
   }
@@ -68,7 +69,7 @@ export async function exportWithNativeRecorder(
 
   // Prepare the exact starting frame before captureStream/MediaRecorder begins,
   // preventing a preview-sized or stale frame from becoming frame zero.
-  await api.renderAtTime(0, undefined, { seekMedia: true });
+  await frameSource.renderFrame(0, true);
   throwIfAborted(signal);
 
   const recorderEngine = input.recorderEngine ?? new MediaRecorderExportEngine();
@@ -90,7 +91,7 @@ export async function exportWithNativeRecorder(
       catchUpStrategy: 'latest',
       startFrame: 1,
       renderAtTime: async (elapsedSeconds) => {
-        await api.renderAtTime(elapsedSeconds, undefined, { seekMedia: true });
+        await frameSource.renderFrame(elapsedSeconds, true);
         // Manual captureStream tracks only emit after the deterministic frame
         // has fully settled, avoiding compositor-time sampling of stale frames.
         requestCapturedFrame?.();

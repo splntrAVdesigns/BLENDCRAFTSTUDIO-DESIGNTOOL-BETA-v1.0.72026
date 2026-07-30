@@ -10,3 +10,4 @@ export * from './ExportRenderScheduler';
 export * from './MediaRecorderExportEngine';
 
 export * from './GradientExportBridge';
+export * from './AuthoritativeExportFrameSource';

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'rea
 import { AlertTriangle, CheckCircle2, Download, FlaskConical, Loader2, RefreshCw, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import type { RenderApi } from '../../types/gradient';
+import { createAuthoritativeExportFrameSource } from '../../export/AuthoritativeExportFrameSource';
 import {
   downloadVideoLabArtifact,
   probeVideoLabCapabilities,
@@ -78,9 +79,15 @@ export function VideoExportLabPanel({ renderApiRef }: VideoExportLabPanelProps) 
 
   const runProof = async () => {
     const api = renderApiRef?.current;
-    const canvas = api?.getCanvas();
-    if (!api?.renderAtTime || !canvas || !api.setExportSize || !api.restoreSize) {
+    if (!api || !api.setExportSize || !api.restoreSize) {
       toast.error('Video Lab requires the deterministic renderer and resize bridge.');
+      return;
+    }
+    let frameSource;
+    try {
+      frameSource = createAuthoritativeExportFrameSource(api);
+    } catch (sourceError) {
+      toast.error(sourceError instanceof Error ? sourceError.message : 'Renderer source unavailable.');
       return;
     }
     if (!selectedCapability?.supported) {
@@ -111,14 +118,14 @@ export function VideoExportLabPanel({ renderApiRef }: VideoExportLabPanelProps) 
       await api.prepareAudioExport?.();
 
       const result = await runMediabunnyMainThread({
-        canvas,
+        canvas: frameSource.canvas,
         width: TEST_WIDTH,
         height: TEST_HEIGHT,
         fps: TEST_FPS,
         durationSeconds: TEST_DURATION_SECONDS,
         codec: selectedCodec,
         container: selectedCodec === 'avc1.42001f' ? 'mp4' : 'webm',
-        renderFrameAtTime: (timeSeconds) => api.renderAtTime(timeSeconds, undefined, { seekMedia: true }),
+        renderFrameAtTime: (timeSeconds) => frameSource.renderFrame(timeSeconds, true),
         signal: abortController.signal,
         onProgress: setProgress,
       });
