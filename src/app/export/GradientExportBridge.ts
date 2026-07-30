@@ -1,5 +1,6 @@
 import type { RenderApi } from '../types/gradient.ts';
 import { createAuthoritativeExportFrameSource } from './AuthoritativeExportFrameSource.ts';
+import type { ExportFrameTimingSample, ExportFrameTimingSummary } from './ExportFrameTimingDiagnostics.ts';
 import { MediaRecorderExportEngine } from './MediaRecorderExportEngine.ts';
 import {
   runExportRenderScheduler,
@@ -17,6 +18,7 @@ export interface NativeRecorderExportInput {
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: number, message: string) => void;
   readonly onSlowFrame?: (renderMs: number, frameBudgetMs: number) => void;
+  readonly onFrameTiming?: (sample: ExportFrameTimingSample) => void;
   readonly resetExportPhase?: boolean;
   readonly recorderEngine?: MediaRecorderExportEngine;
 }
@@ -24,6 +26,7 @@ export interface NativeRecorderExportInput {
 export interface NativeRecorderExportResult {
   readonly blob: Blob;
   readonly scheduler: ExportRenderSchedulerResult;
+  readonly timing: ExportFrameTimingSummary;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -42,7 +45,6 @@ export async function exportWithNativeRecorder(
 ): Promise<NativeRecorderExportResult> {
   const {
     api,
-    canvas,
     width,
     height,
     fps,
@@ -53,7 +55,7 @@ export async function exportWithNativeRecorder(
     onSlowFrame,
   } = input;
 
-  const frameSource = createAuthoritativeExportFrameSource(api);
+  const frameSource = createAuthoritativeExportFrameSource(api, { onFrameTiming: input.onFrameTiming });
   if (!api.setExportSize || !api.restoreSize) {
     throw new Error('Export-size renderer controls are unavailable.');
   }
@@ -111,7 +113,7 @@ export async function exportWithNativeRecorder(
   let blob: Blob;
   try {
     blob = await recorderEngine.record({
-      canvas,
+      canvas: frameSource.canvas,
       fps,
       durationMs,
       videoBitsPerSecond,
@@ -128,5 +130,5 @@ export async function exportWithNativeRecorder(
 
   const finalSchedulerResult = schedulerResult ?? await schedulerPromise;
   onProgress?.(100, 'Native recording complete');
-  return { blob, scheduler: finalSchedulerResult };
+  return { blob, scheduler: finalSchedulerResult, timing: frameSource.getTimingSummary() };
 }

@@ -92,7 +92,7 @@ export function renderGradientLayer(
       canvasAspect: height > 0 ? width / height : 1,
     });
   } else if (layer.gradient) {
-    material = createGradientMaterial(layer.gradient, layer.texture, interaction);
+    material = createGradientMaterial(layer.gradient, layer.texture, interaction, undefined, 0, layer.id);
   } else if (layer.texture) {
     // Texture-only rendering (simplified for now)
     material = new THREE.MeshBasicMaterial({ color: 0x808080 });
@@ -188,7 +188,8 @@ function createGradientMaterial(
   texture?: TextureConfig,
   interaction: { mouseX: number; mouseY: number; mouseIntensity: number } = { mouseX: 0, mouseY: 0, mouseIntensity: 0 },
   displacementTexture?: THREE.Texture,
-  displacementStrength: number = 0
+  displacementStrength: number = 0,
+  layerId: string = 'gradient-layer'
 ): THREE.ShaderMaterial {
   
   // Convert color stops to shader format
@@ -441,7 +442,7 @@ function createGradientMaterial(
           ));
           // Stable per-layer/per-blob size. Math.random() made material rebuilds
           // produce a different blob field between preview and deterministic export.
-          blobSizes.push(deterministicRange(`${layer.id}:blob-size`, i, 0.4, 0.6));
+          blobSizes.push(deterministicRange(`${layerId}:blob-size`, i, 0.4, 0.6));
         } else {
           blobPositions.push(new THREE.Vector2(0, 0));
           blobSizes.push(0);
