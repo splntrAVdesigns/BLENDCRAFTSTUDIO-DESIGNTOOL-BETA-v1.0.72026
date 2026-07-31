@@ -31,7 +31,9 @@ function mapProgress(progress: VideoLabProgress): { percent: number; message: st
   // Reserve the final 8% for mux finalization and playback certification.
   if (progress.stage === 'certifying') return { percent: Math.min(4, progress.percent * 0.04), message: progress.message };
   if (progress.stage === 'preparing') return { percent: 5, message: 'Preparing Mediabunny encoder…' };
-  if (progress.stage === 'rendering') return { percent: 6 + progress.percent * 0.86, message: progress.message };
+  if (progress.stage === 'rendering') return { percent: 6 + progress.percent * 0.28, message: progress.message };
+  if (progress.stage === 'staging') return { percent: 34 + progress.percent * 0.18, message: progress.message };
+  if (progress.stage === 'encoding') return { percent: 52 + progress.percent * 0.40, message: progress.message };
   if (progress.stage === 'finalizing') return { percent: 94, message: 'Finalizing video container…' };
   return { percent: 100, message: 'Video export complete' };
 }
@@ -118,6 +120,7 @@ export async function exportVideoWithMediabunny(
   await source.renderFrame(0, true);
   throwIfAborted(signal);
 
+  let lastProgressPercent = 1;
   const artifact = await runMediabunnyMainThread({
     canvas: source.canvas,
     width,
@@ -132,7 +135,8 @@ export async function exportVideoWithMediabunny(
     renderFrameAtTime: (timeSeconds) => source.renderFrame(timeSeconds, true),
     onProgress: (progress) => {
       const mapped = mapProgress(progress);
-      onProgress?.(mapped.percent, mapped.message);
+      lastProgressPercent = Math.max(lastProgressPercent, mapped.percent);
+      onProgress?.(lastProgressPercent, mapped.message);
     },
   });
 

@@ -43,7 +43,10 @@ export interface VideoLabStageTimings {
   certificationMs: number;
   setupMs: number;
   renderMs: number;
+  frameTransferMs: number;
+  stagingDrawMs: number;
   encodeSubmitMs: number;
+  peakPendingFrames: number;
   flushMs: number;
   muxFinalizeMs: number;
   blobMs: number;
@@ -71,7 +74,7 @@ export interface VideoLabBenchmarkResult {
 }
 
 export interface VideoLabProgress {
-  stage: 'certifying' | 'preparing' | 'rendering' | 'finalizing' | 'complete';
+  stage: 'certifying' | 'preparing' | 'rendering' | 'staging' | 'encoding' | 'finalizing' | 'complete';
   frame: number;
   totalFrames: number;
   percent: number;

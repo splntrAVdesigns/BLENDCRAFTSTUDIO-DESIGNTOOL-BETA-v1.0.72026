@@ -148,25 +148,25 @@ export const VIDEO_QUALITY_PRESETS: Record<VideoQuality, VideoQualityConfig> = {
   standard: {
     label: 'Standard / Fast Preview',
     bitrate: (w, h) => {
-      if (w >= 3840) return 24_000_000; // 4K preview
-      if (w >= 2560) return 16_000_000; // 1440p preview
-      return 12_000_000; // 1080p preview
+      if (w >= 3840) return 32_000_000; // 4K standard
+      if (w >= 2560) return 18_000_000; // 1440p standard
+      return 10_000_000; // 1080p standard
     },
   },
   high: {
     label: 'High / Balanced',
     bitrate: (w, h) => {
-      if (w >= 3840) return 52_000_000; // 4K dense gradients
-      if (w >= 2560) return 34_000_000; // 1440p dense gradients
-      return 24_000_000; // 1080p dense gradients
+      if (w >= 3840) return 48_000_000; // 4K balanced
+      if (w >= 2560) return 26_000_000; // 1440p balanced
+      return 14_000_000; // 1080p balanced
     },
   },
   ultra: {
     label: 'Max Quality',
     bitrate: (w, h) => {
-      if (w >= 3840) return 90_000_000;
-      if (w >= 2560) return 58_000_000;
-      return 42_000_000;
+      if (w >= 3840) return 64_000_000;
+      if (w >= 2560) return 34_000_000;
+      return 18_000_000;
     },
   },
   max: {

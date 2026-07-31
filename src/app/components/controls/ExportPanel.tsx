@@ -126,7 +126,7 @@ export function ExportPanel({
   // WebM settings
   const [webmPreset, setWebmPreset] = useState<string>('1080p');
   const [webmFps, setWebmFps] = useState(30);
-  const [webmQuality, setWebmQuality] = useState<VideoQuality>('high');
+  const [webmQuality, setWebmQuality] = useState<VideoQuality>('standard');
   // STAGE 3.2: render scale — the highest-leverage speed control. Every
   // per-frame cost (GPU fill, readback, flip, encode) scales with pixel count,
   // so 0.75× ≈ 1.8× faster and 0.5× ≈ 4× faster. 1.0 is unchanged behaviour.
@@ -808,7 +808,7 @@ ${colorInterpExpanded}
                   setVideoFormat(v as 'webm' | 'mp4');
                 }}
                 options={[
-                  { value: 'webm', label: 'WebM (VP9) — smallest files, web-first' },
+                  { value: 'webm', label: 'WebM (VP8) — fast & compatible' },
                   {
                     value: 'mp4',
                     label: mp4Supported === true
@@ -894,7 +894,6 @@ ${colorInterpExpanded}
                   { value: 'standard', label: 'Standard — fast preview' },
                   { value: 'high',     label: 'High — balanced' },
                   { value: 'ultra',    label: 'Ultra — max quality' },
-                  { value: 'sharpMax', label: 'Sharp Max — master / slow' },
                 ]}
                 triggerClassName="border-zinc-700 text-zinc-100"
                 contentClassName="bg-zinc-900 border-zinc-700"

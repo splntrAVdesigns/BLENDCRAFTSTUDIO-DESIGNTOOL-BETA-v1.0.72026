@@ -22,7 +22,8 @@
     "test:phase74a": "node --experimental-strip-types --test tests/exportPhase74AContracts.test.ts",
     "test:phase74b": "node --experimental-strip-types --test tests/exportPhase74BContracts.test.ts",
     "test:phase74c": "node --experimental-strip-types --test tests/exportPhase74CContracts.test.ts",
-    "test:phase74d": "node --experimental-strip-types --test tests/exportPhase74DContracts.test.ts"
+    "test:phase74d": "node --experimental-strip-types --test tests/exportPhase74DContracts.test.ts",
+    "test:phase74e": "vitest run tests/exportPhase74EContracts.test.ts"
   },
   "dependencies": {
     "@eslint/js": "^10.0.1",
