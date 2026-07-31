@@ -14,3 +14,5 @@ export * from './AuthoritativeExportFrameSource';
 
 export * from './ExportFrameTimingDiagnostics';
 export * from './MediabunnyProductionExporter';
+
+export * from './OfflineExportRenderer';

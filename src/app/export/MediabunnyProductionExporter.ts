@@ -1,5 +1,5 @@
 import type { RenderApi } from '../types/gradient';
-import { createAuthoritativeExportFrameSource } from './AuthoritativeExportFrameSource';
+import { createOfflineExportRenderer } from './OfflineExportRenderer';
 import { runMediabunnyMainThread } from './video-lab/mainThreadRunner';
 import type { VideoLabCodec, VideoLabContainer, VideoLabProgress } from './video-lab/types';
 
@@ -28,14 +28,14 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 function mapProgress(progress: VideoLabProgress): { percent: number; message: string } {
-  // Reserve the final 8% for mux finalization and playback certification.
-  if (progress.stage === 'certifying') return { percent: Math.min(4, progress.percent * 0.04), message: progress.message };
-  if (progress.stage === 'preparing') return { percent: 5, message: 'Preparing Mediabunny encoder…' };
-  if (progress.stage === 'rendering') return { percent: 6 + progress.percent * 0.28, message: progress.message };
-  if (progress.stage === 'staging') return { percent: 34 + progress.percent * 0.18, message: progress.message };
-  if (progress.stage === 'encoding') return { percent: 52 + progress.percent * 0.40, message: progress.message };
-  if (progress.stage === 'finalizing') return { percent: 94, message: 'Finalizing video container…' };
-  return { percent: 100, message: 'Video export complete' };
+  // Frame-truth progress: only frames accepted through Mediabunny backpressure
+  // advance the main 90% of the bar.
+  if (progress.stage === 'certifying') return { percent: 0, message: progress.message };
+  if (progress.stage === 'preparing') return { percent: 1, message: progress.message };
+  if (progress.stage === 'encoding') return { percent: 2 + progress.percent * 0.88, message: progress.message };
+  if (progress.stage === 'finalizing') return { percent: 92, message: 'Finalizing video container…' };
+  if (progress.stage === 'complete') return { percent: 97, message: 'Verifying video playback…' };
+  return { percent: 1, message: progress.message };
 }
 
 async function certifyPlayableVideo(blob: Blob, expectedDurationSeconds: number, signal?: AbortSignal): Promise<void> {
@@ -100,29 +100,21 @@ export async function exportVideoWithMediabunny(
   options: MediabunnyProductionExportOptions,
 ): Promise<MediabunnyProductionExportResult> {
   const { api, width, height, fps, durationMs, container, bitrate, filename, signal, onProgress } = options;
-  if (!api.setExportSize || !api.restoreSize) throw new Error('Export-size renderer controls are unavailable.');
-
   const codec: VideoLabCodec = container === 'mp4' ? 'avc1.42001f' : 'vp8';
-  const source = createAuthoritativeExportFrameSource(api);
+  const offline = createOfflineExportRenderer(width, height);
 
   throwIfAborted(signal);
-  onProgress?.(1, 'Preparing authoritative renderer…');
+  onProgress?.(1, 'Preparing independent offline renderer…');
   await api.waitForMaskTextures?.(4000);
-  api.setExportSize(width, height);
-
-  // Let Three.js commit the resized drawing buffer before frame zero.
-  await new Promise<void>((resolve) => {
-    let settled = false;
-    const finish = () => { if (!settled) { settled = true; resolve(); } };
-    requestAnimationFrame(finish);
-    window.setTimeout(finish, 50);
-  });
-  await source.renderFrame(0, true);
-  throwIfAborted(signal);
 
   let lastProgressPercent = 1;
-  const artifact = await runMediabunnyMainThread({
-    canvas: source.canvas,
+  try {
+    // Warm shader programs and upload textures into the independent WebGL context.
+    await api.renderAtTime(0, offline.renderer, { seekMedia: true });
+    throwIfAborted(signal);
+
+    const artifact = await runMediabunnyMainThread({
+    canvas: offline.canvas,
     width,
     height,
     fps,
@@ -132,7 +124,7 @@ export async function exportVideoWithMediabunny(
     bitrate,
     certifyFrames: false,
     signal,
-    renderFrameAtTime: (timeSeconds) => source.renderFrame(timeSeconds, true),
+    renderFrameAtTime: (timeSeconds) => api.renderAtTime(timeSeconds, offline.renderer, { seekMedia: true }),
     onProgress: (progress) => {
       const mapped = mapProgress(progress);
       lastProgressPercent = Math.max(lastProgressPercent, mapped.percent);
@@ -140,9 +132,12 @@ export async function exportVideoWithMediabunny(
     },
   });
 
-  onProgress?.(97, 'Verifying video playback…');
-  await certifyPlayableVideo(artifact.blob, durationMs / 1000, signal);
-  onProgress?.(100, 'Video export complete');
+    onProgress?.(97, 'Verifying video playback…');
+    await certifyPlayableVideo(artifact.blob, durationMs / 1000, signal);
+    onProgress?.(100, 'Video export complete');
 
-  return { blob: artifact.blob, filename, codec, benchmark: artifact.benchmark };
+    return { blob: artifact.blob, filename, codec, benchmark: artifact.benchmark };
+  } finally {
+    offline.dispose();
+  }
 }

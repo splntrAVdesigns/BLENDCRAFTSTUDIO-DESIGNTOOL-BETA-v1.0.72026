@@ -47,6 +47,7 @@ export interface VideoLabStageTimings {
   stagingDrawMs: number;
   encodeSubmitMs: number;
   peakPendingFrames: number;
+  longestFrameMs?: number;
   flushMs: number;
   muxFinalizeMs: number;
   blobMs: number;
@@ -54,7 +55,7 @@ export interface VideoLabStageTimings {
 }
 
 export interface VideoLabBenchmarkResult {
-  phase: '7.3F.1';
+  phase: '7.3F.1' | '7.4F';
   engine: 'mediabunny';
   mode: VideoLabExecutionMode;
   codec: VideoLabCodec;
