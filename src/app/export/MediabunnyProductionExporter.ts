@@ -109,10 +109,9 @@ export async function exportVideoWithMediabunny(
 
   let lastProgressPercent = 1;
   try {
-    // Warm shader programs and upload textures into the independent WebGL context.
-    await api.renderAtTime(0, offline.renderer, { seekMedia: true });
-    throwIfAborted(signal);
-
+    // Phase 7.4F.1: capability selection happens inside the runner before the
+    // first export frame is rendered. Do not warm or mutate the renderer until
+    // the exact requested encoder profile has passed runtime probing.
     const artifact = await runMediabunnyMainThread({
     canvas: offline.canvas,
     width,
@@ -136,6 +135,7 @@ export async function exportVideoWithMediabunny(
     await certifyPlayableVideo(artifact.blob, durationMs / 1000, signal);
     onProgress?.(100, 'Video export complete');
 
+    console.info('[BLENDCRAFT Export 7.4F.1] Encoder capability selected', artifact.benchmark.encoderConfig);
     return { blob: artifact.blob, filename, codec, benchmark: artifact.benchmark };
   } finally {
     offline.dispose();

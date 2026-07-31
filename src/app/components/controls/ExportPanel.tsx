@@ -611,7 +611,7 @@ ${colorInterpExpanded}
       });
 
       saveAs(result.blob, result.filename);
-      console.info('[BLENDCRAFT Export 7.4D]', {
+      console.info('[BLENDCRAFT Export 7.4F.1]', {
         engine: 'mediabunny',
         codec: result.codec,
         container,
@@ -623,7 +623,7 @@ ${colorInterpExpanded}
       }
     } catch (error) {
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        console.error('[BLENDCRAFT Export 7.4D] Mediabunny export failed:', error);
+        console.error('[BLENDCRAFT Export 7.4F.1] Mediabunny export failed:', error);
         toast.error(`Video export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     } finally {

@@ -2,6 +2,7 @@ export type VideoLabCodec = 'avc1.42001f' | 'vp09.00.10.08' | 'vp8';
 export type VideoLabContainer = 'mp4' | 'webm';
 export type VideoLabExecutionMode = 'main-thread' | 'worker';
 export type VideoLabEnvironment = 'figma' | 'vercel' | 'local' | 'unknown';
+export type VideoLabHardwareAcceleration = 'no-preference' | 'prefer-hardware' | 'prefer-software';
 
 export interface VideoLabCapability {
   codec: VideoLabCodec;
@@ -55,7 +56,7 @@ export interface VideoLabStageTimings {
 }
 
 export interface VideoLabBenchmarkResult {
-  phase: '7.3F.1' | '7.4F';
+  phase: '7.3F.1' | '7.4F' | '7.4F.1';
   engine: 'mediabunny';
   mode: VideoLabExecutionMode;
   codec: VideoLabCodec;
@@ -70,6 +71,13 @@ export interface VideoLabBenchmarkResult {
   mimeType: string;
   environment: VideoLabEnvironmentReport;
   certification: FrameCertificationReport;
+  encoderConfig?: {
+    codec: VideoLabCodec;
+    bitrate: number;
+    width: number;
+    height: number;
+    hardwareAcceleration: VideoLabHardwareAcceleration;
+  };
   startedAt: string;
   completedAt: string;
 }

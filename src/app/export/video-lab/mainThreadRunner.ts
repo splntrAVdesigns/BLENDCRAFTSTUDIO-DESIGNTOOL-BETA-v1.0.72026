@@ -7,6 +7,7 @@ import type {
   VideoLabArtifact,
   VideoLabCodec,
   VideoLabProgress,
+  VideoLabHardwareAcceleration,
 } from './types';
 
 type Constructor<T = object> = new (...args: never[]) => T;
@@ -32,12 +33,31 @@ interface MediabunnyVideoSampleSource {
 }
 
 interface MediabunnyRuntime {
+  canEncodeVideo(
+    codec: 'avc' | 'vp9' | 'vp8',
+    options: {
+      width: number;
+      height: number;
+      bitrate: number;
+      hardwareAcceleration: VideoLabHardwareAcceleration;
+      latencyMode?: 'quality' | 'realtime';
+      bitrateMode?: 'constant' | 'variable';
+      alpha?: 'discard' | 'keep';
+    },
+  ): Promise<boolean>;
   Output: Constructor<MediabunnyOutput>;
   Mp4OutputFormat: Constructor;
   WebMOutputFormat: Constructor;
   BufferTarget: Constructor<MediabunnyBufferTarget>;
   VideoSampleSource: new (
-    config: { codec: 'avc' | 'vp9' | 'vp8'; bitrate: number; hardwareAcceleration?: 'prefer-hardware' | 'no-preference' },
+    config: {
+      codec: 'avc' | 'vp9' | 'vp8';
+      bitrate: number;
+      hardwareAcceleration?: VideoLabHardwareAcceleration;
+      latencyMode?: 'quality' | 'realtime';
+      bitrateMode?: 'constant' | 'variable';
+      alpha?: 'discard' | 'keep';
+    },
   ) => MediabunnyVideoSampleSource;
   VideoSample: new (
     source: CanvasImageSource,
@@ -64,7 +84,7 @@ function emit(
 }
 
 function assertRuntime(module: Record<string, unknown>): MediabunnyRuntime {
-  const required = ['Output', 'Mp4OutputFormat', 'WebMOutputFormat', 'BufferTarget', 'VideoSampleSource', 'VideoSample'] as const;
+  const required = ['Output', 'Mp4OutputFormat', 'WebMOutputFormat', 'BufferTarget', 'VideoSampleSource', 'VideoSample', 'canEncodeVideo'] as const;
   for (const key of required) {
     if (typeof module[key] !== 'function') {
       throw new Error(`Installed Mediabunny build is missing the required ${key} export.`);
@@ -77,6 +97,56 @@ function mapCodec(codec: VideoLabCodec): 'avc' | 'vp9' | 'vp8' {
   if (codec === 'avc1.42001f') return 'avc';
   if (codec === 'vp09.00.10.08') return 'vp9';
   return 'vp8';
+}
+
+
+interface SelectedEncoderProfile {
+  codec: 'avc' | 'vp9' | 'vp8';
+  bitrate: number;
+  width: number;
+  height: number;
+  hardwareAcceleration: VideoLabHardwareAcceleration;
+}
+
+async function selectSupportedEncoderProfile(
+  runtime: MediabunnyRuntime,
+  codec: 'avc' | 'vp9' | 'vp8',
+  width: number,
+  height: number,
+  bitrate: number,
+): Promise<SelectedEncoderProfile> {
+  // Start with Mediabunny's recommended browser-selected mode. Only try an
+  // explicit hardware/software preference if the exact requested profile
+  // passes capability probing. Resolution and bitrate are never silently
+  // changed by this selector.
+  const candidates: VideoLabHardwareAcceleration[] = [
+    'no-preference',
+    'prefer-hardware',
+    'prefer-software',
+  ];
+
+  const attempts: string[] = [];
+  for (const hardwareAcceleration of candidates) {
+    const supported = await runtime.canEncodeVideo(codec, {
+      width,
+      height,
+      bitrate,
+      hardwareAcceleration,
+      latencyMode: 'quality',
+      bitrateMode: 'variable',
+      alpha: 'discard',
+    });
+    attempts.push(`${hardwareAcceleration}: ${supported ? 'supported' : 'unsupported'}`);
+    if (supported) {
+      return { codec, bitrate, width, height, hardwareAcceleration };
+    }
+  }
+
+  throw new Error(
+    `No supported ${codec.toUpperCase()} WebM encoder profile exists for ` +
+    `${width}×${height} at ${(bitrate / 1_000_000).toFixed(1)} Mbps. ` +
+    `Capability probes: ${attempts.join(', ')}.`,
+  );
 }
 
 function defaultBitrate(width: number, height: number, fps: number): number {
@@ -123,13 +193,39 @@ export async function runMediabunnyMainThread(
   emit(options.onProgress, { stage: 'preparing', frame: 0, totalFrames, message: 'Preparing independent offline renderer and Mediabunny…' });
   const setupStarted = now();
   const runtime = assertRuntime(await loadMediabunny());
+  const requestedBitrate = options.bitrate ?? defaultBitrate(options.width, options.height, options.fps);
+  const requestedCodec = mapCodec(options.codec);
+  emit(options.onProgress, {
+    stage: 'preparing',
+    frame: 0,
+    totalFrames,
+    message: `Probing ${requestedCodec.toUpperCase()} encoder support…`,
+  });
+  const selectedProfile = await selectSupportedEncoderProfile(
+    runtime,
+    requestedCodec,
+    options.width,
+    options.height,
+    requestedBitrate,
+  );
+  abortIfNeeded(options.signal);
+  emit(options.onProgress, {
+    stage: 'preparing',
+    frame: 0,
+    totalFrames,
+    message: `Encoder ready: ${selectedProfile.codec.toUpperCase()} · ${selectedProfile.hardwareAcceleration}`,
+  });
+
   const target = new runtime.BufferTarget();
   const format = options.container === 'mp4' ? new runtime.Mp4OutputFormat() : new runtime.WebMOutputFormat();
   const output = new runtime.Output({ format, target } as never);
   const source = new runtime.VideoSampleSource({
-    codec: mapCodec(options.codec),
-    bitrate: options.bitrate ?? defaultBitrate(options.width, options.height, options.fps),
-    hardwareAcceleration: 'prefer-hardware',
+    codec: selectedProfile.codec,
+    bitrate: selectedProfile.bitrate,
+    hardwareAcceleration: selectedProfile.hardwareAcceleration,
+    latencyMode: 'quality',
+    bitrateMode: 'variable',
+    alpha: 'discard',
   });
   output.addVideoTrack(source, { frameRate: options.fps });
   await output.start();
@@ -195,7 +291,7 @@ export async function runMediabunnyMainThread(
   const completedAt = new Date().toISOString();
 
   const benchmark = {
-    phase: '7.4F' as const,
+    phase: '7.4F.1' as const,
     engine: 'mediabunny' as const,
     mode: 'main-thread' as const,
     codec: options.codec,
@@ -223,6 +319,13 @@ export async function runMediabunnyMainThread(
     mimeType: type,
     environment: captureVideoLabEnvironment(),
     certification,
+    encoderConfig: {
+      codec: options.codec,
+      bitrate: selectedProfile.bitrate,
+      width: selectedProfile.width,
+      height: selectedProfile.height,
+      hardwareAcceleration: selectedProfile.hardwareAcceleration,
+    },
     startedAt,
     completedAt,
   };
