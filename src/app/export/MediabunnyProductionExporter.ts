@@ -1,6 +1,6 @@
 import type { RenderApi } from '../types/gradient';
 import { createOfflineExportRenderer } from './OfflineExportRenderer';
-import { runMediabunnyMainThread } from './video-lab/mainThreadRunner';
+import { runDirectWebCodecsWorkerExport } from './DirectWebCodecsWorkerExporter';
 import type { VideoLabCodec, VideoLabContainer, VideoLabProgress } from './video-lab/types';
 
 export interface MediabunnyProductionExportOptions {
@@ -20,7 +20,7 @@ export interface MediabunnyProductionExportResult {
   blob: Blob;
   filename: string;
   codec: VideoLabCodec;
-  benchmark: Awaited<ReturnType<typeof runMediabunnyMainThread>>['benchmark'];
+  benchmark: Awaited<ReturnType<typeof runDirectWebCodecsWorkerExport>>['benchmark'];
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -112,7 +112,7 @@ export async function exportVideoWithMediabunny(
     // Phase 7.4F.1: capability selection happens inside the runner before the
     // first export frame is rendered. Do not warm or mutate the renderer until
     // the exact requested encoder profile has passed runtime probing.
-    const artifact = await runMediabunnyMainThread({
+    const artifact = await runDirectWebCodecsWorkerExport({
     canvas: offline.canvas,
     width,
     height,
@@ -121,7 +121,6 @@ export async function exportVideoWithMediabunny(
     codec,
     container,
     bitrate,
-    certifyFrames: false,
     signal,
     renderFrameAtTime: (timeSeconds) => api.renderAtTime(timeSeconds, offline.renderer, { seekMedia: true }),
     onProgress: (progress) => {
@@ -135,7 +134,7 @@ export async function exportVideoWithMediabunny(
     await certifyPlayableVideo(artifact.blob, durationMs / 1000, signal);
     onProgress?.(100, 'Video export complete');
 
-    console.info('[BLENDCRAFT Export 7.4F.1] Encoder capability selected', artifact.benchmark.encoderConfig);
+    console.info('[BLENDCRAFT Export 7.4G] Worker export complete', artifact.benchmark.encoderConfig);
     return { blob: artifact.blob, filename, codec, benchmark: artifact.benchmark };
   } finally {
     offline.dispose();

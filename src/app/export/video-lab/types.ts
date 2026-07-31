@@ -56,7 +56,7 @@ export interface VideoLabStageTimings {
 }
 
 export interface VideoLabBenchmarkResult {
-  phase: '7.3F.1' | '7.4F' | '7.4F.1';
+  phase: '7.3F.1' | '7.4F' | '7.4F.1' | '7.4G';
   engine: 'mediabunny';
   mode: VideoLabExecutionMode;
   codec: VideoLabCodec;
@@ -80,6 +80,7 @@ export interface VideoLabBenchmarkResult {
   };
   startedAt: string;
   completedAt: string;
+  timeToFirstEncodedChunkMs?: number;
 }
 
 export interface VideoLabProgress {

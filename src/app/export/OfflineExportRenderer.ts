@@ -29,9 +29,9 @@ export function createOfflineExportRenderer(
 
   const renderer = new THREE.WebGLRenderer({
     canvas,
-    antialias: true,
+    antialias: false,
     alpha: false,
-    preserveDrawingBuffer: true,
+    preserveDrawingBuffer: false,
     premultipliedAlpha: false,
     precision: 'highp',
     powerPreference: 'high-performance',
