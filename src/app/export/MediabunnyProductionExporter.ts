@@ -134,8 +134,15 @@ export async function exportVideoWithMediabunny(
     await certifyPlayableVideo(artifact.blob, durationMs / 1000, signal);
     onProgress?.(100, 'Video export complete');
 
-    console.info('[BLENDCRAFT Export 7.4G] Worker export complete', artifact.benchmark.encoderConfig);
-    return { blob: artifact.blob, filename, codec, benchmark: artifact.benchmark };
+    const selectedContainer = artifact.benchmark.container;
+    const selectedCodec = artifact.benchmark.codec;
+    const baseName = filename.replace(/\.(webm|mp4)$/i, '');
+    const selectedFilename = `${baseName}.${selectedContainer}`;
+    console.info('[BLENDCRAFT Export 7.4H] Measured codec export complete', {
+      encoder: artifact.benchmark.encoderConfig,
+      selection: artifact.benchmark.measuredCodecSelection,
+    });
+    return { blob: artifact.blob, filename: selectedFilename, codec: selectedCodec, benchmark: artifact.benchmark };
   } finally {
     offline.dispose();
   }

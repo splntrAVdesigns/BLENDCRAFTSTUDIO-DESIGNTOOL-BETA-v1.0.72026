@@ -795,37 +795,17 @@ ${colorInterpExpanded}
             <div className="space-y-2">
               <Label>Format</Label>
               <SelectWrapper
-                value={videoFormat}
-                onValueChange={(v) => {
-                  if (v === 'mp4' && mp4Supported !== true) {
-                    toast.error(
-                      mp4Supported === null
-                        ? 'Still checking H.264 support — one moment.'
-                        : 'This environment cannot encode H.264 (common in embedded previews and Electron hosts). Use WebM here, or test MP4 in a standalone Chrome/Edge tab.'
-                    );
-                    return;
-                  }
-                  setVideoFormat(v as 'webm' | 'mp4');
-                }}
+                value="webm"
+                onValueChange={() => setVideoFormat('webm')}
                 options={[
-                  { value: 'webm', label: 'WebM (VP8) — fast & compatible' },
-                  {
-                    value: 'mp4',
-                    label: mp4Supported === true
-                      ? 'MP4 (H.264) — universal playback'
-                      : mp4Supported === null
-                        ? 'MP4 (H.264) — checking support…'
-                        : 'MP4 (H.264) — unavailable in this environment',
-                  },
+                  { value: 'webm', label: 'Video — best compatible format' },
                 ]}
                 triggerClassName="border-zinc-700 text-zinc-100"
                 contentClassName="bg-zinc-900 border-zinc-700"
               />
-              {videoFormat === 'mp4' && (
-                <p className="text-[10px] text-zinc-500">
-                  Encoded with hardware H.264. If your GPU lacks an H.264 encoder, export falls back to WebM automatically.
-                </p>
-              )}
+              <p className="text-[10px] text-zinc-500">
+                BLENDCRAFT measures H.264, VP9 and VP8 on this device before export, then uses the fastest certified profile.
+              </p>
             </div>
 
             {/* Resolution preset */}
@@ -985,7 +965,7 @@ ${colorInterpExpanded}
             <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 space-y-1.5">
               <Label className="text-[10px] text-zinc-500 block">Export summary</Label>
               <p className="text-sm font-medium text-zinc-100">
-                {summaryW} × {summaryH} · {webmFps} fps · {effectiveDurationSec.toFixed(effectiveDurationSec % 1 === 0 ? 0 : 2)}s · {videoFormat === 'mp4' ? 'MP4 H.264' : 'Production WebM'}
+                {summaryW} × {summaryH} · {webmFps} fps · {effectiveDurationSec.toFixed(effectiveDurationSec % 1 === 0 ? 0 : 2)}s · Production Video · auto codec
               </p>
               <div className="flex items-center gap-3 flex-wrap">
                 {/* Frame count with cap warning */}
@@ -1055,7 +1035,7 @@ ${colorInterpExpanded}
               ) : (
                 <>
                   <Video className="w-4 h-4 mr-2" />
-                  Export {videoFormat === 'mp4' ? 'MP4' : 'WebM'}
+                  Export Video
                 </>
               )}
             </Button>

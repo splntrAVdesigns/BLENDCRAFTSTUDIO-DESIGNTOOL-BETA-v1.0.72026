@@ -15,6 +15,17 @@ interface Options {
   onProgress?: (progress: VideoLabProgress) => void;
 }
 
+interface SelectedProfile {
+  webCodec: VideoLabCodec;
+  mediaCodec: 'avc' | 'vp9' | 'vp8';
+  container: VideoLabContainer;
+  acceleration: 'no-preference' | 'prefer-hardware' | 'prefer-software';
+  label: string;
+  measuredFps: number;
+  firstChunkMs?: number;
+  elapsedMs?: number;
+}
+
 const now = () => performance.now();
 
 function emit(options: Options, stage: VideoLabProgress['stage'], frame: number, totalFrames: number, message: string, percent: number) {
@@ -37,17 +48,33 @@ export async function runDirectWebCodecsWorkerExport(options: Options): Promise<
   let videoFrameMs = 0;
   let resolveSlot: (() => void) | null = null;
   let selectedConfig: VideoEncoderConfig | undefined;
+  let selectedProfile: SelectedProfile | undefined;
+  let candidateReport: unknown[] = [];
 
   const abort = () => worker.postMessage({ type: 'cancel' });
   options.signal?.addEventListener('abort', abort, { once: true });
 
   try {
-    const completion = new Promise<{ buffer: ArrayBuffer; maxQueueSize: number; timeToFirstChunkMs: number; encodeMs: number; finalizeMs: number }>((resolve, reject) => {
+    const completion = new Promise<{ buffer: ArrayBuffer; maxQueueSize: number; timeToFirstChunkMs: number; encodeMs: number; finalizeMs: number; selected: SelectedProfile }>((resolve, reject) => {
       worker.onerror = (event) => reject(new Error(event.message || 'Video export worker failed.'));
       worker.onmessage = (event) => {
         const message = event.data as Record<string, any>;
+        if (message.type === 'probing' || message.type === 'probe-progress') {
+          emit(options, 'certifying', 0, totalFrames, message.message || 'Measuring available encoders…', 1);
+          return;
+        }
         if (message.type === 'ready') {
           selectedConfig = message.config;
+          selectedProfile = message.selected;
+          candidateReport = message.candidates ?? [];
+          emit(
+            options,
+            'preparing',
+            0,
+            totalFrames,
+            `Selected ${message.selected?.label ?? 'video encoder'} · ${Number(message.selected?.measuredFps ?? 0).toFixed(1)} fps preflight`,
+            2,
+          );
           return;
         }
         if (message.type === 'accepted') {
@@ -74,7 +101,7 @@ export async function runDirectWebCodecsWorkerExport(options: Options): Promise<
       };
     });
 
-    emit(options, 'preparing', 0, totalFrames, 'Starting direct WebCodecs worker encoder…', 1);
+    emit(options, 'certifying', 0, totalFrames, 'Measuring available video encoders…', 1);
     worker.postMessage({
       type: 'init',
       container: options.container,
@@ -86,12 +113,14 @@ export async function runDirectWebCodecsWorkerExport(options: Options): Promise<
     });
 
     await new Promise<void>((resolve, reject) => {
-      const timeout = window.setTimeout(() => reject(new Error('Video encoder worker did not initialize within 10 seconds.')), 10_000);
+      const timeout = window.setTimeout(() => reject(new Error('Codec measurement did not complete within 25 seconds.')), 25_000);
       const handler = (event: MessageEvent) => {
         if (event.data?.type === 'ready') {
           window.clearTimeout(timeout);
           worker.removeEventListener('message', handler);
           selectedConfig = event.data.config;
+          selectedProfile = event.data.selected;
+          candidateReport = event.data.candidates ?? [];
           resolve();
         } else if (event.data?.type === 'error') {
           window.clearTimeout(timeout);
@@ -134,13 +163,17 @@ export async function runDirectWebCodecsWorkerExport(options: Options): Promise<
     emit(options, 'finalizing', encodedFrames, totalFrames, 'Flushing encoder and finalizing video…', 88);
     worker.postMessage({ type: 'finish' });
     const result = await completion;
-    const blob = new Blob([result.buffer], { type: options.container === 'mp4' ? 'video/mp4' : 'video/webm;codecs=vp8' });
+    selectedProfile = result.selected ?? selectedProfile;
+    if (!selectedProfile) throw new Error('The export worker did not report a selected codec profile.');
+
+    const mimeType = selectedProfile.container === 'mp4' ? 'video/mp4' : `video/webm;codecs=${selectedProfile.mediaCodec}`;
+    const blob = new Blob([result.buffer], { type: mimeType });
     const benchmark: VideoLabBenchmarkResult = {
-      phase: '7.4G',
+      phase: '7.4H',
       engine: 'mediabunny',
       mode: 'worker',
-      codec: options.codec,
-      container: options.container,
+      codec: selectedProfile.webCodec,
+      container: selectedProfile.container,
       width: options.width,
       height: options.height,
       fps: options.fps,
@@ -165,18 +198,27 @@ export async function runDirectWebCodecsWorkerExport(options: Options): Promise<
       environment: captureVideoLabEnvironment(),
       certification: { passed: true, samples: [], uniqueHashes: 0, reason: 'Post-encode playback certification is authoritative.' },
       encoderConfig: {
-        codec: options.codec,
+        codec: selectedProfile.webCodec,
         bitrate: options.bitrate,
         width: options.width,
         height: options.height,
-        hardwareAcceleration: (selectedConfig?.hardwareAcceleration ?? 'no-preference') as any,
+        hardwareAcceleration: (selectedConfig?.hardwareAcceleration ?? selectedProfile.acceleration) as any,
       },
       startedAt,
       completedAt: new Date().toISOString(),
       timeToFirstEncodedChunkMs: result.timeToFirstChunkMs,
+      measuredCodecSelection: {
+        selectedLabel: selectedProfile.label,
+        selectedMeasuredFps: selectedProfile.measuredFps,
+        candidates: candidateReport,
+      },
     };
     emit(options, 'complete', totalFrames, totalFrames, 'Video encoded', 97);
-    return { blob, suggestedFilename: `blendcraft-${Date.now()}.${options.container}`, benchmark };
+    return {
+      blob,
+      suggestedFilename: `blendcraft-${Date.now()}.${selectedProfile.container}`,
+      benchmark,
+    };
   } finally {
     options.signal?.removeEventListener('abort', abort);
     worker.terminate();
