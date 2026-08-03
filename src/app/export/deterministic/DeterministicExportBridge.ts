@@ -85,12 +85,33 @@ export async function runDeterministicExportSession(
     });
     input.api.pauseAnimation?.({ resetExportPhase: input.resetExportPhase });
     input.api.setExportSize?.(resolution.width, resolution.height);
-    await input.api.waitForMaskTextures?.();
+
+    // PHASE 7.7b DIAGNOSTIC: a hang here looks IDENTICAL from outside to a
+    // hang in the per-frame loop — the progress bar just never starts. Each
+    // step is timed and logged so a stuck warmup is distinguishable from a
+    // stuck render loop.
+    const timedStep = async <T,>(label: string, run: () => Promise<T> | T): Promise<T> => {
+      const startedAt = performance.now();
+      const watchdog = window.setTimeout(() => {
+        console.warn(`[BLENDCRAFT Video Export] "${label}" has not resolved after 3000 ms.`);
+      }, 3_000);
+      try {
+        const result = await run();
+        console.info(`[BLENDCRAFT Video Export] "${label}" completed in ${(performance.now() - startedAt).toFixed(0)} ms`);
+        return result;
+      } finally {
+        window.clearTimeout(watchdog);
+      }
+    };
+
+    await timedStep('waitForMaskTextures', () => input.api.waitForMaskTextures?.());
 
     // Frame zero doubles as shader warmup and a hard resolution certification
     // before a single frame is committed to the encoder.
-    await input.api.renderAtTime(0, undefined, { seekMedia: true });
-    const warmupPixels = input.api.readFramePixels?.() ?? null;
+    const warmupPixels = await timedStep('renderAtTime(0) warmup', async () => {
+      await input.api.renderAtTime(0, undefined, { seekMedia: true });
+      return input.api.readFramePixels?.() ?? null;
+    });
     assertExactRecordingResolution(
       resolution,
       warmupPixels

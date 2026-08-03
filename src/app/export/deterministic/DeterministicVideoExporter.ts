@@ -177,6 +177,7 @@ export async function exportDeterministicVideo(
   let renderMs = 0;
   let frameCaptureMs = 0;
   let framesInFlight = 0;
+  let renderedFrames = 0;
   let encodedFrames = 0;
   let maxQueueSize = 0;
   let encodeMs = 0;
@@ -231,15 +232,8 @@ export async function exportDeterministicVideo(
           return;
         }
         if (message.type === 'encoded') {
+          // Encoder output count only; the render loop owns progress reporting.
           encodedFrames = message.encodedFrames;
-          const percent = 4 + (encodedFrames / totalFrames) * 86;
-          input.onProgress?.({
-            phase: 'encoding',
-            frame: encodedFrames,
-            totalFrames,
-            percent,
-            label: `Encoding frame ${encodedFrames}/${totalFrames}…`,
-          });
           return;
         }
         if (message.type === 'complete') {
@@ -292,8 +286,37 @@ export async function exportDeterministicVideo(
       // The timeline position is derived purely from the frame index, so the
       // rendered content is identical on every machine and every run.
       const renderStartedAt = performance.now();
-      await input.renderFrame(frameIndex / fps, frameIndex);
-      renderMs += performance.now() - renderStartedAt;
+      // PHASE 7.7b DIAGNOSTIC WATCHDOG: probes proved the encoder and the
+      // capture path are both fast (single-digit ms). If a real export still
+      // stalls, the only remaining suspect is renderFrame() itself — the real
+      // renderAtTime() call with shaders/masks/post-FX, not a synthetic clear.
+      // A hung await here previously produced ZERO signal: no log, no error,
+      // just a frozen progress bar. This makes a stall loud and diagnosable
+      // instead of silent.
+      let renderWatchdogFired = false;
+      const renderWatchdog = window.setTimeout(() => {
+        renderWatchdogFired = true;
+        console.warn(
+          `[BLENDCRAFT Video Export] renderFrame(${frameIndex}) has not resolved after 3000 ms. `
+          + `If this is the only warning you ever see, the render call itself is hung — `
+          + `most likely inside renderAtTime(), waitForMaskTextures(), or a video-layer seek.`,
+        );
+      }, 3_000);
+      try {
+        await input.renderFrame(frameIndex / fps, frameIndex);
+      } finally {
+        window.clearTimeout(renderWatchdog);
+      }
+      const renderFrameMs = performance.now() - renderStartedAt;
+      renderMs += renderFrameMs;
+      if (renderWatchdogFired) {
+        console.warn(`[BLENDCRAFT Video Export] renderFrame(${frameIndex}) eventually resolved after ${renderFrameMs.toFixed(0)} ms.`);
+      }
+      // First few frames and every 25th thereafter, so a real export prints a
+      // visible heartbeat in the console rather than going quiet for a minute.
+      if (frameIndex < 3 || frameIndex % 25 === 0) {
+        console.info(`[BLENDCRAFT Video Export] frame ${frameIndex}/${totalFrames} rendered in ${renderFrameMs.toFixed(1)} ms`);
+      }
 
       if (fatalError) throw fatalError;
       if (input.signal?.aborted) throw abortError(input.signal);
@@ -320,6 +343,19 @@ export async function exportDeterministicVideo(
         { type: 'frame', index: frameIndex, frame, keyFrame: frameIndex % keyFrameInterval === 0 },
         [frame],
       );
+
+      // PHASE 7.7a: progress is driven by frames SUBMITTED, not by encoder
+      // output. The encoder holds frames in its lookahead buffer, so reporting
+      // only encoded chunks made the UI sit frozen at "1/150" while the pipeline
+      // was in fact working. Submitted frames are the honest measure of progress.
+      renderedFrames = frameIndex + 1;
+      input.onProgress?.({
+        phase: 'encoding',
+        frame: renderedFrames,
+        totalFrames,
+        percent: 4 + (renderedFrames / totalFrames) * 86,
+        label: `Rendering frame ${renderedFrames}/${totalFrames} · encoded ${encodedFrames}`,
+      });
 
       // ---- Backpressure -------------------------------------------------
       // Without this the render loop outruns the encoder and the worker piles up
@@ -364,7 +400,7 @@ export async function exportDeterministicVideo(
       height: input.height,
       fps,
       bitrate,
-      renderedFrames: totalFrames,
+      renderedFrames,
       encodedFrames,
       totalFrames,
       timelineDurationMs,

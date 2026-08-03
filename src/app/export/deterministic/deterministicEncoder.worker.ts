@@ -59,8 +59,10 @@ interface Candidate {
 function buildCandidates(message: WorkerInitMessage): Candidate[] {
   // The VP9 codec string is sized to the ACTUAL resolution and frame rate.
   const vp9 = buildVp9CodecString(message.width, message.height, message.fps, message.bitrate);
+  // PHASE 7.7a: the 'prefer-hardware' VP9 probe was removed. Hardware VP9
+  // ENCODE is not present on consumer hardware, so that probe cost a round trip
+  // and then silently resolved to the same software encoder anyway.
   return [
-    { codecLabel: 'VP9', codecString: vp9, codecId: 'V_VP9', hardwareAcceleration: 'prefer-hardware' },
     { codecLabel: 'VP9', codecString: vp9, codecId: 'V_VP9', hardwareAcceleration: 'no-preference' },
     { codecLabel: 'VP8', codecString: 'vp8', codecId: 'V_VP8', hardwareAcceleration: 'no-preference' },
   ];
@@ -73,8 +75,12 @@ function createConfig(message: WorkerInitMessage, candidate: Candidate): VideoEn
     height: message.height,
     bitrate: message.bitrate,
     framerate: message.fps,
-    // Quality mode unlocks lookahead and proper rate control. This is the single
-    // biggest visual-quality difference versus the MediaRecorder path.
+    // PHASE 7.7b: reverted the 7.7a change to 'realtime'. On-device probing
+    // (BLENDCRAFT_ENCODER_PROBE.js) showed VP9 'quality' mode at 45.5 fps vs
+    // 'realtime' at 35.2 fps — quality mode was faster, not slower. My 7.7a
+    // theory that libvpx's realtime mode was required for usable speed was
+    // wrong for this machine. Back to 'quality' for the better rate control it
+    // provides; the actual bottleneck is proven to be upstream of the encoder.
     latencyMode: 'quality',
     bitrateMode: 'variable',
     hardwareAcceleration: candidate.hardwareAcceleration,

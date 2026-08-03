@@ -85,12 +85,13 @@ export default defineConfig({
     minify: 'terser',
     terserOptions: {
       compress: {
-        drop_console: true, // Remove verbose console logs in production
-        // PATCHED HIGH-06: console.warn intentionally kept — silencing it suppresses
-        // WebGL context errors, Three.js deprecation notices, and shader compile
-        // warnings that are critical for debugging production issues.
-        // Only drop the truly verbose logging calls.
-        pure_funcs: ['console.debug', 'console.log', 'console.info'],
+        // PHASE 7.7a: drop_console was TRUE, which stripped every console call
+        // from the Vercel production build — including console.warn/error and
+        // the entire export diagnostic block. That made production export
+        // failures completely undiagnosable. Keep info/warn/error; drop only
+        // the genuinely verbose debug/log calls.
+        drop_console: false,
+        pure_funcs: ['console.debug', 'console.log'],
       },
     },
     // Increase chunk size warning limit for complex app
