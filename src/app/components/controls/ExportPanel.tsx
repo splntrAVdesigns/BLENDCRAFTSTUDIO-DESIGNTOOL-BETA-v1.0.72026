@@ -31,11 +31,9 @@ import {
   VIDEO_QUALITY_PRESETS,
   type VideoQuality,
   type ExportPreset,
-  exportWebMFromCanvas,
 } from '../../utils/exportUtils';
 import { confirmWebMExportPlan, planWebMExport, WEBM_FRAME_WARN_LIMIT, WEBM_FRAME_CONFIRM_LIMIT } from '../../utils/exportPlanner';
 import { getMediaSourceMaxResolution } from '../../media';
-import type { LoopVerificationResult } from '../../utils/loopVerification';
 import {
   beginExportStatus,
   endExportStatus,
@@ -45,6 +43,7 @@ import {
 } from '../../state/exportStatus';
 import { createLayerExportDurationPlan } from '../../export/ExportDurationPlan';
 import { isolatePreview } from '../../export/recording/PreviewIsolationController';
+import { exportRealtimeHiddenCanvasVideo } from '../../export/RealtimeHiddenCanvasProductionExporter';
 import { VideoExportLabPanel } from './VideoExportLabPanel';
 
 interface ExportPanelProps {
@@ -549,53 +548,19 @@ ${colorInterpExpanded}
       safeSetExportState(Math.max(1, exportProgress), 'Cancelling video export…');
       exportAbortController.abort('Export cancelled by user.');
     });
-    safeSetExportState(0, 'Preparing VP9/WebM export…');
-
-    const previewIsolation = isolatePreview({
-      sourceCanvas: canvas,
-      readFramePixels: api.readFramePixels,
-    });
+    safeSetExportState(0, 'Preparing realtime video export…');
 
     try {
-      api.configureExportTimeline?.({
-        fps: plan.fps,
-        totalFrames: plan.totalFrames,
-        durationMs: plan.durationMs,
-        loopLockEnabled: durationPlan.loopLockEnabled,
-      });
-      api.pauseAnimation?.({ resetExportPhase: durationPlan.loopLockEnabled });
-
-      const bakeStatus = await api.prepareAudioExport?.();
-      if (bakeStatus) safeSetExportState(1, bakeStatus);
-
-      await exportWebMFromCanvas({
-        canvas,
-        renderFrameAtTime: (timeSeconds: number) =>
-          api.renderAtTime(timeSeconds, undefined, { seekMedia: false }),
-        fps: plan.fps,
-        durationMs: plan.durationMs,
-        filename: `gradient-${plan.width}x${plan.height}-${plan.fps}fps.webm`,
-        quality: plan.quality,
+      await exportRealtimeHiddenCanvasVideo({
+        api,
+        sourceCanvas: canvas,
         width: plan.width,
         height: plan.height,
-        getLiveCanvas: () => api.getCanvas(),
-        getReadFramePixels: () => api.readFramePixels?.() ?? null,
-        setExportSize: (w: number, h: number) => api.setExportSize?.(w, h),
-        restoreSize: () => api.restoreSize?.(),
-        codecSafety: plan.codecSafety,
-        getFlashOverlayFrame: (timeSeconds: number) =>
-          api.getExportFlashOverlay?.(timeSeconds) ?? null,
-        verifyLoop: durationPlan.loopLockEnabled,
-        onLoopVerified: (result: LoopVerificationResult) => {
-          if (!isMountedRef.current || result.error) return;
-          if (result.seamless) {
-            toast.success(`Loop verified — seamless wrap (${result.matchLabel} match)`);
-          } else {
-            toast.warning(
-              `Loop wrap measured at ${result.matchLabel} match. The file exported, but one animated source may not complete a full cycle.`,
-            );
-          }
-        },
+        fps: plan.fps,
+        durationMs: plan.durationMs,
+        quality: webmQuality === 'max' ? 'ultra' : webmQuality,
+        resetExportPhase: durationPlan.loopLockEnabled,
+        filename: `gradient-${plan.width}x${plan.height}-${plan.fps}fps.webm`,
         signal: exportAbortController.signal,
         onProgress: (progress, message) => safeSetExportState(progress, message || ''),
       });
@@ -606,21 +571,12 @@ ${colorInterpExpanded}
       }
     } catch (error) {
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        console.error('[BLENDCRAFT Export 7.4R] WebM export failed:', error);
+        console.error('[BLENDCRAFT Video Export] Production export failed:', error);
         toast.error(`Video export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     } finally {
-      try { previewIsolation.dispose(); } catch {}
       if (exportAbortControllerRef.current === exportAbortController) {
         exportAbortControllerRef.current = null;
-      }
-      api.finishAudioExport?.();
-      if (api.cleanupExportSession) {
-        await api.cleanupExportSession();
-      } else {
-        api.clearExportTimeline?.();
-        api.resumeAnimation?.();
-        api.restoreSize?.();
       }
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
         await new Promise((resolve) => setTimeout(resolve, 700));

@@ -18,7 +18,7 @@ test('codec policy preserves VP9, VP8, generic WebM fallback order', () => {
   assert.equal(selectRecordingCodec(FakeRecorder as unknown as typeof MediaRecorder).codecLabel, 'VP8');
 });
 
-test('1080p high profile uses certified 40 Mbps and short chunk timeslices', () => {
+test('1080p high profile uses the Phase 7.5 16 Mbps production target and short chunk timeslices', () => {
   const profile = resolveRecordingProfile({
     width: 1920,
     height: 1080,
@@ -26,7 +26,7 @@ test('1080p high profile uses certified 40 Mbps and short chunk timeslices', () 
     quality: 'high',
     durationMs: 5_000,
   });
-  assert.equal(profile.videoBitsPerSecond, 40_000_000);
+  assert.equal(profile.videoBitsPerSecond, 16_000_000);
   assert.equal(profile.dataTimesliceMs, 1_000);
 });
 
@@ -38,8 +38,8 @@ test('non-exact resolutions scale bitrate without exceeding the production cap',
     quality: 'high',
     durationMs: 5_000,
   });
-  assert.ok(profile.videoBitsPerSecond > 40_000_000);
-  assert.ok(profile.videoBitsPerSecond <= 60_000_000);
+  assert.ok(profile.videoBitsPerSecond > 16_000_000);
+  assert.ok(profile.videoBitsPerSecond <= 32_000_000);
 });
 
 test('quality certification reports frame completion and actual bitrate', () => {
