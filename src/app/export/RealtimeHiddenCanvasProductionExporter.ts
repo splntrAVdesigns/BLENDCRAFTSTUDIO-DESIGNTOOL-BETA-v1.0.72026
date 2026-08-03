@@ -1,5 +1,5 @@
 import { exportWithProductionRecordingEngine, type ProductionRecordingRenderApi } from './recording/ProductionRecordingExportBridge';
-import { certifyWebMPlayback, type WebMPlaybackCertification } from './recording/WebMPlaybackCertification';
+import { certifyDeterministicTimeline, type DeterministicTimelineCertification } from './DeterministicTimelineCertification';
 import type { RecordingQuality, RecordingSessionResult } from './recording/types';
 
 export interface RealtimeHiddenCanvasExportInput {
@@ -16,7 +16,7 @@ export interface RealtimeHiddenCanvasExportInput {
   readonly onProgress?: (progress: number, message: string) => void;
 }
 
-type PlaybackCertification = WebMPlaybackCertification;
+type PlaybackCertification = DeterministicTimelineCertification;
 
 function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -60,11 +60,14 @@ export async function exportRealtimeHiddenCanvasVideo(
       onProgress: input.onProgress,
     });
 
-    input.onProgress?.(97, 'Certifying video playback…');
-    const playback = await certifyWebMPlayback({
+    input.onProgress?.(97, 'Certifying deterministic timeline…');
+    const playback = await certifyDeterministicTimeline({
       blob: result.blob,
       expectedDurationMs: input.durationMs,
       fps: input.fps,
+      expectedWidth: input.width,
+      expectedHeight: input.height,
+      diagnostics: result.diagnostics,
     });
     input.onProgress?.(99, 'Preparing download…');
     downloadBlob(result.blob, input.filename);
@@ -78,7 +81,10 @@ export async function exportRealtimeHiddenCanvasVideo(
       playbackDurationSec: playback.durationSeconds,
       playbackWidth: playback.width,
       playbackHeight: playback.height,
-      playbackDurationSource: playback.durationSource,
+      playbackTimelineAuthority: 'frame-count-and-fps',
+      playbackExpectedFrames: playback.expectedFrames,
+      playbackPublishedFrames: playback.publishedFrames,
+      playbackLastTimestampSec: playback.lastTimestampSeconds,
       diagnostics: result.diagnostics,
     });
     return { ...result, playback };
