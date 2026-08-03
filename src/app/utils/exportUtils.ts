@@ -1029,21 +1029,28 @@ async function assertPlayableVideoBlob(blob: Blob, label: string, signal?: Abort
 }
 
 /**
- * Phase 7.4C: flush must continue making dequeue progress. An opaque multi-minute
- * flush that never decreases encodeQueueSize is treated as an encoder failure,
- * rather than downloading a frozen or undecodable container.
+ * Phase 7.4R.1: wait for the authoritative final flush without treating a
+ * temporarily unchanged encodeQueueSize as proof of encoder failure.
+ *
+ * Chromium software VP9 can continue processing internally while the public
+ * queue count remains unchanged. Queue depth is therefore diagnostic/progress
+ * information only. Actual failures come from VideoEncoder.error, flush()
+ * rejection, explicit cancellation, or the browser terminating the codec.
  */
 async function flushEncoderWithLiveness(
   encoder: VideoEncoder,
   signal?: AbortSignal,
   onQueue?: (remaining: number) => void,
 ): Promise<void> {
-  let lastQueue = Math.max(0, (encoder as any).encodeQueueSize ?? 0);
-  let lastProgressAt = performance.now();
   let finished = false;
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const flushPromise = encoder.flush().finally(() => { finished = true; });
-  const watchdog = new Promise<never>((_, reject) => {
+  const flushPromise = encoder.flush().finally(() => {
+    finished = true;
+    if (pollTimer !== null) clearTimeout(pollTimer);
+  });
+
+  const cancellationPromise = new Promise<never>((_, reject) => {
     const poll = () => {
       if (finished) return;
       if (signal?.aborted) {
@@ -1052,25 +1059,12 @@ async function flushEncoderWithLiveness(
       }
       const queue = Math.max(0, (encoder as any).encodeQueueSize ?? 0);
       onQueue?.(queue);
-      if (queue < lastQueue) {
-        lastQueue = queue;
-        lastProgressAt = performance.now();
-      }
-      const hiddenAllowance = typeof document !== 'undefined' && document.visibilityState === 'hidden' ? 90000 : 30000;
-      if (queue > 0 && performance.now() - lastProgressAt > hiddenAllowance) {
-        reject(new Error(
-          document.visibilityState === 'hidden'
-            ? 'Video encoding stalled while the BLENDCRAFT tab was in the background. Keep the tab visible during export and retry.'
-            : `Video encoder stalled with ${queue} frame${queue === 1 ? '' : 's'} remaining.`,
-        ));
-        return;
-      }
-      setTimeout(poll, 250);
+      pollTimer = setTimeout(poll, 250);
     };
     poll();
   });
 
-  await Promise.race([flushPromise, watchdog]);
+  await Promise.race([flushPromise, cancellationPromise]);
 }
 
 export function cleanupExportResources(): void {
@@ -1377,6 +1371,9 @@ export async function exportWebMFromCanvas(options: {
   // fixed bitrate than a smooth gradient — and without per-phase timing that's
   // indistinguishable from a regression.
   const phaseTimers = { renderMs: 0, queueWaitMs: 0, flushMs: 0, startedAt: performance.now() };
+  let encodedChunkCount = 0;
+  let lastEncodedChunkAt = 0;
+  let failurePhase = 'initializing';
   const finalizationTimers = createExportFinalizationTimings();
 
   const targetWidth = Math.max(2, Math.round(options.width || options.canvas.width));
@@ -1459,6 +1456,8 @@ export async function exportWebMFromCanvas(options: {
       const Encoder = (globalThis as any).VideoEncoder;
       encoder = new Encoder({
         output: (chunk: EncodedVideoChunk) => {
+          encodedChunkCount += 1;
+          lastEncodedChunkAt = performance.now();
           const data = new Uint8Array(chunk.byteLength);
           chunk.copyTo(data);
           muxer.addChunk({
@@ -1670,6 +1669,7 @@ export async function exportWebMFromCanvas(options: {
               `Encoding remaining frames... ${Math.max(0, remaining)} left`,
             );
           }, 250);
+          failurePhase = 'encoder-flush';
           const _flushStart = performance.now();
           try {
             await flushEncoderWithLiveness(encoder!, options.signal, (remaining) => {
@@ -1699,6 +1699,7 @@ export async function exportWebMFromCanvas(options: {
     throwIfExportAborted(options.signal);
     const finalizing = getExportFinalizationProgress('finalizing');
     onProgress?.(finalizing.progress, finalizing.message);
+    failurePhase = 'mux-finalize';
     const muxStartedAt = performance.now();
     const bytes = muxer.finalize();
     finalizationTimers.muxMs = performance.now() - muxStartedAt;
@@ -1713,10 +1714,12 @@ export async function exportWebMFromCanvas(options: {
     finalizationTimers.blobMs = performance.now() - blobStartedAt;
 
     throwIfExportAborted(options.signal);
+    failurePhase = 'playback-certification';
     onProgress?.(97, 'Certifying video playback...');
     await assertPlayableVideoBlob(blob, 'WebCodecs WebM', options.signal);
 
     throwIfExportAborted(options.signal);
+    failurePhase = 'download-handoff';
     const exportingFile = getExportFinalizationProgress('exporting-file');
     onProgress?.(exportingFile.progress, exportingFile.message);
     finalizationTimers.downloadHandoffMs = await handoffExportDownload(() => saveAs(blob, filename));
@@ -1736,6 +1739,9 @@ export async function exportWebMFromCanvas(options: {
       frames: totalFrames,
       msPerFrame: +(totalMs / Math.max(1, totalFrames)).toFixed(0),
       breakdown: `render ${pct(phaseTimers.renderMs)} · encode-wait ${pct(phaseTimers.queueWaitMs)} · flush ${pct(phaseTimers.flushMs)} · mux ${pct(finalizationTimers.muxMs)} · download ${pct(finalizationTimers.downloadHandoffMs)}`,
+      encodedChunkCount,
+      lastEncodedChunkAgeMs: lastEncodedChunkAt > 0 ? +(performance.now() - lastEncodedChunkAt).toFixed(0) : null,
+      finalQueueSize: Math.max(0, (encoder as any)?.encodeQueueSize ?? 0),
       finalization: { ...finalizationTimers },
     };
     console.info('[Export] Timing:', timing);
@@ -1749,6 +1755,21 @@ export async function exportWebMFromCanvas(options: {
       // from the beginning; starting it after an offline WebCodecs failure can
       // only produce empty or suspicious files. Record the failed attempt and
       // restore the preview through the common finally block instead.
+      const failedAt = performance.now();
+      const failureTiming = {
+        phase: failurePhase,
+        message: error instanceof Error ? error.message : String(error),
+        totalSec: +((failedAt - phaseTimers.startedAt) / 1000).toFixed(1),
+        renderSec: +(phaseTimers.renderMs / 1000).toFixed(1),
+        encodeWaitSec: +(phaseTimers.queueWaitMs / 1000).toFixed(1),
+        flushSec: +(phaseTimers.flushMs / 1000).toFixed(1),
+        muxSec: +(finalizationTimers.muxMs / 1000).toFixed(3),
+        encodedChunkCount,
+        encodeQueueSize: Math.max(0, (encoder as any)?.encodeQueueSize ?? 0),
+        lastEncodedChunkAgeMs: lastEncodedChunkAt > 0 ? +(failedAt - lastEncodedChunkAt).toFixed(0) : null,
+      };
+      console.error('[BLENDCRAFT Export 7.4R.1] Export failed:', failureTiming, error);
+      try { (window as unknown as Record<string, unknown>).__exportFailureTiming = failureTiming; } catch { /* diagnostics only */ }
       recordExportFailure(error);
       const message = error instanceof Error ? error.message : String(error);
       onProgress?.(0, message.includes('backpressure')
