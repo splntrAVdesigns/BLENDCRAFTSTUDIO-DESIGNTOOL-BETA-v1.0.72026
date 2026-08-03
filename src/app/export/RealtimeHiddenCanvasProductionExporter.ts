@@ -1,4 +1,5 @@
 import { exportWithProductionRecordingEngine, type ProductionRecordingRenderApi } from './recording/ProductionRecordingExportBridge';
+import { certifyWebMPlayback, type WebMPlaybackCertification } from './recording/WebMPlaybackCertification';
 import type { RecordingQuality, RecordingSessionResult } from './recording/types';
 
 export interface RealtimeHiddenCanvasExportInput {
@@ -15,11 +16,7 @@ export interface RealtimeHiddenCanvasExportInput {
   readonly onProgress?: (progress: number, message: string) => void;
 }
 
-interface PlaybackCertification {
-  readonly durationSeconds: number;
-  readonly width: number;
-  readonly height: number;
-}
+type PlaybackCertification = WebMPlaybackCertification;
 
 function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -33,40 +30,6 @@ function downloadBlob(blob: Blob, filename: string): void {
     anchor.remove();
   } finally {
     window.setTimeout(() => URL.revokeObjectURL(url), 15_000);
-  }
-}
-
-async function certifyPlayback(blob: Blob, expectedDurationMs: number): Promise<PlaybackCertification> {
-  const url = URL.createObjectURL(blob);
-  try {
-    const video = document.createElement('video');
-    video.preload = 'metadata';
-    video.muted = true;
-    video.playsInline = true;
-    const loaded = new Promise<void>((resolve, reject) => {
-      const timeout = window.setTimeout(() => reject(new Error('Playback certification timed out.')), 8_000);
-      video.onloadedmetadata = () => {
-        window.clearTimeout(timeout);
-        resolve();
-      };
-      video.onerror = () => {
-        window.clearTimeout(timeout);
-        reject(new Error('The exported WebM could not be opened for playback certification.'));
-      };
-    });
-    video.src = url;
-    await loaded;
-    const durationMs = video.duration * 1000;
-    const toleranceMs = Math.max(200, 1000 / 15);
-    if (!Number.isFinite(durationMs) || Math.abs(durationMs - expectedDurationMs) > toleranceMs) {
-      throw new Error(`Export duration certification failed: expected ${(expectedDurationMs / 1000).toFixed(2)}s, received ${(durationMs / 1000).toFixed(2)}s.`);
-    }
-    if (video.videoWidth <= 0 || video.videoHeight <= 0) {
-      throw new Error('Export playback certification reported an invalid video resolution.');
-    }
-    return { durationSeconds: video.duration, width: video.videoWidth, height: video.videoHeight };
-  } finally {
-    URL.revokeObjectURL(url);
   }
 }
 
@@ -98,7 +61,11 @@ export async function exportRealtimeHiddenCanvasVideo(
     });
 
     input.onProgress?.(97, 'Certifying video playback…');
-    const playback = await certifyPlayback(result.blob, input.durationMs);
+    const playback = await certifyWebMPlayback({
+      blob: result.blob,
+      expectedDurationMs: input.durationMs,
+      fps: input.fps,
+    });
     input.onProgress?.(99, 'Preparing download…');
     downloadBlob(result.blob, input.filename);
 
@@ -111,6 +78,7 @@ export async function exportRealtimeHiddenCanvasVideo(
       playbackDurationSec: playback.durationSeconds,
       playbackWidth: playback.width,
       playbackHeight: playback.height,
+      playbackDurationSource: playback.durationSource,
       diagnostics: result.diagnostics,
     });
     return { ...result, playback };
