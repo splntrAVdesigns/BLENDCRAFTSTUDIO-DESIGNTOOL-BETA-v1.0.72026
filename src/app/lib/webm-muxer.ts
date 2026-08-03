@@ -10,6 +10,8 @@ export interface WebMMuxerOptions {
   height: number;
   codecId: 'V_VP8' | 'V_VP9';
   frameRate: number;
+  /** Matroska Colour metadata. Defaults to BT.709 display/video contract. */
+  colour?: { matrixCoefficients?: number; transferCharacteristics?: number; primaries?: number; range?: number };
 }
 
 function concatArrays(parts: Uint8Array[]): Uint8Array {
@@ -123,6 +125,7 @@ export class WebMMuxer {
   private readonly height: number;
   private readonly codecId: 'V_VP8' | 'V_VP9';
   private readonly frameRate: number;
+  private readonly colour: Required<NonNullable<WebMMuxerOptions['colour']>>;
   private readonly chunks: WebMChunkInput[] = [];
 
   constructor(options: WebMMuxerOptions) {
@@ -130,6 +133,12 @@ export class WebMMuxer {
     this.height = options.height;
     this.codecId = options.codecId;
     this.frameRate = options.frameRate;
+    this.colour = {
+      matrixCoefficients: options.colour?.matrixCoefficients ?? 1, // BT.709
+      transferCharacteristics: options.colour?.transferCharacteristics ?? 1, // BT.709
+      primaries: options.colour?.primaries ?? 1, // BT.709
+      range: options.colour?.range ?? 1, // broadcast/limited range; matches Chromium VP8
+    };
   }
 
   addChunk(chunk: WebMChunkInput): void {
@@ -160,7 +169,15 @@ export class WebMMuxer {
     ]);
 
     const defaultDurationNs = Math.round(1_000_000_000 / Math.max(1, this.frameRate));
-    const video = master(0xe0, [u(0xb0, this.width), u(0xba, this.height)]);
+    // PHASE 7.3E.10 VIDEO COLOR CONTRACT: write explicit BT.709 metadata so
+    // browsers do not guess primaries/matrix/range and lift blacks or mute saturation.
+    const colour = master(0x55b0, [
+      u(0x55b1, this.colour.matrixCoefficients),
+      u(0x55b2, this.colour.range),
+      u(0x55ba, this.colour.transferCharacteristics),
+      u(0x55bb, this.colour.primaries),
+    ]);
+    const video = master(0xe0, [u(0xb0, this.width), u(0xba, this.height), colour]);
     const trackEntry = master(0xae, [
       u(0xd7, 1),
       u(0x73c5, 1),
@@ -171,28 +188,62 @@ export class WebMMuxer {
     ]);
     const tracks = master(0x1654ae6b, [trackEntry]);
 
+    // PHASE 7.7 MUXER CORRECTNESS: SimpleBlock carries a SIGNED INT16 relative
+    // timestamp, so a cluster may never span more than 32767 ms. The previous
+    // 30000 ms threshold sat one rounding step away from silent overflow and a
+    // corrupt file. Clusters now close on keyframe boundaries (ideal for seeking)
+    // and hard-close well inside the int16 range.
+    const MAX_CLUSTER_SPAN_MS = 4_000;
     const clusters: Uint8Array[] = [];
+    // CueClusterPosition is a byte offset from the first byte of Segment DATA,
+    // so offsets are accumulated across Info + Tracks + every preceding cluster.
+    const cuePoints: Array<{ timeMs: number; clusterOffset: number }> = [];
+    let segmentOffset = info.length + tracks.length;
     let clusterStartMs: number | null = null;
     let currentBlocks: Uint8Array[] = [];
+
+    const flushCluster = () => {
+      if (clusterStartMs === null || currentBlocks.length === 0) return;
+      const cluster = master(0x1f43b675, [u(0xe7, clusterStartMs), ...currentBlocks]);
+      cuePoints.push({ timeMs: clusterStartMs, clusterOffset: segmentOffset });
+      segmentOffset += cluster.length;
+      clusters.push(cluster);
+      clusterStartMs = null;
+      currentBlocks = [];
+    };
+
     for (const chunk of this.chunks) {
       const chunkTimeMs = Math.round(chunk.timestampUs / 1000);
-      if (clusterStartMs === null) {
-        clusterStartMs = chunkTimeMs;
-      }
+      const spanMs = clusterStartMs === null ? 0 : chunkTimeMs - clusterStartMs;
+      // A cluster must begin on a keyframe for seeking to land cleanly.
+      const shouldSplit = currentBlocks.length > 0
+        && (chunk.keyFrame || spanMs >= MAX_CLUSTER_SPAN_MS);
+      if (shouldSplit) flushCluster();
+      if (clusterStartMs === null) clusterStartMs = chunkTimeMs;
       const relative = chunkTimeMs - clusterStartMs;
-      if (relative > 30_000 && currentBlocks.length > 0) {
-        clusters.push(master(0x1f43b675, [u(0xe7, clusterStartMs), ...currentBlocks]));
-        clusterStartMs = chunkTimeMs;
-        currentBlocks = [];
+      if (relative < -32_768 || relative > 32_767) {
+        throw new Error(`WebM cluster relative timestamp ${relative} ms exceeds the SimpleBlock int16 range.`);
       }
-      currentBlocks.push(simpleBlock(1, chunkTimeMs - clusterStartMs, chunk.keyFrame, chunk.data));
+      currentBlocks.push(simpleBlock(1, relative, chunk.keyFrame, chunk.data));
     }
-    if (clusterStartMs !== null) {
-      clusters.push(master(0x1f43b675, [u(0xe7, clusterStartMs), ...currentBlocks]));
-    }
+    flushCluster();
 
-    const segmentPayload = concatArrays([info, tracks, ...clusters]);
+    // Cues make the exported file seekable/scrubbable. Appending Cues after the
+    // clusters keeps every CueClusterPosition valid because the offsets are
+    // measured from the start of Segment data, which precedes both.
+    const cues = cuePoints.length > 0
+      ? master(0x1c53bb6b, cuePoints.map((point) => master(0xbb, [
+          u(0xb3, point.timeMs),
+          master(0xb7, [u(0xf7, 1), u(0xf1, point.clusterOffset)]),
+        ])))
+      : new Uint8Array(0);
+
+    const segmentPayload = concatArrays([info, tracks, ...clusters, cues]);
     const segment = concatArrays([idBytes(0x18538067), vintSize(segmentPayload.length), segmentPayload]);
-    return concatArrays([ebmlHeader, segment]);
+    const output = concatArrays([ebmlHeader, segment]);
+    // Release encoded chunk ownership immediately after muxing; callers receive
+    // one compact output buffer instead of retaining every per-frame allocation.
+    this.chunks.length = 0;
+    return output;
   }
 }

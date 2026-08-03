@@ -1,9 +1,15 @@
 import type { RecordingQuality, RecordingQualityCertification } from './types';
 
+/**
+ * PHASE 7.7: these were 0.015 / 0.02 / 0.025 — a 2% floor, which meant a
+ * 16 Mbps target "passed" at 320 kbps. That is not a gate. VBR legitimately
+ * undershoots on low-complexity content, so the floor is set to a realistic
+ * fraction of target rather than a rubber stamp.
+ */
 const QUALITY_MINIMUM_RATIO: Record<RecordingQuality, number> = {
-  standard: 0.015,
-  high: 0.02,
-  ultra: 0.025,
+  standard: 0.30,
+  high: 0.35,
+  ultra: 0.40,
 };
 
 export interface CreateRecordingQualityCertificationInput {

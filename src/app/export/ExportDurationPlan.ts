@@ -56,12 +56,15 @@ function defaultStatusLabel(plan: {
   loopLockEnabled: boolean;
   loopAlignmentApplied: boolean;
   animatedLayerCount: number;
+  requestedDurationMs: number;
   effectiveDurationMs: number;
   referenceCycleMs?: number;
   cycleCount?: number;
 }): string {
   if (!plan.loopLockEnabled) {
-    return 'Snap export to a clean animation loop boundary';
+    // Loop Lock off is an exact-duration contract: the file is whatever the
+    // user set, to the frame.
+    return `Exporting exactly ${(plan.effectiveDurationMs / 1000).toFixed(2)}s — enable Loop Lock to snap to a clean loop`;
   }
   if (plan.animatedLayerCount === 0 || !plan.referenceCycleMs || !plan.cycleCount) {
     return 'No animated layers detected — using target duration';
@@ -69,7 +72,8 @@ function defaultStatusLabel(plan: {
   if (!plan.loopAlignmentApplied) {
     return `Target already matches ${plan.cycleCount} complete animation cycle${plan.cycleCount === 1 ? '' : 's'}`;
   }
-  return `Snapping to ${(plan.effectiveDurationMs / 1000).toFixed(2)}s (${plan.cycleCount} cycle${plan.cycleCount === 1 ? '' : 's'} of ${(plan.referenceCycleMs / 1000).toFixed(2)}s)`;
+  const direction = plan.effectiveDurationMs > plan.requestedDurationMs ? 'Extending' : 'Trimming';
+  return `${direction} to ${(plan.effectiveDurationMs / 1000).toFixed(2)}s (${plan.cycleCount} cycle${plan.cycleCount === 1 ? '' : 's'} of ${(plan.referenceCycleMs / 1000).toFixed(2)}s)`;
 }
 
 /** Creates a stable duration contract from already-resolved timing values. */
@@ -171,7 +175,12 @@ export function createLayerExportDurationPlan(
   }
 
   const referenceCycleMs = Math.max(...cycleTimes);
-  const cycleCount = Math.max(1, Math.ceil(requestedDurationMs / referenceCycleMs));
+  // PHASE 7.7 LOOP LOCK AUTHORITY: Loop Lock snaps to the NEAREST whole cycle,
+  // so it is free to shorten the target as well as extend it. Math.ceil could
+  // only ever extend, which meant a 5.0s target against a 4.8s cycle became
+  // 9.6s instead of the far closer 4.8s. Rounding down to zero cycles is not a
+  // valid loop, so at least one full cycle is always kept.
+  const cycleCount = Math.max(1, Math.round(requestedDurationMs / referenceCycleMs));
   const effectiveDurationMs = clamp(cycleCount * referenceCycleMs, minimum, maximum);
 
   return createExportDurationPlan({

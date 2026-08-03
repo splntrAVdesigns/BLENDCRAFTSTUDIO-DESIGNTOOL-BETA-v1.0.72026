@@ -44,6 +44,7 @@ import {
 import { createLayerExportDurationPlan } from '../../export/ExportDurationPlan';
 import { isolatePreview } from '../../export/recording/PreviewIsolationController';
 import { exportRealtimeHiddenCanvasVideo } from '../../export/RealtimeHiddenCanvasProductionExporter';
+import { runDeterministicExportSession } from '../../export/deterministic/DeterministicExportBridge';
 import { VideoExportLabPanel } from './VideoExportLabPanel';
 
 interface ExportPanelProps {
@@ -548,22 +549,68 @@ ${colorInterpExpanded}
       safeSetExportState(Math.max(1, exportProgress), 'Cancelling video export…');
       exportAbortController.abort('Export cancelled by user.');
     });
-    safeSetExportState(0, 'Preparing realtime video export…');
+    safeSetExportState(0, 'Preparing video export…');
+
+    // PHASE 7.7 EXPORT ENGINE AUTHORITY
+    // The deterministic WebCodecs engine authors the timeline (frame i carries
+    // timestamp i/fps), so the exported duration is exact by construction and
+    // encoding is free to run faster than realtime. The legacy MediaRecorder
+    // engine remains as an automatic fallback for hosts without WebCodecs — it
+    // is wall-clock bound and WILL drift, so it is never the first choice.
+    const deterministicSupported = typeof VideoEncoder !== 'undefined'
+      && typeof VideoFrame !== 'undefined'
+      && typeof Worker !== 'undefined';
 
     try {
-      await exportRealtimeHiddenCanvasVideo({
-        api,
-        sourceCanvas: canvas,
-        width: plan.width,
-        height: plan.height,
-        fps: plan.fps,
-        durationMs: plan.durationMs,
-        quality: webmQuality === 'max' ? 'ultra' : webmQuality,
-        resetExportPhase: durationPlan.loopLockEnabled,
-        filename: `gradient-${plan.width}x${plan.height}-${plan.fps}fps.webm`,
-        signal: exportAbortController.signal,
-        onProgress: (progress, message) => safeSetExportState(progress, message || ''),
-      });
+      const exportQuality = webmQuality === 'max' ? 'ultra' : webmQuality;
+      const filename = `gradient-${plan.width}x${plan.height}-${plan.fps}fps.webm`;
+      let usedFallback = false;
+
+      if (deterministicSupported) {
+        try {
+          await runDeterministicExportSession({
+            api,
+            sourceCanvas: canvas,
+            width: plan.width,
+            height: plan.height,
+            fps: plan.fps,
+            durationMs: plan.durationMs,
+            quality: exportQuality,
+            loopLockEnabled: durationPlan.loopLockEnabled,
+            resetExportPhase: durationPlan.loopLockEnabled,
+            filename,
+            signal: exportAbortController.signal,
+            onProgress: (progress, message) => safeSetExportState(progress, message || ''),
+          });
+        } catch (deterministicError) {
+          // Never mask a user cancellation as an engine failure.
+          if (exportAbortController.signal.aborted) throw deterministicError;
+          console.warn(
+            '[BLENDCRAFT Video Export] Deterministic engine failed; falling back to the legacy realtime engine.',
+            deterministicError,
+          );
+          usedFallback = true;
+        }
+      } else {
+        usedFallback = true;
+      }
+
+      if (usedFallback) {
+        safeSetExportState(0, 'Preparing realtime video export…');
+        await exportRealtimeHiddenCanvasVideo({
+          api,
+          sourceCanvas: canvas,
+          width: plan.width,
+          height: plan.height,
+          fps: plan.fps,
+          durationMs: plan.durationMs,
+          quality: exportQuality,
+          resetExportPhase: durationPlan.loopLockEnabled,
+          filename,
+          signal: exportAbortController.signal,
+          onProgress: (progress, message) => safeSetExportState(progress, message || ''),
+        });
+      }
 
       safeSetExportState(100, 'Export complete');
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
