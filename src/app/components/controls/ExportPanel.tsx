@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { saveAs } from 'file-saver';
 import { Button } from '../ui/button';
 import { Label } from '../ui/label';
 import { Input } from '../ui/input';
@@ -24,16 +23,15 @@ import {
 import { toast } from 'sonner';
 import { Layer, CanvasSettings, type RenderApi } from '../../types/gradient';
 import { 
-  verifyMP4EncodeSupport,
   exportPNGAtSize,
   exportAsSVG,
   generateCSSCode,
   PNG_PRESETS,
   WEBM_PRESETS,
   VIDEO_QUALITY_PRESETS,
-  MP4_QUALITY_PRESETS,
   type VideoQuality,
   type ExportPreset,
+  exportWebMFromCanvas,
 } from '../../utils/exportUtils';
 import { confirmWebMExportPlan, planWebMExport, WEBM_FRAME_WARN_LIMIT, WEBM_FRAME_CONFIRM_LIMIT } from '../../utils/exportPlanner';
 import { getMediaSourceMaxResolution } from '../../media';
@@ -48,7 +46,6 @@ import {
 import { createLayerExportDurationPlan } from '../../export/ExportDurationPlan';
 import { isolatePreview } from '../../export/recording/PreviewIsolationController';
 import { VideoExportLabPanel } from './VideoExportLabPanel';
-import { exportVideoWithMediabunny } from '../../export/MediabunnyProductionExporter';
 
 interface ExportPanelProps {
   layers: Layer[];
@@ -144,25 +141,8 @@ export function ExportPanel({
   // Phase 7.3D validation gate. Default OFF keeps the certified legacy engine
   // public while allowing direct renderer/MediaRecorder parity testing before
   // the Phase 7.3E cutover. This temporary control is removed at cutover.
-  // Video container format — Stage 1 export fix wires the repaired
-  // MP4/H.264 WebCodecs path (vendored muxer stco fix) into the UI.
-  // MP4 gracefully falls back to WebM when the browser/GPU lacks a
-  // H.264 availability is verified before Mediabunny MP4 export is offered.
-  const [videoFormat, setVideoFormat] = useState<'webm' | 'mp4'>('webm');
-  // MP4 v3: async REAL capability probe. The old sync check only verified
-  // the WebCodecs classes exist — true even in environments (Figma desktop /
-  // Electron builds, post-GPU-crash sessions) that reject every actual
-  // H.264 config, which produced doomed export attempts. null = probing.
-  const [mp4Supported, setMp4Supported] = useState<boolean | null>(null);
-  useEffect(() => {
-    let alive = true;
-    verifyMP4EncodeSupport().then((ok) => {
-      if (!alive) return;
-      setMp4Supported(ok);
-      if (!ok) setVideoFormat((f: 'webm' | 'mp4') => (f === 'mp4' ? 'webm' : f));
-    });
-    return () => { alive = false; };
-  }, []);
+  // Phase 7.4R: production video is the recovered, known-good VP9/WebM path.
+  const [videoFormat] = useState<'webm'>('webm');
   // Custom resolution state — synced from preset dropdown, editable when preset = 'Custom'
   const [webmCustomWidth, setWebmCustomWidth] = useState(1920);
   const [webmCustomHeight, setWebmCustomHeight] = useState(1080);
@@ -542,15 +522,10 @@ ${colorInterpExpanded}
       toast.error('Render system not ready. Please try again.');
       return;
     }
+
     const canvas = getCanvas();
     if (!canvas) {
       toast.error('Canvas not available. Please try again.');
-      return;
-    }
-
-    const wantsMP4 = videoFormat === 'mp4';
-    if (wantsMP4 && mp4Supported !== true) {
-      toast.error('H.264 export is not available in this browser. Use WebM instead.');
       return;
     }
 
@@ -571,10 +546,10 @@ ${colorInterpExpanded}
     const exportAbortController = new AbortController();
     exportAbortControllerRef.current = exportAbortController;
     setIsExporting(true, 'video', () => {
-      safeSetExportState(Math.max(1, exportProgress), 'Cancelling Mediabunny export…');
+      safeSetExportState(Math.max(1, exportProgress), 'Cancelling video export…');
       exportAbortController.abort('Export cancelled by user.');
     });
-    safeSetExportState(0, 'Preparing Mediabunny export…');
+    safeSetExportState(0, 'Preparing VP9/WebM export…');
 
     const previewIsolation = isolatePreview({
       sourceCanvas: canvas,
@@ -589,41 +564,49 @@ ${colorInterpExpanded}
         loopLockEnabled: durationPlan.loopLockEnabled,
       });
       api.pauseAnimation?.({ resetExportPhase: durationPlan.loopLockEnabled });
+
       const bakeStatus = await api.prepareAudioExport?.();
       if (bakeStatus) safeSetExportState(1, bakeStatus);
 
-      const container = wantsMP4 ? 'mp4' : 'webm';
-      const qualityPreset = wantsMP4 ? MP4_QUALITY_PRESETS[plan.quality] : VIDEO_QUALITY_PRESETS[plan.quality];
-      const bitrate = qualityPreset.bitrate(plan.width, plan.height);
-      const filename = `gradient-${plan.width}x${plan.height}-${plan.fps}fps.${container}`;
-
-      const result = await exportVideoWithMediabunny({
-        api,
-        width: plan.width,
-        height: plan.height,
+      await exportWebMFromCanvas({
+        canvas,
+        renderFrameAtTime: (timeSeconds: number) =>
+          api.renderAtTime(timeSeconds, undefined, { seekMedia: false }),
         fps: plan.fps,
         durationMs: plan.durationMs,
-        container,
-        bitrate,
-        filename,
+        filename: `gradient-${plan.width}x${plan.height}-${plan.fps}fps.webm`,
+        quality: plan.quality,
+        width: plan.width,
+        height: plan.height,
+        getLiveCanvas: () => api.getCanvas(),
+        getReadFramePixels: () => api.readFramePixels?.() ?? null,
+        setExportSize: (w: number, h: number) => api.setExportSize?.(w, h),
+        restoreSize: () => api.restoreSize?.(),
+        codecSafety: plan.codecSafety,
+        getFlashOverlayFrame: (timeSeconds: number) =>
+          api.getExportFlashOverlay?.(timeSeconds) ?? null,
+        verifyLoop: durationPlan.loopLockEnabled,
+        onLoopVerified: (result: LoopVerificationResult) => {
+          if (!isMountedRef.current || result.error) return;
+          if (result.seamless) {
+            toast.success(`Loop verified — seamless wrap (${result.matchLabel} match)`);
+          } else {
+            toast.warning(
+              `Loop wrap measured at ${result.matchLabel} match. The file exported, but one animated source may not complete a full cycle.`,
+            );
+          }
+        },
         signal: exportAbortController.signal,
-        onProgress: (progress, message) => safeSetExportState(progress, message),
+        onProgress: (progress, message) => safeSetExportState(progress, message || ''),
       });
 
-      saveAs(result.blob, result.filename);
-      console.info('[BLENDCRAFT Export 7.4F.1]', {
-        engine: 'mediabunny',
-        codec: result.codec,
-        container,
-        ...result.benchmark,
-      });
       safeSetExportState(100, 'Export complete');
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        toast.success(`${wantsMP4 ? 'MP4' : 'WebM'} exported with Mediabunny: ${plan.estimateLabel}`);
+        toast.success(`WebM exported: ${plan.estimateLabel}`);
       }
     } catch (error) {
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        console.error('[BLENDCRAFT Export 7.4F.1] Mediabunny export failed:', error);
+        console.error('[BLENDCRAFT Export 7.4R] WebM export failed:', error);
         toast.error(`Video export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     } finally {
@@ -640,7 +623,7 @@ ${colorInterpExpanded}
         api.restoreSize?.();
       }
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, 700));
       }
       if (isMountedRef.current) {
         setIsExporting(false);
@@ -795,16 +778,16 @@ ${colorInterpExpanded}
             <div className="space-y-2">
               <Label>Format</Label>
               <SelectWrapper
-                value="webm"
-                onValueChange={() => setVideoFormat('webm')}
+                value={videoFormat}
+                onValueChange={() => {}}
                 options={[
-                  { value: 'webm', label: 'Video — best compatible format' },
+                  { value: 'webm', label: 'WebM (VP9) — optimized export' },
                 ]}
                 triggerClassName="border-zinc-700 text-zinc-100"
                 contentClassName="bg-zinc-900 border-zinc-700"
               />
               <p className="text-[10px] text-zinc-500">
-                BLENDCRAFT measures H.264, VP9 and VP8 on this device before export, then uses the fastest certified profile.
+                Uses the recovered direct WebCodecs VP9 pipeline with the minimum valid codec level for the selected resolution.
               </p>
             </div>
 
@@ -965,7 +948,7 @@ ${colorInterpExpanded}
             <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 space-y-1.5">
               <Label className="text-[10px] text-zinc-500 block">Export summary</Label>
               <p className="text-sm font-medium text-zinc-100">
-                {summaryW} × {summaryH} · {webmFps} fps · {effectiveDurationSec.toFixed(effectiveDurationSec % 1 === 0 ? 0 : 2)}s · Production Video · auto codec
+                {summaryW} × {summaryH} · {webmFps} fps · {effectiveDurationSec.toFixed(effectiveDurationSec % 1 === 0 ? 0 : 2)}s · Production WebM · optimized VP9
               </p>
               <div className="flex items-center gap-3 flex-wrap">
                 {/* Frame count with cap warning */}
@@ -1035,7 +1018,7 @@ ${colorInterpExpanded}
               ) : (
                 <>
                   <Video className="w-4 h-4 mr-2" />
-                  Export Video
+                  Export WebM
                 </>
               )}
             </Button>

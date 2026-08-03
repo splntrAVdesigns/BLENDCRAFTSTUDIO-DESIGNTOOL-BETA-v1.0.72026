@@ -470,139 +470,74 @@ async function pickSupportedWebMEncoderConfig(
   const evenWidth = Math.max(2, Math.round(width / 2) * 2);
   const evenHeight = Math.max(2, Math.round(height / 2) * 2);
 
-  // VP9 codec strings: vp09.PP.LL.BB — Profile 0, Level, 8-bit colour.
-  //
-  // ── STAGE 3.3: SELECT THE MINIMUM ADEQUATE LEVEL (the real perf bug) ──
-  //
-  // The measured breakdown (__exportTiming) showed a 1440×810 export spending
-  // 621 of 687 seconds in encoder.flush() — ~4.2s PER FRAME of software VP9.
-  // Root cause: this cascade led with Level 6.1 (a 4K@60fps level) and returned
-  // the FIRST level isConfigSupported() accepted. Software VP9 claims support
-  // for every level, so EVERY export — 720p, 1080p, anything — was configured
-  // as if it were 4K@60. A 4K-level configuration puts the software encoder in
-  // a dramatically higher-complexity mode than the actual frame needs.
-  //
-  // Fix: compute the minimum VP9 level whose limits (max luma sample rate and
-  // max picture size, VP9 spec Annex A) actually cover this export, and try
-  // that FIRST, then higher levels only as fallback. A 1080p30 export now
-  // configures as Level 3.1 instead of 6.1 — the encoder does the work the
-  // frame needs, not 4K-worth of it.
-  //
-  // VP9 level limits (Annex A, Table A.1) — {level string, maxLumaSampleRate
-  // (samples/sec), maxLumaPictureSize (samples)}:
+  // Phase 7.4R recovery: restore the known-good Stage 3.3 VP9 policy.
+  // Select the LOWEST VP9 level that covers the requested picture size and
+  // luma sample rate. Do not lead with Level 6.1 for ordinary HD exports.
   const VP9_LEVELS: Array<{ codec: string; maxSampleRate: number; maxPicSize: number }> = [
-    { codec: 'vp09.00.10.08', maxSampleRate: 829440,      maxPicSize: 36864 },    // 1.0
-    { codec: 'vp09.00.11.08', maxSampleRate: 2764800,     maxPicSize: 73728 },    // 1.1
-    { codec: 'vp09.00.20.08', maxSampleRate: 4608000,     maxPicSize: 122880 },   // 2.0
-    { codec: 'vp09.00.21.08', maxSampleRate: 9216000,     maxPicSize: 245760 },   // 2.1
-    { codec: 'vp09.00.30.08', maxSampleRate: 20736000,    maxPicSize: 552960 },   // 3.0
-    { codec: 'vp09.00.31.08', maxSampleRate: 36864000,    maxPicSize: 983040 },   // 3.1 — 1080p30
-    { codec: 'vp09.00.40.08', maxSampleRate: 83558400,    maxPicSize: 2228224 },  // 4.0 — 1080p60/1440p30
-    { codec: 'vp09.00.41.08', maxSampleRate: 160432128,   maxPicSize: 2228224 },  // 4.1
-    { codec: 'vp09.00.50.08', maxSampleRate: 311951360,   maxPicSize: 8912896 },  // 5.0 — 4K30
-    { codec: 'vp09.00.51.08', maxSampleRate: 588251136,   maxPicSize: 8912896 },  // 5.1 — 4K60
-    { codec: 'vp09.00.60.08', maxSampleRate: 1176502272,  maxPicSize: 35651584 }, // 6.0 — 8K
-    { codec: 'vp09.00.61.08', maxSampleRate: 2367000576,  maxPicSize: 35651584 }, // 6.1
+    { codec: 'vp09.00.10.08', maxSampleRate: 829440, maxPicSize: 36864 },
+    { codec: 'vp09.00.11.08', maxSampleRate: 2764800, maxPicSize: 73728 },
+    { codec: 'vp09.00.20.08', maxSampleRate: 4608000, maxPicSize: 122880 },
+    { codec: 'vp09.00.21.08', maxSampleRate: 9216000, maxPicSize: 245760 },
+    { codec: 'vp09.00.30.08', maxSampleRate: 20736000, maxPicSize: 552960 },
+    { codec: 'vp09.00.31.08', maxSampleRate: 36864000, maxPicSize: 983040 },
+    { codec: 'vp09.00.40.08', maxSampleRate: 83558400, maxPicSize: 2228224 },
+    { codec: 'vp09.00.41.08', maxSampleRate: 160432128, maxPicSize: 2228224 },
+    { codec: 'vp09.00.50.08', maxSampleRate: 311951360, maxPicSize: 8912896 },
+    { codec: 'vp09.00.51.08', maxSampleRate: 588251136, maxPicSize: 8912896 },
+    { codec: 'vp09.00.60.08', maxSampleRate: 1176502272, maxPicSize: 35651584 },
+    { codec: 'vp09.00.61.08', maxSampleRate: 2367000576, maxPicSize: 35651584 },
   ];
+
   const picSize = evenWidth * evenHeight;
   const sampleRate = picSize * fps;
   const minIdx = VP9_LEVELS.findIndex(
-    (L) => picSize <= L.maxPicSize && sampleRate <= L.maxSampleRate,
+    (level) => picSize <= level.maxPicSize && sampleRate <= level.maxSampleRate,
   );
   const startIdx = minIdx === -1 ? VP9_LEVELS.length - 1 : minIdx;
-  // Minimum adequate level first, then progressively higher as fallback (some
-  // encoders reject an exact level even when they'd accept a higher one), then
-  // VP8 as a last resort.
   const vp9Candidates: WebMEncoderChoice[] = VP9_LEVELS
     .slice(startIdx)
-    .map((L) => ({ codec: L.codec, codecId: 'V_VP9' as const }));
-  const vp8Candidate: WebMEncoderChoice = { codec: 'vp8', codecId: 'V_VP8' };
-  const candidates = orderWebMCodecCandidates(vp9Candidates, vp8Candidate, {
-    iframe: isIframeEnvironment(),
-    quality,
-  });
+    .map((level) => ({ codec: level.codec, codecId: 'V_VP9' as const }));
 
-  // ── STAGE 2.8.1: HARDWARE-CAPABLE PREFERENCE CASCADE ──
-  //
-  // This probe (and the configure() call it feeds) previously hard-locked
-  // `prefer-software`. Software VP9 at 1080p costs roughly 150–300ms PER FRAME
-  // on the CPU; hardware VP9 is typically 5–20ms. On a 150-frame export that
-  // single string is tens of seconds of pure encode time.
-  //
-  // WHY NOT JUST FORCE HARDWARE: the MP4 path (pickSupportedAvcEncoderConfig)
-  // documents a real, observed failure — inside iframe hosts (Figma Make),
-  // hardware H.264 encoders crashed the GPU process mid-encode, after which
-  // Chromium blocklists them for the whole session. That constraint is real and
-  // is respected here rather than overridden.
-  //
-  // The distinction: that crash was H.264-specific, and VP9 encode is a
-  // separate hardware path. So in iframes we lead with 'no-preference' — the
-  // browser picks, and is free to use hardware without us forcing it — then
-  // fall back to explicit software. Standalone tabs lead with 'prefer-hardware'
-  // for the full win. Whatever the probe validates is threaded through to
-  // configure() (see WebMEncoderChoice.hardwareAcceleration), so we never again
-  // configure with a preference we did not actually test.
-  // STAGE 2.8.2 — MEASURED CORRECTION. 2.8.1 led with 'no-preference' inside
-  // iframes on the theory that the documented H.264 GPU-process crash was
-  // codec-specific. Real-world timing says otherwise: exports got SLOWER
-  // (~120s vs ~50s for 153 frames), with a long stall at the final frame —
-  // the signature of an encoder whose queue drains slowly at flush. Whatever
-  // Chromium selects under 'no-preference' in the Figma Make iframe is worse
-  // than software VP9, so iframes go back to software-first. Standalone tabs
-  // keep the hardware attempt, where it is a genuine win and where the
-  // documented crash was never observed.
-  //
-  // The lesson is recorded rather than re-litigated: encoder selection inside
-  // this iframe host must be driven by measurement, not by reasoning about
-  // what the browser "should" pick.
-  // PHASE 7.4C: probe acceleration as a cross-codec matrix, not codec-first.
-  // The old nested loop accepted software VP9 before it ever tested hardware VP8.
-  // That preserved the VP9 label but produced the measured 3-minute final drain.
-  // Explicit hardware acceleration now wins across both codecs; when only software
-  // is available, VP8 is preferred because it is the production speed fallback.
-  const vp8First = [vp8Candidate, ...vp9Candidates];
-  const explicitHardware = candidates;
-  const noPreference = isIframeEnvironment() ? candidates : vp8First;
-  const softwareFallback = vp8First;
-  const probePasses: Array<{
-    hardwareAcceleration: HardwarePreference | undefined;
-    candidates: WebMEncoderChoice[];
-  }> = [
-    { hardwareAcceleration: 'prefer-hardware', candidates: explicitHardware },
-    { hardwareAcceleration: undefined, candidates: noPreference },
-    { hardwareAcceleration: 'prefer-software', candidates: softwareFallback },
+  // The environment that previously passed used software-first VP9 in embedded
+  // Chromium. Standalone Chrome receives the same first probe so the production
+  // path is deterministic across Figma and Vercel instead of selecting a slow
+  // no-preference implementation by accident.
+  const accelerationOrder: Array<HardwarePreference | undefined> = [
+    'prefer-software',
+    undefined,
   ];
 
-  for (const pass of probePasses) {
-    for (const candidate of pass.candidates) {
-      const hardwareAcceleration = pass.hardwareAcceleration;
+  for (const candidate of vp9Candidates) {
+    for (const hardwareAcceleration of accelerationOrder) {
       const supported = await isVideoEncoderConfigSupported({
         codec: candidate.codec,
         width: evenWidth,
         height: evenHeight,
         bitrate,
         framerate: fps,
-        latencyMode: hardwareAcceleration === 'prefer-software' ? 'realtime' : 'quality',
-        bitrateMode: hardwareAcceleration === 'prefer-software' ? 'variable' : 'constant',
+        latencyMode: 'realtime',
+        bitrateMode: 'variable',
         ...(hardwareAcceleration ? { hardwareAcceleration } : {}),
       } as VideoEncoderConfig);
+
       if (supported) {
-        console.info('[Export] WebM encoder selected:', {
+        console.info('[BLENDCRAFT Export 7.4R] VP9 encoder selected', {
           codec: candidate.codec,
-          codecId: candidate.codecId,
-          minVp9LevelForSize: vp9Candidates[0]?.codec,
+          minimumLevel: vp9Candidates[0]?.codec,
           resolution: `${evenWidth}×${evenHeight}@${fps}`,
+          bitrate,
+          quality,
           hardwareAcceleration: hardwareAcceleration ?? 'no-preference',
-          selectionPolicy: 'hardware-across-codecs → no-preference → VP8 software fallback',
-          iframe: isIframeEnvironment(),
         });
         return { ...candidate, hardwareAcceleration };
       }
     }
   }
 
-  // Keep the failure clear so exportWebMFromCanvas can fall back to MediaRecorder.
-  throw new Error('No supported WebCodecs WebM encoder config found.');
+  throw new Error(
+    `No supported VP9 WebCodecs configuration for ${evenWidth}×${evenHeight}@${fps}. ` +
+    'Use a current Chrome or Edge build with WebCodecs enabled.',
+  );
 }
 
 /**
@@ -1495,10 +1430,7 @@ export async function exportWebMFromCanvas(options: {
 
   try {
     if (!isWebCodecsAvailable()) {
-      fallbackUsed = true;
-      if (import.meta.env?.DEV) console.warn('[BLENDCRAFT export:v2.2.5-phase2.5] WebCodecs unavailable; using MediaRecorder fallback.');
-      await exportWebMWithMediaRecorderFallback(options);
-      return;
+      throw new Error('WebCodecs is unavailable. BLENDCRAFT video export requires a current Chrome or Edge browser.');
     }
 
     const encoderChoice = await pickSupportedWebMEncoderConfig(targetWidth, targetHeight, clampedFps, bitrate, quality);
@@ -1565,7 +1497,9 @@ export async function exportWebMFromCanvas(options: {
           // deciding how to pack them.
           const isSoftwareEncode = encoderChoice.hardwareAcceleration === 'prefer-software';
 
-          // ── STAGE 2.8.6: CONSTANT → VARIABLE BITRATE FOR SOFTWARE ENCODE ──
+          // Phase 7.4R recovery: the known-good Stage 3.3 profile used realtime
+          // VP9 with variable bitrate. Apply it consistently to prevent the
+          // quality-mode flush regression from returning.
           //
           // Your measurement isolated it: ~30s render, ~4min encode. At the
           // 'realtime' speed preset a 1080p VP9 frame should cost ~50–100ms,
@@ -1589,8 +1523,8 @@ export async function exportWebMFromCanvas(options: {
             height: targetHeight,
             bitrate: optimizedBitrate,
             framerate: clampedFps,
-            latencyMode: isSoftwareEncode ? 'realtime' : 'quality',
-            bitrateMode: isSoftwareEncode ? 'variable' : 'constant',
+            latencyMode: 'realtime',
+            bitrateMode: 'variable',
           };
           try {
             encoder!.configure({
