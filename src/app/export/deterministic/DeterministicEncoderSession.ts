@@ -55,28 +55,44 @@ interface Candidate {
  *   this browser session, independent of capture. Not a capture bug.
  * - Canary succeeds, but the real run still stalls -> the fault is specific to
  *   frames built from the live canvas, not the encoder in general.
+ *
+ * PHASE 7.7f CORRECTION: the first version of this canary waited on the
+ * `dequeue` event, which fires when the encoder's internal queue has room —
+ * it is a BACKPRESSURE signal, not a completion guarantee. Per the WebCodecs
+ * spec, `flush()` is the only method with a guaranteed contract: it resolves
+ * once every queued encode() request has been processed and its output
+ * delivered. Two frames may simply never cross whatever threshold triggers an
+ * organic `dequeue` on a given platform, especially if there is a one-frame
+ * pipeline delay before the first chunk emits — which would fail this canary
+ * on a perfectly healthy encoder. Both VP9 and VP8 failing identically
+ * (same timeout, same output 0/2, same encoder.state=configured, no thrown
+ * error) is consistent with exactly that: not two independently broken
+ * codecs, but one flawed wait condition applied to both.
  */
 export interface CanaryResult {
   readonly ok: boolean;
   readonly outputCount: number;
   readonly elapsedMs: number;
   readonly finalEncoderState: string;
+  readonly flushResolved: boolean;
   readonly error?: string;
 }
 
-const CANARY_TIMEOUT_MS = 4_000;
+const CANARY_TIMEOUT_MS = 6_000;
 const CANARY_FRAME_COUNT = 2;
 
 /**
  * Encodes a couple of solid-color synthetic frames on an isolated encoder
- * instance. Matches the real config's width/height exactly, since WebCodecs
- * behavior around mismatched frame/config dimensions is not something worth
- * introducing as a second variable here.
+ * instance, then awaits flush() as the actual completion signal. Matches the
+ * real config's width/height exactly, since WebCodecs behavior around
+ * mismatched frame/config dimensions is not something worth introducing as a
+ * second variable here.
  */
 async function runEncoderCanary(config: VideoEncoderConfig, label: string): Promise<CanaryResult> {
   const startedAt = performance.now();
   let outputCount = 0;
   let settledError: string | undefined;
+  let flushResolved = false;
 
   const canaryCanvas = document.createElement('canvas');
   canaryCanvas.width = config.width;
@@ -108,18 +124,20 @@ async function runEncoderCanary(config: VideoEncoderConfig, label: string): Prom
       }
     }
 
+    // flush() is awaited directly, not via a dequeue listener — this is the
+    // fix. flush() can also reject (e.g. if the encoder errors while flushing
+    // or is closed mid-flush), so both outcomes are handled explicitly rather
+    // than folded into a bare timeout race.
+    const flushPromise = encoder.flush()
+      .then(() => { flushResolved = true; })
+      .catch((error) => { settledError = settledError ?? toError(error).message; });
+
     await Promise.race([
-      new Promise<void>((resolve) => {
-        const onDequeue = () => {
-          if (outputCount >= 1) { encoder.removeEventListener('dequeue', onDequeue); resolve(); }
-        };
-        encoder.addEventListener('dequeue', onDequeue);
-        if (outputCount >= 1) resolve();
-      }),
+      flushPromise,
       new Promise<void>((resolve) => window.setTimeout(resolve, CANARY_TIMEOUT_MS)),
     ]);
   } catch (error) {
-    settledError = toError(error).message;
+    settledError = settledError ?? toError(error).message;
   }
 
   const finalEncoderState = encoder.state;
@@ -128,13 +146,17 @@ async function runEncoderCanary(config: VideoEncoderConfig, label: string): Prom
   canaryCanvas.height = 1;
 
   const elapsedMs = performance.now() - startedAt;
-  const ok = outputCount >= 1 && !settledError;
+  // Success requires flush() to have actually resolved AND real output to
+  // have arrived — either alone, without the other, would be a misleading
+  // pass (e.g. flush resolving with zero chunks emitted is not "working").
+  const ok = flushResolved && outputCount >= 1 && !settledError;
   console.info(
     `[BLENDCRAFT Video Export] canary(${label}): ${ok ? 'OK' : 'FAILED'} — `
-    + `output ${outputCount}/${CANARY_FRAME_COUNT}, ${elapsedMs.toFixed(0)}ms, `
-    + `encoder.state=${finalEncoderState}${settledError ? `, error=${settledError}` : ''}`,
+    + `output ${outputCount}/${CANARY_FRAME_COUNT}, flushResolved=${flushResolved}, `
+    + `${elapsedMs.toFixed(0)}ms, encoder.state=${finalEncoderState}`
+    + `${settledError ? `, error=${settledError}` : ''}`,
   );
-  return { ok, outputCount, elapsedMs, finalEncoderState, error: settledError };
+  return { ok, outputCount, elapsedMs, finalEncoderState, flushResolved, error: settledError };
 }
 
 export interface FinishedEncode {
@@ -264,7 +286,8 @@ export class DeterministicEncoderSession {
         if (!canary.ok) {
           failures.push(
             `${candidate.codecLabel}: canary failed — output ${canary.outputCount}/${CANARY_FRAME_COUNT}, `
-            + `encoder.state=${canary.finalEncoderState}${canary.error ? `, error=${canary.error}` : ''}`,
+            + `flushResolved=${canary.flushResolved}, encoder.state=${canary.finalEncoderState}`
+            + `${canary.error ? `, error=${canary.error}` : ''}`,
           );
           continue;
         }
