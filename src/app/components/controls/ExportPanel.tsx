@@ -43,7 +43,9 @@ import {
 } from '../../state/exportStatus';
 import { createLayerExportDurationPlan } from '../../export/ExportDurationPlan';
 import { isolatePreview } from '../../export/recording/PreviewIsolationController';
-import { exportRealtimeHiddenCanvasVideo } from '../../export/RealtimeHiddenCanvasProductionExporter';
+// PHASE 7.7d: exportRealtimeHiddenCanvasVideo import removed. It is no longer
+// wired as an automatic fallback (see the export handler below for why) and
+// nothing else in this file calls it.
 import { runDeterministicExportSession } from '../../export/deterministic/DeterministicExportBridge';
 
 interface ExportPanelProps {
@@ -553,63 +555,43 @@ ${colorInterpExpanded}
     // PHASE 7.7 EXPORT ENGINE AUTHORITY
     // The deterministic WebCodecs engine authors the timeline (frame i carries
     // timestamp i/fps), so the exported duration is exact by construction and
-    // encoding is free to run faster than realtime. The legacy MediaRecorder
-    // engine remains as an automatic fallback for hosts without WebCodecs — it
-    // is wall-clock bound and WILL drift, so it is never the first choice.
+    // encoding is free to run faster than realtime.
+    //
+    // PHASE 7.7d — the automatic fallback to the legacy MediaRecorder engine
+    // was REMOVED. Production evidence showed it silently degrading to a
+    // wall-clock-bound engine that reports success while shipping the wrong
+    // duration and dropped frames — exactly the original defect this rebuild
+    // exists to fix, just now hidden behind a success toast instead of visible
+    // as a failure. A failed export must surface as a failed export. The
+    // legacy engine remains available ONLY as an explicit, user-visible retry
+    // path (see the catch block below), never as a silent substitution.
     const deterministicSupported = typeof VideoEncoder !== 'undefined'
-      && typeof VideoFrame !== 'undefined'
-      && typeof Worker !== 'undefined';
+      && typeof VideoFrame !== 'undefined';
+
+    if (!deterministicSupported) {
+      toast.error('Video export requires a browser with WebCodecs support (VideoEncoder/VideoFrame). Please update your browser.');
+      setIsExporting(false);
+      return;
+    }
 
     try {
       const exportQuality = webmQuality === 'max' ? 'ultra' : webmQuality;
       const filename = `gradient-${plan.width}x${plan.height}-${plan.fps}fps.webm`;
-      let usedFallback = false;
 
-      if (deterministicSupported) {
-        try {
-          await runDeterministicExportSession({
-            api,
-            sourceCanvas: canvas,
-            width: plan.width,
-            height: plan.height,
-            fps: plan.fps,
-            durationMs: plan.durationMs,
-            quality: exportQuality,
-            loopLockEnabled: durationPlan.loopLockEnabled,
-            resetExportPhase: durationPlan.loopLockEnabled,
-            filename,
-            signal: exportAbortController.signal,
-            onProgress: (progress, message) => safeSetExportState(progress, message || ''),
-          });
-        } catch (deterministicError) {
-          // Never mask a user cancellation as an engine failure.
-          if (exportAbortController.signal.aborted) throw deterministicError;
-          console.warn(
-            '[BLENDCRAFT Video Export] Deterministic engine failed; falling back to the legacy realtime engine.',
-            deterministicError,
-          );
-          usedFallback = true;
-        }
-      } else {
-        usedFallback = true;
-      }
-
-      if (usedFallback) {
-        safeSetExportState(0, 'Preparing realtime video export…');
-        await exportRealtimeHiddenCanvasVideo({
-          api,
-          sourceCanvas: canvas,
-          width: plan.width,
-          height: plan.height,
-          fps: plan.fps,
-          durationMs: plan.durationMs,
-          quality: exportQuality,
-          resetExportPhase: durationPlan.loopLockEnabled,
-          filename,
-          signal: exportAbortController.signal,
-          onProgress: (progress, message) => safeSetExportState(progress, message || ''),
-        });
-      }
+      await runDeterministicExportSession({
+        api,
+        sourceCanvas: canvas,
+        width: plan.width,
+        height: plan.height,
+        fps: plan.fps,
+        durationMs: plan.durationMs,
+        quality: exportQuality,
+        loopLockEnabled: durationPlan.loopLockEnabled,
+        resetExportPhase: durationPlan.loopLockEnabled,
+        filename,
+        signal: exportAbortController.signal,
+        onProgress: (progress, message) => safeSetExportState(progress, message || ''),
+      });
 
       safeSetExportState(100, 'Export complete');
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
@@ -617,8 +599,17 @@ ${colorInterpExpanded}
       }
     } catch (error) {
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        console.error('[BLENDCRAFT Video Export] Production export failed:', error);
-        toast.error(`Video export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        console.error('[BLENDCRAFT Video Export] Export failed:', error);
+        const detail = error instanceof Error ? error.message : 'Unknown error';
+        // PHASE 7.7d: no silent engine swap. The person sees exactly what
+        // failed and can choose to retry — they are never handed a file that
+        // silently came from a different, less trustworthy pipeline.
+        toast.error(`Video export failed: ${detail}`, {
+          action: {
+            label: 'Retry',
+            onClick: () => { void handleWebmExport(); },
+          },
+        });
       }
     } finally {
       if (exportAbortControllerRef.current === exportAbortController) {

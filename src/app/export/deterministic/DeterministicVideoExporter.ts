@@ -218,7 +218,8 @@ export async function exportDeterministicVideo(
     if (input.signal?.aborted) throw abortError(input.signal);
     console.info(
       `[BLENDCRAFT Video Export] encoder ready: ${session.selection.codecLabel} `
-      + `(${session.selection.codecString}) @ ${(bitrate / 1_000_000).toFixed(1)} Mbps, main-thread`,
+      + `(${session.selection.codecString}) @ ${(bitrate / 1_000_000).toFixed(1)} Mbps, `
+      + `hardwareAcceleration=${session.selection.hardwareAcceleration}, main-thread`,
     );
 
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {

@@ -129,7 +129,23 @@ export class DeterministicEncoderSession {
         // lookahead buys least.
         latencyMode: 'realtime',
         bitrateMode: 'variable',
-        hardwareAcceleration: 'no-preference',
+        // PHASE 7.7d STALL FIX — was 'no-preference'. Production evidence:
+        // frame 0's capture cost 972ms (vs ~1ms for every later frame), the
+        // encoder then accepted exactly MAX_FRAMES_IN_FLIGHT (4) frames and
+        // produced ZERO output for the full 10s stall deadline before this fix
+        // existed to catch it. That signature — one abnormally expensive first
+        // frame, then a hard stop — matches GPU resource contention: Chrome is
+        // free under 'no-preference' to attempt a hardware VP9 encode path on
+        // the SAME GPU the live WebGLRenderer is actively rendering on. VP9
+        // hardware encode already measured as unsupported in isolation on this
+        // hardware (a GT 750M under Optimus) — "unsupported alone" does not
+        // rule out "attempts and hangs once a WebGL context already holds the
+        // GPU". 'prefer-software' removes the ambiguity entirely: libvpx does
+        // not touch the GPU, so it cannot contend with the renderer.
+        // The actually-configured value is read back from isConfigSupported()
+        // and logged below, so if a stall recurs we know for certain rather
+        // than inferring.
+        hardwareAcceleration: 'prefer-software',
         alpha: 'discard',
       };
       try {
@@ -151,11 +167,18 @@ export class DeterministicEncoderSession {
           error: (error) => { if (session) session.failure = toError(error); },
         });
         encoder.configure(resolved);
+        // PHASE 7.7d: report what was ACTUALLY resolved, not the value we
+        // requested. Chrome may silently normalise hardwareAcceleration
+        // inside isConfigSupported(); the previous code hardcoded
+        // 'no-preference' into this field regardless of the request or the
+        // resolution, which would have hidden this very fix from the export
+        // log even after applying it.
+        const resolvedAcceleration = resolved.hardwareAcceleration ?? config.hardwareAcceleration ?? 'no-preference';
         session = new DeterministicEncoderSession(encoder, muxer, frameDurationUs, {
           codecLabel: candidate.codecLabel,
           codecString: resolved.codec,
           codecId: candidate.codecId,
-          hardwareAcceleration: 'no-preference',
+          hardwareAcceleration: resolvedAcceleration,
           bitrate: input.bitrate,
         });
         return session;
