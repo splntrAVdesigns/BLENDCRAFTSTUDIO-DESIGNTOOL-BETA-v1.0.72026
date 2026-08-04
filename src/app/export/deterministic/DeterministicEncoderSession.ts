@@ -25,6 +25,7 @@
 
 import { WebMMuxer } from '../../lib/vendored/webm-muxer';
 import { buildVp9CodecString } from './vp9Levels';
+import { yieldToBrowser } from './DeterministicFrameSource';
 import type { DeterministicEncoderSelection } from './types';
 
 interface CreateSessionInput {
@@ -128,6 +129,15 @@ async function runEncoderCanary(config: VideoEncoderConfig, label: string): Prom
     // fix. flush() can also reject (e.g. if the encoder errors while flushing
     // or is closed mid-flush), so both outcomes are handled explicitly rather
     // than folded into a bare timeout race.
+    // PHASE 7.8: yield BEFORE awaiting flush(). The 7.7e/7.7f canary encoded
+    // two frames and immediately awaited flush() without ever returning
+    // control to the event loop — so the encoder never got a turn to do the
+    // work that flush() was waiting on. The canary was starving itself in
+    // exactly the same way the main export loop was, which is why it "failed"
+    // on both VP9 and VP8 identically while the same API worked fine in a
+    // blank tab. A single macrotask yield is the difference.
+    await yieldToBrowser();
+
     const flushPromise = encoder.flush()
       .then(() => { flushResolved = true; })
       .catch((error) => { settledError = settledError ?? toError(error).message; });
@@ -246,6 +256,15 @@ export class DeterministicEncoderSession {
         // Quality cost is negligible here: large-area, low-detail,
         // high-temporal-change gradients at 10-16 Mbps are the regime where
         // lookahead buys least.
+        // PHASE 7.8 — matched to the working Stage 3.3 engine. For SOFTWARE
+        // encode: 'realtime' + variable bitrate. Its rationale, verified
+        // against your own probe (VP9 measured 45.5fps quality vs 35.2fps
+        // realtime — the preset is not the bottleneck): at 16-24 Mbps the
+        // encoder is nowhere near bitrate-starved, so 'quality' mode's slower
+        // search buys almost nothing visible. Generous bitrate is what
+        // protects quality. CBR is actively harmful here — it forces
+        // re-quantisation until each frame lands in budget, and pads simple
+        // frames to keep the rate up. VBR spends bits where content needs them.
         latencyMode: 'realtime',
         bitrateMode: 'variable',
         // PHASE 7.7d STALL FIX — was 'no-preference'. Production evidence:
@@ -375,49 +394,50 @@ export class DeterministicEncoderSession {
    * present as a frozen progress bar.
    */
   async waitForQueue(limit: number, options: WaitForQueueOptions = {}): Promise<void> {
-    const { signal, deadlineMs = 10_000 } = options;
+    const { signal, deadlineMs = 30_000 } = options;
     if (signal?.aborted) throw abortErrorFrom(signal);
-    if (this.encoder.encodeQueueSize < limit) return;
 
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      const finish = (run: () => void) => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timer);
-        window.clearInterval(pollTimer);
-        signal?.removeEventListener('abort', onAbort);
-        this.encoder.removeEventListener('dequeue', onDequeue);
-        run();
-      };
-      const onDequeue = () => {
-        if (this.encoder.encodeQueueSize < limit) finish(resolve);
-      };
-      const onAbort = () => finish(() => reject(abortErrorFrom(signal)));
-      const timer = window.setTimeout(() => finish(() => reject(new Error(
-        `Video encoder stalled: the queue stayed at ${this.encoder.encodeQueueSize} frames `
-        + `for ${deadlineMs} ms without draining. The encoder accepted frames but produced no output. `
-        + `encoder.state at failure = ${this.encoder.state}.`,
-      ))), deadlineMs);
+    // PHASE 7.8 — THE STARVATION FIX. Restored from the working Stage 3.3
+    // engine, replacing the `dequeue`-event wait introduced in 7.7c.
+    //
+    // The event version could not work: it awaited an event that only fires
+    // if the encoder makes progress, while holding the main thread the encoder
+    // needs in order to make that progress. Software VP9 is a MAIN-THREAD
+    // codec — it requires actual turns, not a listener.
+    //
+    // yieldToBrowser() is setTimeout(0), a MACROTASK. Unlike awaiting a
+    // promise (which only drains microtasks), it genuinely returns control to
+    // the event loop so the encoder can run. That single distinction is the
+    // difference between this working and hanging forever.
+    //
+    // The 2000-iteration guard is carried over verbatim: a bounded loop can
+    // never park the export permanently the way the event wait did.
+    const startedAt = performance.now();
+    let iterations = 0;
+    let lastLoggedAt = startedAt;
 
-      // PHASE 7.7e DIAGNOSTIC: Chrome has a documented failure mode where
-      // VideoEncoder silently transitions to 'closed' without ever firing its
-      // error callback. That would look EXACTLY like this stall and we would
-      // have zero visibility into it. Poll and log state during any real wait
-      // so the next report shows whether that's what happened here.
-      let pollCount = 0;
-      const pollTimer = window.setInterval(() => {
-        pollCount += 1;
+    while (this.encoder.encodeQueueSize > limit && iterations < 2000) {
+      if (signal?.aborted) throw abortErrorFrom(signal);
+      await yieldToBrowser();
+      iterations += 1;
+
+      const now = performance.now();
+      if (now - lastLoggedAt >= 5_000) {
+        lastLoggedAt = now;
         console.warn(
-          `[BLENDCRAFT Video Export] stall watch ${pollCount * 2}s — `
+          `[BLENDCRAFT Video Export] drain wait ${((now - startedAt) / 1000).toFixed(0)}s — `
           + `queue=${this.encoder.encodeQueueSize}, encoder.state=${this.encoder.state}, `
-          + `encodedFrames=${this.encodedFrames}`,
+          + `encodedFrames=${this.encodedFrames}, yields=${iterations}`,
         );
-      }, 2_000);
-
-      this.encoder.addEventListener('dequeue', onDequeue);
-      signal?.addEventListener('abort', onAbort, { once: true });
-    });
+      }
+      if (now - startedAt > deadlineMs) {
+        throw new Error(
+          `Video encoder stalled: the queue stayed above ${limit} frames for `
+          + `${deadlineMs} ms across ${iterations} yields. `
+          + `queue=${this.encoder.encodeQueueSize}, encoder.state=${this.encoder.state}.`,
+        );
+      }
+    }
   }
 
   async finish(): Promise<FinishedEncode> {

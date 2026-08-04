@@ -13,6 +13,7 @@
  */
 
 import { DeterministicEncoderSession } from './DeterministicEncoderSession';
+import { drawFrameToStagingCanvas, releaseStagingScratch, yieldToBrowser } from './DeterministicFrameSource';
 import type {
   DeterministicExportDiagnostics,
   DeterministicExportResult,
@@ -24,6 +25,8 @@ import type {
 export interface DeterministicVideoExportInput {
   /** The live WebGL presentation canvas, already resized to export dimensions. */
   readonly sourceCanvas: HTMLCanvasElement;
+  /** PHASE 7.8: export-size GPU readback — the PRIMARY capture source. */
+  readonly readFramePixels?: () => { data: Uint8Array; width: number; height: number } | null;
   readonly width: number;
   readonly height: number;
   readonly fps: number;
@@ -35,8 +38,16 @@ export interface DeterministicVideoExportInput {
   readonly onProgress?: (progress: DeterministicProgress) => void;
 }
 
-/** Max encoder queue depth before the render loop yields. */
-const MAX_FRAMES_IN_FLIGHT = 4;
+/**
+ * PHASE 7.8 — watermark restored to the working Stage 3.3 value of 16.
+ * Four was chosen arbitrarily in 7.7c and serialised render against encode.
+ * Sixteen keeps the pipeline fed while still bounding memory (~16 x 6MB
+ * ~= 96MB, versus the 460MB an unbounded queue reached historically).
+ */
+const MAX_FRAMES_IN_FLIGHT = 16;
+
+/** Unconditional yield cadence, carried over from the working engine. */
+const FORCED_YIELD_EVERY_N_FRAMES = 30;
 
 /**
  * STAGE 1: hard ceiling on any single backpressure wait. Even the slowest
@@ -182,6 +193,12 @@ export async function exportDeterministicVideo(
 
   const sampler = createSignatureSampler();
 
+  // PHASE 7.8: the 2D staging surface every frame is drawn into before
+  // encoding. Allocated once and reused for the whole export.
+  const stagingCanvas = document.createElement('canvas');
+  stagingCanvas.width = input.width;
+  stagingCanvas.height = input.height;
+
   // Sample the first, a middle and the last frame for capture liveness.
   const probeIndices = totalFrames > 2
     ? [0, Math.floor(totalFrames / 2), totalFrames - 1]
@@ -234,13 +251,29 @@ export async function exportDeterministicVideo(
       if (input.signal?.aborted) throw abortError(input.signal);
 
       // ---- Capture ------------------------------------------------------
+      // PHASE 7.8: routed through a 2D staging canvas, restored from the
+      // working Stage 3.3 engine. Constructing VideoFrame DIRECTLY from the
+      // live WebGL canvas (the 7.7c approach) cost 972ms on frame 0 in
+      // production. The staging path reads the export-size GPU readback —
+      // which preserves the exact full-resolution renderAtTime() output that
+      // dense gradients, masks and textures depend on — and hands the encoder
+      // a plain 2D surface instead.
       const captureStartedAt = performance.now();
+      drawFrameToStagingCanvas({
+        stagingCanvas,
+        targetWidth: input.width,
+        targetHeight: input.height,
+        liveCanvas: input.sourceCanvas,
+        readFramePixels: input.readFramePixels,
+      });
       if (probeIndices.indexOf(frameIndex) !== -1) {
-        probeSignatures.push(sampler.sample(input.sourceCanvas));
+        probeSignatures.push(sampler.sample(stagingCanvas));
       }
-      const frame = new VideoFrame(input.sourceCanvas, {
+      const frame = new VideoFrame(stagingCanvas, {
         // Derived from the index rather than accumulated, so rounding error can
-        // never compound across a long export.
+        // never compound across a long export. This is what makes the exported
+        // duration exactly N/fps and the animation speed match the user's
+        // setting — unchanged from 7.7 and deliberately preserved.
         timestamp: Math.round((frameIndex * 1_000_000) / fps),
         duration: frameDurationUs,
         alpha: 'discard',
@@ -291,11 +324,19 @@ export async function exportDeterministicVideo(
       // event loop so cancellation and progress paint remain responsive.
       // STAGE 1: the wait is now abortable and deadlined — a stalled encoder
       // raises a named error instead of parking the export forever.
-      if (session.queueSize >= MAX_FRAMES_IN_FLIGHT) {
+      // PHASE 7.8: pacing restored from the working Stage 3.3 engine — yield
+      // on queue pressure AND unconditionally every 30 frames. The
+      // unconditional yield matters as much as the pressure one: the encoder
+      // needs main-thread turns even when the queue looks healthy, and without
+      // it a fast render loop can outrun the encoder before the watermark ever
+      // trips.
+      if (session.queueSize > MAX_FRAMES_IN_FLIGHT) {
         await session.waitForQueue(MAX_FRAMES_IN_FLIGHT, {
           signal: input.signal,
           deadlineMs: STALL_DEADLINE_MS,
         });
+      } else if (frameIndex % FORCED_YIELD_EVERY_N_FRAMES === FORCED_YIELD_EVERY_N_FRAMES - 1) {
+        await yieldToBrowser();
       } else if (frameIndex % 4 === 0) {
         // `await` alone only drains microtasks, which is not enough to let the
         // Cancel button's click handler or a progress repaint run. Since the
@@ -370,5 +411,8 @@ export async function exportDeterministicVideo(
     throw error;
   } finally {
     sampler.dispose();
+    stagingCanvas.width = 1;
+    stagingCanvas.height = 1;
+    releaseStagingScratch();
   }
 }

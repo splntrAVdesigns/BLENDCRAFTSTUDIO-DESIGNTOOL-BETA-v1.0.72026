@@ -125,6 +125,11 @@ export async function runDeterministicExportSession(
 
     const result = await exportDeterministicVideo({
       sourceCanvas: input.sourceCanvas,
+      // PHASE 7.8: the export-size GPU readback is the PRIMARY capture source,
+      // matching the working Stage 3.3 engine. It preserves the exact
+      // full-resolution renderAtTime() output; the live canvas is fallback
+      // only, since it may be preview-sized.
+      readFramePixels: input.api.readFramePixels,
       width: resolution.width,
       height: resolution.height,
       fps: input.fps,
