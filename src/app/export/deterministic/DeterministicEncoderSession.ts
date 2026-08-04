@@ -41,133 +41,6 @@ interface Candidate {
   readonly codecId: 'V_VP9' | 'V_VP8';
 }
 
-/**
- * PHASE 7.7e DIAGNOSTIC — result of a canary encode.
- *
- * The Phase 7.7d fix (hardwareAcceleration: 'prefer-software') was tested and
- * DID NOT resolve the stall — the queue still parks at 4 frames with zero
- * output, even with no GPU path available to contend with. That falsifies the
- * GPU-contention theory. This canary exists to narrow the search: it tests
- * whether the encoder can produce ANY output at all, using synthetic frames
- * that have nothing to do with the live WebGL canvas, on a throwaway encoder
- * instance that cannot contaminate the real muxer or frame count.
- *
- * - Canary fails  -> the encoder itself is non-functional for this config in
- *   this browser session, independent of capture. Not a capture bug.
- * - Canary succeeds, but the real run still stalls -> the fault is specific to
- *   frames built from the live canvas, not the encoder in general.
- *
- * PHASE 7.7f CORRECTION: the first version of this canary waited on the
- * `dequeue` event, which fires when the encoder's internal queue has room —
- * it is a BACKPRESSURE signal, not a completion guarantee. Per the WebCodecs
- * spec, `flush()` is the only method with a guaranteed contract: it resolves
- * once every queued encode() request has been processed and its output
- * delivered. Two frames may simply never cross whatever threshold triggers an
- * organic `dequeue` on a given platform, especially if there is a one-frame
- * pipeline delay before the first chunk emits — which would fail this canary
- * on a perfectly healthy encoder. Both VP9 and VP8 failing identically
- * (same timeout, same output 0/2, same encoder.state=configured, no thrown
- * error) is consistent with exactly that: not two independently broken
- * codecs, but one flawed wait condition applied to both.
- */
-export interface CanaryResult {
-  readonly ok: boolean;
-  readonly outputCount: number;
-  readonly elapsedMs: number;
-  readonly finalEncoderState: string;
-  readonly flushResolved: boolean;
-  readonly error?: string;
-}
-
-const CANARY_TIMEOUT_MS = 6_000;
-const CANARY_FRAME_COUNT = 2;
-
-/**
- * Encodes a couple of solid-color synthetic frames on an isolated encoder
- * instance, then awaits flush() as the actual completion signal. Matches the
- * real config's width/height exactly, since WebCodecs behavior around
- * mismatched frame/config dimensions is not something worth introducing as a
- * second variable here.
- */
-async function runEncoderCanary(config: VideoEncoderConfig, label: string): Promise<CanaryResult> {
-  const startedAt = performance.now();
-  let outputCount = 0;
-  let settledError: string | undefined;
-  let flushResolved = false;
-
-  const canaryCanvas = document.createElement('canvas');
-  canaryCanvas.width = config.width;
-  canaryCanvas.height = config.height;
-  const ctx = canaryCanvas.getContext('2d', { alpha: false });
-  if (ctx) {
-    ctx.fillStyle = '#3060c0';
-    ctx.fillRect(0, 0, config.width, config.height);
-  }
-
-  const encoder = new VideoEncoder({
-    output: () => { outputCount += 1; },
-    error: (error) => { settledError = toError(error).message; },
-  });
-
-  try {
-    encoder.configure(config);
-    const frameDurationUs = Math.round(1_000_000 / (config.framerate ?? 30));
-    for (let i = 0; i < CANARY_FRAME_COUNT; i += 1) {
-      const frame = new VideoFrame(canaryCanvas, {
-        timestamp: i * frameDurationUs,
-        duration: frameDurationUs,
-        alpha: 'discard',
-      });
-      try {
-        encoder.encode(frame, { keyFrame: i === 0 });
-      } finally {
-        frame.close();
-      }
-    }
-
-    // flush() is awaited directly, not via a dequeue listener — this is the
-    // fix. flush() can also reject (e.g. if the encoder errors while flushing
-    // or is closed mid-flush), so both outcomes are handled explicitly rather
-    // than folded into a bare timeout race.
-    // PHASE 7.8: yield BEFORE awaiting flush(). The 7.7e/7.7f canary encoded
-    // two frames and immediately awaited flush() without ever returning
-    // control to the event loop — so the encoder never got a turn to do the
-    // work that flush() was waiting on. The canary was starving itself in
-    // exactly the same way the main export loop was, which is why it "failed"
-    // on both VP9 and VP8 identically while the same API worked fine in a
-    // blank tab. A single macrotask yield is the difference.
-    await yieldToBrowser();
-
-    const flushPromise = encoder.flush()
-      .then(() => { flushResolved = true; })
-      .catch((error) => { settledError = settledError ?? toError(error).message; });
-
-    await Promise.race([
-      flushPromise,
-      new Promise<void>((resolve) => window.setTimeout(resolve, CANARY_TIMEOUT_MS)),
-    ]);
-  } catch (error) {
-    settledError = settledError ?? toError(error).message;
-  }
-
-  const finalEncoderState = encoder.state;
-  try { encoder.close(); } catch { /* Best-effort teardown. */ }
-  canaryCanvas.width = 1;
-  canaryCanvas.height = 1;
-
-  const elapsedMs = performance.now() - startedAt;
-  // Success requires flush() to have actually resolved AND real output to
-  // have arrived — either alone, without the other, would be a misleading
-  // pass (e.g. flush resolving with zero chunks emitted is not "working").
-  const ok = flushResolved && outputCount >= 1 && !settledError;
-  console.info(
-    `[BLENDCRAFT Video Export] canary(${label}): ${ok ? 'OK' : 'FAILED'} — `
-    + `output ${outputCount}/${CANARY_FRAME_COUNT}, flushResolved=${flushResolved}, `
-    + `${elapsedMs.toFixed(0)}ms, encoder.state=${finalEncoderState}`
-    + `${settledError ? `, error=${settledError}` : ''}`,
-  );
-  return { ok, outputCount, elapsedMs, finalEncoderState, flushResolved, error: settledError };
-}
 
 export interface FinishedEncode {
   readonly bytes: Uint8Array;
@@ -294,22 +167,22 @@ export class DeterministicEncoderSession {
         }
         const resolved = support.config ?? config;
 
-        // PHASE 7.7e: isConfigSupported() already told us VP9 is "supported"
-        // once and turned out to be wrong at runtime — the API answered a
-        // static capability question, not "will this actually produce output
-        // right now, in this session". The canary asks the real question
-        // before we commit to a real capture run. On failure this candidate
-        // is skipped exactly like an unsupported config, so the loop falls
-        // through to the next one (VP8) automatically.
-        const canary = await runEncoderCanary(resolved, candidate.codecLabel);
-        if (!canary.ok) {
-          failures.push(
-            `${candidate.codecLabel}: canary failed — output ${canary.outputCount}/${CANARY_FRAME_COUNT}, `
-            + `flushResolved=${canary.flushResolved}, encoder.state=${canary.finalEncoderState}`
-            + `${canary.error ? `, error=${canary.error}` : ''}`,
-          );
-          continue;
-        }
+        // PHASE 7.9: the canary GATE was removed. It was added in 7.7e as a
+        // diagnostic, but it became the blocker: it consumed 12s (6s per
+        // codec) and aborted the export before the restored render loop ran a
+        // single frame. Two things make it wrong to keep:
+        //
+        //  1. The working Stage 3.3 engine has NO such gate. It configures the
+        //     encoder and starts encoding. That engine produced good exports
+        //     on this exact hardware.
+        //  2. The canary encodes 2 frames back-to-back and immediately awaits
+        //     flush(), which is NOT how the real loop behaves — the real loop
+        //     yields between every frame and only flushes at the end. A probe
+        //     that does not reproduce the real control flow cannot validate
+        //     it, and here it produced a false negative that masked the fix.
+        //
+        // The stall watchdog in waitForQueue() remains as the safety net, and
+        // it now reports queue depth, encoder state and yield count.
 
         const muxer = new WebMMuxer({
           width: input.width,
