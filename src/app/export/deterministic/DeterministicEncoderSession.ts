@@ -40,6 +40,103 @@ interface Candidate {
   readonly codecId: 'V_VP9' | 'V_VP8';
 }
 
+/**
+ * PHASE 7.7e DIAGNOSTIC — result of a canary encode.
+ *
+ * The Phase 7.7d fix (hardwareAcceleration: 'prefer-software') was tested and
+ * DID NOT resolve the stall — the queue still parks at 4 frames with zero
+ * output, even with no GPU path available to contend with. That falsifies the
+ * GPU-contention theory. This canary exists to narrow the search: it tests
+ * whether the encoder can produce ANY output at all, using synthetic frames
+ * that have nothing to do with the live WebGL canvas, on a throwaway encoder
+ * instance that cannot contaminate the real muxer or frame count.
+ *
+ * - Canary fails  -> the encoder itself is non-functional for this config in
+ *   this browser session, independent of capture. Not a capture bug.
+ * - Canary succeeds, but the real run still stalls -> the fault is specific to
+ *   frames built from the live canvas, not the encoder in general.
+ */
+export interface CanaryResult {
+  readonly ok: boolean;
+  readonly outputCount: number;
+  readonly elapsedMs: number;
+  readonly finalEncoderState: string;
+  readonly error?: string;
+}
+
+const CANARY_TIMEOUT_MS = 4_000;
+const CANARY_FRAME_COUNT = 2;
+
+/**
+ * Encodes a couple of solid-color synthetic frames on an isolated encoder
+ * instance. Matches the real config's width/height exactly, since WebCodecs
+ * behavior around mismatched frame/config dimensions is not something worth
+ * introducing as a second variable here.
+ */
+async function runEncoderCanary(config: VideoEncoderConfig, label: string): Promise<CanaryResult> {
+  const startedAt = performance.now();
+  let outputCount = 0;
+  let settledError: string | undefined;
+
+  const canaryCanvas = document.createElement('canvas');
+  canaryCanvas.width = config.width;
+  canaryCanvas.height = config.height;
+  const ctx = canaryCanvas.getContext('2d', { alpha: false });
+  if (ctx) {
+    ctx.fillStyle = '#3060c0';
+    ctx.fillRect(0, 0, config.width, config.height);
+  }
+
+  const encoder = new VideoEncoder({
+    output: () => { outputCount += 1; },
+    error: (error) => { settledError = toError(error).message; },
+  });
+
+  try {
+    encoder.configure(config);
+    const frameDurationUs = Math.round(1_000_000 / (config.framerate ?? 30));
+    for (let i = 0; i < CANARY_FRAME_COUNT; i += 1) {
+      const frame = new VideoFrame(canaryCanvas, {
+        timestamp: i * frameDurationUs,
+        duration: frameDurationUs,
+        alpha: 'discard',
+      });
+      try {
+        encoder.encode(frame, { keyFrame: i === 0 });
+      } finally {
+        frame.close();
+      }
+    }
+
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        const onDequeue = () => {
+          if (outputCount >= 1) { encoder.removeEventListener('dequeue', onDequeue); resolve(); }
+        };
+        encoder.addEventListener('dequeue', onDequeue);
+        if (outputCount >= 1) resolve();
+      }),
+      new Promise<void>((resolve) => window.setTimeout(resolve, CANARY_TIMEOUT_MS)),
+    ]);
+  } catch (error) {
+    settledError = toError(error).message;
+  }
+
+  const finalEncoderState = encoder.state;
+  try { encoder.close(); } catch { /* Best-effort teardown. */ }
+  canaryCanvas.width = 1;
+  canaryCanvas.height = 1;
+
+  const elapsedMs = performance.now() - startedAt;
+  const ok = outputCount >= 1 && !settledError;
+  console.info(
+    `[BLENDCRAFT Video Export] canary(${label}): ${ok ? 'OK' : 'FAILED'} — `
+    + `output ${outputCount}/${CANARY_FRAME_COUNT}, ${elapsedMs.toFixed(0)}ms, `
+    + `encoder.state=${finalEncoderState}${settledError ? `, error=${settledError}` : ''}`,
+  );
+  return { ok, outputCount, elapsedMs, finalEncoderState, error: settledError };
+}
+
 export interface FinishedEncode {
   readonly bytes: Uint8Array;
   readonly mimeType: string;
@@ -155,6 +252,23 @@ export class DeterministicEncoderSession {
           continue;
         }
         const resolved = support.config ?? config;
+
+        // PHASE 7.7e: isConfigSupported() already told us VP9 is "supported"
+        // once and turned out to be wrong at runtime — the API answered a
+        // static capability question, not "will this actually produce output
+        // right now, in this session". The canary asks the real question
+        // before we commit to a real capture run. On failure this candidate
+        // is skipped exactly like an unsupported config, so the loop falls
+        // through to the next one (VP8) automatically.
+        const canary = await runEncoderCanary(resolved, candidate.codecLabel);
+        if (!canary.ok) {
+          failures.push(
+            `${candidate.codecLabel}: canary failed — output ${canary.outputCount}/${CANARY_FRAME_COUNT}, `
+            + `encoder.state=${canary.finalEncoderState}${canary.error ? `, error=${canary.error}` : ''}`,
+          );
+          continue;
+        }
+
         const muxer = new WebMMuxer({
           width: input.width,
           height: input.height,
@@ -248,6 +362,7 @@ export class DeterministicEncoderSession {
         if (settled) return;
         settled = true;
         window.clearTimeout(timer);
+        window.clearInterval(pollTimer);
         signal?.removeEventListener('abort', onAbort);
         this.encoder.removeEventListener('dequeue', onDequeue);
         run();
@@ -258,8 +373,24 @@ export class DeterministicEncoderSession {
       const onAbort = () => finish(() => reject(abortErrorFrom(signal)));
       const timer = window.setTimeout(() => finish(() => reject(new Error(
         `Video encoder stalled: the queue stayed at ${this.encoder.encodeQueueSize} frames `
-        + `for ${deadlineMs} ms without draining. The encoder accepted frames but produced no output.`,
+        + `for ${deadlineMs} ms without draining. The encoder accepted frames but produced no output. `
+        + `encoder.state at failure = ${this.encoder.state}.`,
       ))), deadlineMs);
+
+      // PHASE 7.7e DIAGNOSTIC: Chrome has a documented failure mode where
+      // VideoEncoder silently transitions to 'closed' without ever firing its
+      // error callback. That would look EXACTLY like this stall and we would
+      // have zero visibility into it. Poll and log state during any real wait
+      // so the next report shows whether that's what happened here.
+      let pollCount = 0;
+      const pollTimer = window.setInterval(() => {
+        pollCount += 1;
+        console.warn(
+          `[BLENDCRAFT Video Export] stall watch ${pollCount * 2}s — `
+          + `queue=${this.encoder.encodeQueueSize}, encoder.state=${this.encoder.state}, `
+          + `encodedFrames=${this.encodedFrames}`,
+        );
+      }, 2_000);
 
       this.encoder.addEventListener('dequeue', onDequeue);
       signal?.addEventListener('abort', onAbort, { once: true });
