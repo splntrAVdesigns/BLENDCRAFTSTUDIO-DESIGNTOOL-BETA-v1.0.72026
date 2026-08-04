@@ -45,7 +45,6 @@ import { createLayerExportDurationPlan } from '../../export/ExportDurationPlan';
 import { isolatePreview } from '../../export/recording/PreviewIsolationController';
 import { exportRealtimeHiddenCanvasVideo } from '../../export/RealtimeHiddenCanvasProductionExporter';
 import { runDeterministicExportSession } from '../../export/deterministic/DeterministicExportBridge';
-import { VideoExportLabPanel } from './VideoExportLabPanel';
 
 interface ExportPanelProps {
   layers: Layer[];
@@ -1178,7 +1177,6 @@ ${colorInterpExpanded}
           </div>
         </TabsContent>
       </Tabs>
-      <VideoExportLabPanel renderApiRef={renderApiRef} />
     </div>
   );
 }

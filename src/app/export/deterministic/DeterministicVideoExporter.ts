@@ -37,6 +37,21 @@ export interface DeterministicVideoExportInput {
 
 /** Max encoder queue depth before the render loop yields. */
 const MAX_FRAMES_IN_FLIGHT = 4;
+
+/**
+ * STAGE 1: hard ceiling on any single backpressure wait. Even the slowest
+ * supported configuration drains a frame in well under a second, so a queue
+ * that has not moved in 10s is stalled, not busy. Failing loudly here is the
+ * difference between a diagnosable error and a frozen progress bar.
+ */
+const STALL_DEADLINE_MS = 10_000;
+
+/**
+ * STAGE 1: independent liveness check across the whole export. Catches a
+ * pipeline that is technically advancing but far too slowly to ever finish,
+ * which the per-wait deadline alone would not detect.
+ */
+const NO_PROGRESS_ABORT_MS = 30_000;
 /** Keyframe every 2 seconds: good seeking without inflating the file. */
 const KEYFRAME_INTERVAL_SECONDS = 2;
 
@@ -177,6 +192,8 @@ export async function exportDeterministicVideo(
   let frameCaptureMs = 0;
   let encodeSubmitMs = 0;
   let renderedFrames = 0;
+  let lastEncodedCount = 0;
+  let lastProgressAt = performance.now();
 
   input.onProgress?.({
     phase: 'preparing',
@@ -236,6 +253,22 @@ export async function exportDeterministicVideo(
 
       renderedFrames = frameIndex + 1;
 
+      // ---- Global liveness ----------------------------------------------
+      // STAGE 1: tracks ENCODER OUTPUT, not frames submitted. Submitting is
+      // cheap and kept advancing even while the encoder was deadlocked, so
+      // submission count is not a liveness signal — encoded count is.
+      const encodedNow = session.encodedFrameCount;
+      if (encodedNow > lastEncodedCount) {
+        lastEncodedCount = encodedNow;
+        lastProgressAt = performance.now();
+      } else if (performance.now() - lastProgressAt > NO_PROGRESS_ABORT_MS) {
+        throw new Error(
+          `Video export stalled: no frame has finished encoding in ${NO_PROGRESS_ABORT_MS / 1000}s. `
+          + `Submitted ${renderedFrames}/${totalFrames}, encoded ${encodedNow}, queue ${session.queueSize}. `
+          + `The encoder is accepting frames but not producing output.`,
+        );
+      }
+
       if (frameIndex < 3 || frameIndex % 25 === 0) {
         console.info(
           `[BLENDCRAFT Video Export] frame ${frameIndex}/${totalFrames} — `
@@ -255,8 +288,13 @@ export async function exportDeterministicVideo(
       // ---- Backpressure --------------------------------------------------
       // Bounds encoder queue depth so GPU memory stays flat, and yields to the
       // event loop so cancellation and progress paint remain responsive.
+      // STAGE 1: the wait is now abortable and deadlined — a stalled encoder
+      // raises a named error instead of parking the export forever.
       if (session.queueSize >= MAX_FRAMES_IN_FLIGHT) {
-        await session.waitForQueue(MAX_FRAMES_IN_FLIGHT);
+        await session.waitForQueue(MAX_FRAMES_IN_FLIGHT, {
+          signal: input.signal,
+          deadlineMs: STALL_DEADLINE_MS,
+        });
       } else if (frameIndex % 4 === 0) {
         // `await` alone only drains microtasks, which is not enough to let the
         // Cancel button's click handler or a progress repaint run. Since the

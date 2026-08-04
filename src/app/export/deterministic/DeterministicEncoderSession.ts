@@ -47,6 +47,19 @@ export interface FinishedEncode {
   readonly encodeMs: number;
 }
 
+export interface WaitForQueueOptions {
+  readonly signal?: AbortSignal;
+  /** Fail rather than park if the queue does not drain within this window. */
+  readonly deadlineMs?: number;
+}
+
+function abortErrorFrom(signal?: AbortSignal): Error {
+  const reason = signal?.reason;
+  return reason instanceof Error
+    ? reason
+    : new DOMException(String(reason ?? 'Video export cancelled.'), 'AbortError');
+}
+
 function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
@@ -95,7 +108,26 @@ export class DeterministicEncoderSession {
         height: input.height,
         bitrate: input.bitrate,
         framerate: input.fps,
-        latencyMode: 'quality',
+        // STAGE 1 DEADLOCK FIX — do not change this to 'quality' without
+        // reading the note below.
+        //
+        // libvpx-vp9 in 'quality' mode runs a lag-in-frames lookahead of ~25
+        // frames: it accumulates that many frames before emitting OR draining
+        // anything. Combined with the render loop's backpressure limit, that
+        // deadlocks — the encoder waits for ~25 frames, the loop refuses to
+        // submit past its limit, and neither side can move. Observed in
+        // production as "queue 1, 2, 3 ... encoded 0" and a permanently frozen
+        // progress bar.
+        //
+        // 'realtime' sets lag-in-frames to 0, so every submitted frame yields a
+        // chunk. Output is 1:1 with input, which is what makes queue-based
+        // backpressure sound and progress monotonic. There is no limit value
+        // that can deadlock in this mode.
+        //
+        // Quality cost is negligible here: large-area, low-detail,
+        // high-temporal-change gradients at 10-16 Mbps are the regime where
+        // lookahead buys least.
+        latencyMode: 'realtime',
         bitrateMode: 'variable',
         hardwareAcceleration: 'no-preference',
         alpha: 'discard',
@@ -170,17 +202,44 @@ export class DeterministicEncoderSession {
     return cost;
   }
 
-  /** Yields until the encoder queue drains below the limit. */
-  async waitForQueue(limit: number): Promise<void> {
+  /**
+   * Yields until the encoder queue drains below the limit.
+   *
+   * STAGE 1: this wait is now BOUNDED and ABORTABLE. The previous version
+   * awaited a bare `dequeue` listener with no reject path, no signal and no
+   * deadline. When the encoder stalled it parked forever, and because every
+   * `signal.aborted` check lives at the top of the render loop, Cancel could
+   * not take effect either — that is why cancelling took minutes.
+   *
+   * A stalled encoder must surface as a fast, named error. It must never
+   * present as a frozen progress bar.
+   */
+  async waitForQueue(limit: number, options: WaitForQueueOptions = {}): Promise<void> {
+    const { signal, deadlineMs = 10_000 } = options;
+    if (signal?.aborted) throw abortErrorFrom(signal);
     if (this.encoder.encodeQueueSize < limit) return;
-    await new Promise<void>((resolve) => {
-      const onDequeue = () => {
-        if (this.encoder.encodeQueueSize < limit) {
-          this.encoder.removeEventListener('dequeue', onDequeue);
-          resolve();
-        }
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (run: () => void) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        this.encoder.removeEventListener('dequeue', onDequeue);
+        run();
       };
+      const onDequeue = () => {
+        if (this.encoder.encodeQueueSize < limit) finish(resolve);
+      };
+      const onAbort = () => finish(() => reject(abortErrorFrom(signal)));
+      const timer = window.setTimeout(() => finish(() => reject(new Error(
+        `Video encoder stalled: the queue stayed at ${this.encoder.encodeQueueSize} frames `
+        + `for ${deadlineMs} ms without draining. The encoder accepted frames but produced no output.`,
+      ))), deadlineMs);
+
       this.encoder.addEventListener('dequeue', onDequeue);
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 
