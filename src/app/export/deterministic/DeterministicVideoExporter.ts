@@ -12,13 +12,13 @@
  * as fast as the hardware allows rather than being pinned to realtime.
  */
 
+import { DeterministicEncoderSession } from './DeterministicEncoderSession';
 import type {
   DeterministicExportDiagnostics,
   DeterministicExportResult,
   DeterministicLivenessProbe,
   DeterministicProgress,
   DeterministicQuality,
-  WorkerOutbound,
 } from './types';
 
 export interface DeterministicVideoExportInput {
@@ -35,7 +35,7 @@ export interface DeterministicVideoExportInput {
   readonly onProgress?: (progress: DeterministicProgress) => void;
 }
 
-/** Frames allowed in flight before the render loop yields to the encoder. */
+/** Max encoder queue depth before the render loop yields. */
 const MAX_FRAMES_IN_FLIGHT = 4;
 /** Keyframe every 2 seconds: good seeking without inflating the file. */
 const KEYFRAME_INTERVAL_SECONDS = 2;
@@ -165,7 +165,6 @@ export async function exportDeterministicVideo(
   const bitrate = resolveDeterministicBitrate(input.quality, input.width, input.height, fps);
   const wallClockStartedAt = performance.now();
 
-  const worker = new Worker(new URL('./deterministicEncoder.worker.ts', import.meta.url), { type: 'module' });
   const sampler = createSignatureSampler();
 
   // Sample the first, a middle and the last frame for capture liveness.
@@ -176,149 +175,44 @@ export async function exportDeterministicVideo(
 
   let renderMs = 0;
   let frameCaptureMs = 0;
-  let framesInFlight = 0;
+  let encodeSubmitMs = 0;
   let renderedFrames = 0;
-  let encodedFrames = 0;
-  let maxQueueSize = 0;
-  let encodeMs = 0;
-  let selectionLabel = 'unknown';
-  let selectionCodecString = 'unknown';
-  let selectionAcceleration = 'unknown';
-  let releaseSlot: (() => void) | null = null;
-  let fatalError: Error | null = null;
-  let rejectRun: ((error: Error) => void) | null = null;
 
-  const failRun = (error: Error) => {
-    fatalError ??= error;
-    releaseSlot?.();
-    releaseSlot = null;
-    rejectRun?.(error);
-  };
+  input.onProgress?.({
+    phase: 'preparing',
+    frame: 0,
+    totalFrames,
+    percent: 1,
+    label: 'Configuring video encoder…',
+  });
 
-  const onAbort = () => {
-    worker.postMessage({ type: 'cancel' });
-    failRun(abortError(input.signal));
-  };
-  input.signal?.addEventListener('abort', onAbort, { once: true });
+  // PHASE 7.7c: encoder runs on THIS thread, deliberately. See
+  // DeterministicEncoderSession for the measured reason — transferring
+  // GPU-backed VideoFrames to a worker forced a cross-process readback per
+  // frame and cost ~300x.
+  const session = await DeterministicEncoderSession.create({
+    width: input.width,
+    height: input.height,
+    fps,
+    bitrate,
+  });
 
   try {
-    const ready = new Promise<void>((resolve, reject) => {
-      const handler = (event: MessageEvent<WorkerOutbound>) => {
-        const message = event.data;
-        if (message.type === 'ready') {
-          selectionLabel = message.selection.codecLabel;
-          selectionCodecString = message.selection.codecString;
-          selectionAcceleration = message.selection.hardwareAcceleration;
-          worker.removeEventListener('message', handler);
-          resolve();
-        } else if (message.type === 'error') {
-          worker.removeEventListener('message', handler);
-          reject(new Error(message.message));
-        }
-      };
-      worker.addEventListener('message', handler);
-      worker.onerror = (event) => reject(new Error(event.message || 'The video encode worker failed to start.'));
-    });
-
-    const completion = new Promise<{ buffer: ArrayBuffer; mimeType: string }>((resolve, reject) => {
-      rejectRun = reject;
-      worker.addEventListener('message', (event: MessageEvent<WorkerOutbound>) => {
-        const message = event.data;
-        if (message.type === 'accepted') {
-          framesInFlight = Math.max(0, framesInFlight - 1);
-          maxQueueSize = Math.max(maxQueueSize, message.queueSize);
-          releaseSlot?.();
-          releaseSlot = null;
-          return;
-        }
-        if (message.type === 'encoded') {
-          // Encoder output count only; the render loop owns progress reporting.
-          encodedFrames = message.encodedFrames;
-          return;
-        }
-        if (message.type === 'complete') {
-          encodedFrames = message.encodedFrames;
-          maxQueueSize = Math.max(maxQueueSize, message.maxQueueSize);
-          encodeMs = message.encodeMs;
-          resolve({ buffer: message.buffer, mimeType: message.mimeType });
-          return;
-        }
-        if (message.type === 'cancelled') {
-          failRun(abortError(input.signal));
-          return;
-        }
-        if (message.type === 'error') failRun(new Error(message.message));
-      });
-    });
-
-    input.onProgress?.({
-      phase: 'preparing',
-      frame: 0,
-      totalFrames,
-      percent: 1,
-      label: 'Configuring hardware video encoder…',
-    });
-
-    worker.postMessage({
-      type: 'init',
-      width: input.width,
-      height: input.height,
-      fps,
-      bitrate,
-      totalFrames,
-    });
-    await ready;
     if (input.signal?.aborted) throw abortError(input.signal);
-
-    input.onProgress?.({
-      phase: 'encoding',
-      frame: 0,
-      totalFrames,
-      percent: 4,
-      label: `Encoding with ${selectionLabel}…`,
-    });
+    console.info(
+      `[BLENDCRAFT Video Export] encoder ready: ${session.selection.codecLabel} `
+      + `(${session.selection.codecString}) @ ${(bitrate / 1_000_000).toFixed(1)} Mbps, main-thread`,
+    );
 
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex += 1) {
-      if (fatalError) throw fatalError;
       if (input.signal?.aborted) throw abortError(input.signal);
 
       // ---- Render -------------------------------------------------------
-      // The timeline position is derived purely from the frame index, so the
-      // rendered content is identical on every machine and every run.
       const renderStartedAt = performance.now();
-      // PHASE 7.7b DIAGNOSTIC WATCHDOG: probes proved the encoder and the
-      // capture path are both fast (single-digit ms). If a real export still
-      // stalls, the only remaining suspect is renderFrame() itself — the real
-      // renderAtTime() call with shaders/masks/post-FX, not a synthetic clear.
-      // A hung await here previously produced ZERO signal: no log, no error,
-      // just a frozen progress bar. This makes a stall loud and diagnosable
-      // instead of silent.
-      let renderWatchdogFired = false;
-      const renderWatchdog = window.setTimeout(() => {
-        renderWatchdogFired = true;
-        console.warn(
-          `[BLENDCRAFT Video Export] renderFrame(${frameIndex}) has not resolved after 3000 ms. `
-          + `If this is the only warning you ever see, the render call itself is hung — `
-          + `most likely inside renderAtTime(), waitForMaskTextures(), or a video-layer seek.`,
-        );
-      }, 3_000);
-      try {
-        await input.renderFrame(frameIndex / fps, frameIndex);
-      } finally {
-        window.clearTimeout(renderWatchdog);
-      }
+      await input.renderFrame(frameIndex / fps, frameIndex);
       const renderFrameMs = performance.now() - renderStartedAt;
       renderMs += renderFrameMs;
-      if (renderWatchdogFired) {
-        console.warn(`[BLENDCRAFT Video Export] renderFrame(${frameIndex}) eventually resolved after ${renderFrameMs.toFixed(0)} ms.`);
-      }
-      // First few frames and every 25th thereafter, so a real export prints a
-      // visible heartbeat in the console rather than going quiet for a minute.
-      if (frameIndex < 3 || frameIndex % 25 === 0) {
-        console.info(`[BLENDCRAFT Video Export] frame ${frameIndex}/${totalFrames} rendered in ${renderFrameMs.toFixed(1)} ms`);
-      }
 
-      if (fatalError) throw fatalError;
       if (input.signal?.aborted) throw abortError(input.signal);
 
       // ---- Capture ------------------------------------------------------
@@ -326,46 +220,53 @@ export async function exportDeterministicVideo(
       if (probeIndices.indexOf(frameIndex) !== -1) {
         probeSignatures.push(sampler.sample(input.sourceCanvas));
       }
-      // Constructing a VideoFrame from the canvas implicitly flushes its current
-      // contents, so no gl.finish() stall is needed. The renderer runs with
-      // preserveDrawingBuffer:true, so the backing store is guaranteed populated.
       const frame = new VideoFrame(input.sourceCanvas, {
-        // Derived from the index rather than accumulated, so the rounding error
-        // in frameDurationUs can never compound across a long export.
+        // Derived from the index rather than accumulated, so rounding error can
+        // never compound across a long export.
         timestamp: Math.round((frameIndex * 1_000_000) / fps),
         duration: frameDurationUs,
         alpha: 'discard',
       });
-      frameCaptureMs += performance.now() - captureStartedAt;
+      const captureFrameMs = performance.now() - captureStartedAt;
+      frameCaptureMs += captureFrameMs;
 
-      framesInFlight += 1;
-      worker.postMessage(
-        { type: 'frame', index: frameIndex, frame, keyFrame: frameIndex % keyFrameInterval === 0 },
-        [frame],
-      );
+      // ---- Encode (same thread, frame never leaves this context) ---------
+      const submitMs = session.encode(frame, frameIndex % keyFrameInterval === 0);
+      encodeSubmitMs += submitMs;
 
-      // PHASE 7.7a: progress is driven by frames SUBMITTED, not by encoder
-      // output. The encoder holds frames in its lookahead buffer, so reporting
-      // only encoded chunks made the UI sit frozen at "1/150" while the pipeline
-      // was in fact working. Submitted frames are the honest measure of progress.
       renderedFrames = frameIndex + 1;
+
+      if (frameIndex < 3 || frameIndex % 25 === 0) {
+        console.info(
+          `[BLENDCRAFT Video Export] frame ${frameIndex}/${totalFrames} — `
+          + `render ${renderFrameMs.toFixed(1)}ms · capture ${captureFrameMs.toFixed(1)}ms · `
+          + `encode-submit ${submitMs.toFixed(1)}ms · queue ${session.queueSize}`,
+        );
+      }
+
       input.onProgress?.({
         phase: 'encoding',
         frame: renderedFrames,
         totalFrames,
         percent: 4 + (renderedFrames / totalFrames) * 86,
-        label: `Rendering frame ${renderedFrames}/${totalFrames} · encoded ${encodedFrames}`,
+        label: `Rendering frame ${renderedFrames}/${totalFrames} · encoded ${session.encodedFrameCount}`,
       });
 
-      // ---- Backpressure -------------------------------------------------
-      // Without this the render loop outruns the encoder and the worker piles up
-      // uncompressed 1080p frames in GPU memory until the tab stalls.
-      if (framesInFlight >= MAX_FRAMES_IN_FLIGHT) {
-        await new Promise<void>((resolve) => { releaseSlot = resolve; });
+      // ---- Backpressure --------------------------------------------------
+      // Bounds encoder queue depth so GPU memory stays flat, and yields to the
+      // event loop so cancellation and progress paint remain responsive.
+      if (session.queueSize >= MAX_FRAMES_IN_FLIGHT) {
+        await session.waitForQueue(MAX_FRAMES_IN_FLIGHT);
+      } else if (frameIndex % 4 === 0) {
+        // `await` alone only drains microtasks, which is not enough to let the
+        // Cancel button's click handler or a progress repaint run. Since the
+        // encoder now shares this thread, yield a real macrotask periodically
+        // or the UI would appear frozen for the whole export.
+        await new Promise<void>((resolve) => { window.setTimeout(resolve, 0); });
       }
     }
 
-    if (fatalError) throw fatalError;
+    if (input.signal?.aborted) throw abortError(input.signal);
     input.onProgress?.({
       phase: 'finalizing',
       frame: totalFrames,
@@ -374,14 +275,17 @@ export async function exportDeterministicVideo(
       label: 'Flushing encoder and writing container…',
     });
 
-    worker.postMessage({ type: 'finish' });
-    const { buffer, mimeType } = await completion;
-
-    const blob = new Blob([buffer], { type: mimeType });
+    const finished = await session.finish();
+    // Copy into a standalone ArrayBuffer so the Blob owns exactly these bytes
+    // and does not retain the muxer's backing allocation.
+    const outputBuffer = new ArrayBuffer(finished.bytes.byteLength);
+    new Uint8Array(outputBuffer).set(finished.bytes);
+    const blob = new Blob([outputBuffer], { type: finished.mimeType });
     if (blob.size <= 0) throw new Error('The video encoder produced an empty file.');
-    if (encodedFrames !== totalFrames) {
+    if (finished.encodedFrames !== totalFrames) {
       throw new Error(
-        `Deterministic frame certification failed: expected ${totalFrames} encoded frames, received ${encodedFrames}.`,
+        `Deterministic frame certification failed: expected ${totalFrames} encoded frames, `
+        + `received ${finished.encodedFrames}.`,
       );
     }
 
@@ -393,32 +297,39 @@ export async function exportDeterministicVideo(
 
     const diagnostics: DeterministicExportDiagnostics = {
       engine: 'deterministic-webcodecs',
-      codecLabel: selectionLabel === 'VP8' ? 'VP8' : 'VP9',
-      codecString: selectionCodecString,
-      hardwareAcceleration: selectionAcceleration,
+      codecLabel: session.selection.codecLabel,
+      codecString: session.selection.codecString,
+      hardwareAcceleration: session.selection.hardwareAcceleration,
       width: input.width,
       height: input.height,
       fps,
       bitrate,
       renderedFrames,
-      encodedFrames,
+      encodedFrames: finished.encodedFrames,
       totalFrames,
       timelineDurationMs,
       wallClockMs,
       renderMs,
       frameCaptureMs,
-      encodeAndMuxMs: encodeMs,
+      encodeAndMuxMs: finished.encodeMs,
       realtimeFactor: timelineDurationMs / Math.max(1, wallClockMs),
-      maxEncodeQueueSize: maxQueueSize,
+      maxEncodeQueueSize: session.maxQueueSize,
       blobBytes: blob.size,
       actualBitsPerSecond: Math.round((blob.size * 8) / Math.max(0.001, timelineDurationMs / 1000)),
       livenessProbe: liveness,
     };
 
-    return { blob, mimeType, diagnostics };
+    console.info(
+      `[BLENDCRAFT Video Export] timing — render ${renderMs.toFixed(0)}ms · `
+      + `capture ${frameCaptureMs.toFixed(0)}ms · encode-submit ${encodeSubmitMs.toFixed(0)}ms · `
+      + `total ${wallClockMs.toFixed(0)}ms`,
+    );
+
+    return { blob, mimeType: finished.mimeType, diagnostics };
+  } catch (error) {
+    session.dispose();
+    throw error;
   } finally {
-    input.signal?.removeEventListener('abort', onAbort);
     sampler.dispose();
-    worker.terminate();
   }
 }
