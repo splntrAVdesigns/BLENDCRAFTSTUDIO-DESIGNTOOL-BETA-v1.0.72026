@@ -46,7 +46,7 @@ import { isolatePreview } from '../../export/recording/PreviewIsolationControlle
 // PHASE 7.7d: exportRealtimeHiddenCanvasVideo import removed. It is no longer
 // wired as an automatic fallback (see the export handler below for why) and
 // nothing else in this file calls it.
-import { runDeterministicExportSession } from '../../export/deterministic/DeterministicExportBridge';
+import { runWorkingWebMExport } from '../../export/recording/WorkingWebMExportBridge';
 
 interface ExportPanelProps {
   layers: Layer[];
@@ -552,42 +552,31 @@ ${colorInterpExpanded}
     });
     safeSetExportState(0, 'Preparing video export…');
 
-    // PHASE 7.7 EXPORT ENGINE AUTHORITY
-    // The deterministic WebCodecs engine authors the timeline (frame i carries
-    // timestamp i/fps), so the exported duration is exact by construction and
-    // encoding is free to run faster than realtime.
-    //
-    // PHASE 7.7d — the automatic fallback to the legacy MediaRecorder engine
-    // was REMOVED. Production evidence showed it silently degrading to a
-    // wall-clock-bound engine that reports success while shipping the wrong
-    // duration and dropped frames — exactly the original defect this rebuild
-    // exists to fix, just now hidden behind a success toast instead of visible
-    // as a failure. A failed export must surface as a failed export. The
-    // legacy engine remains available ONLY as an explicit, user-visible retry
-    // path (see the catch block below), never as a silent substitution.
-    const deterministicSupported = typeof VideoEncoder !== 'undefined'
-      && typeof VideoFrame !== 'undefined';
-
-    if (!deterministicSupported) {
+    // PHASE 7.12 — GIANT LEAP: this now calls exportWebMFromCanvas, the real
+    // engine that was already sprint-hardened in src/app/utils/exportUtils.ts
+    // and was simply never wired to this button. It already has the correct
+    // VP9 level selection, backpressure watermark, staging-canvas capture,
+    // and flush-drain progress polling. See WorkingWebMExportBridge.ts.
+    if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
       toast.error('Video export requires a browser with WebCodecs support (VideoEncoder/VideoFrame). Please update your browser.');
       setIsExporting(false);
       return;
     }
 
     try {
-      const exportQuality = webmQuality === 'max' ? 'ultra' : webmQuality;
       const filename = `gradient-${plan.width}x${plan.height}-${plan.fps}fps.webm`;
 
-      await runDeterministicExportSession({
+      await runWorkingWebMExport({
         api,
         sourceCanvas: canvas,
         width: plan.width,
         height: plan.height,
         fps: plan.fps,
         durationMs: plan.durationMs,
-        quality: exportQuality,
+        // exportWebMFromCanvas's VideoQuality natively includes 'max' — no
+        // downgrade mapping needed, unlike the old reconstruction.
+        quality: webmQuality,
         loopLockEnabled: durationPlan.loopLockEnabled,
-        resetExportPhase: durationPlan.loopLockEnabled,
         filename,
         signal: exportAbortController.signal,
         onProgress: (progress, message) => safeSetExportState(progress, message || ''),
@@ -601,9 +590,6 @@ ${colorInterpExpanded}
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
         console.error('[BLENDCRAFT Video Export] Export failed:', error);
         const detail = error instanceof Error ? error.message : 'Unknown error';
-        // PHASE 7.7d: no silent engine swap. The person sees exactly what
-        // failed and can choose to retry — they are never handed a file that
-        // silently came from a different, less trustworthy pipeline.
         toast.error(`Video export failed: ${detail}`, {
           action: {
             label: 'Retry',
