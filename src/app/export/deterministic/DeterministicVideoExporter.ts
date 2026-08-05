@@ -355,7 +355,7 @@ export async function exportDeterministicVideo(
       label: 'Flushing encoder and writing container…',
     });
 
-    const finished = await session.finish();
+    const finished = await session.finish({ signal: input.signal, deadlineMs: 30_000 });
     // Copy into a standalone ArrayBuffer so the Blob owns exactly these bytes
     // and does not retain the muxer's backing allocation.
     const outputBuffer = new ArrayBuffer(finished.bytes.byteLength);

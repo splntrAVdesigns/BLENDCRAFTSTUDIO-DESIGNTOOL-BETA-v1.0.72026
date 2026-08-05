@@ -313,9 +313,82 @@ export class DeterministicEncoderSession {
     }
   }
 
-  async finish(): Promise<FinishedEncode> {
+  /**
+   * PHASE 7.10 — this was a bare `await this.encoder.flush()` with NO
+   * timeout, NO abort wiring, and NO logging. Every other wait in this file
+   * got the Stage 1 treatment (bounded + abortable + logged) after the
+   * original deadlock; this one, the very last await in the whole pipeline,
+   * did not. That is exactly why "Flushing encoder..." hung at 91% for
+   * minutes with zero console output, and why Cancel also froze — nothing
+   * downstream of a pending flush() ever checked the abort signal, so there
+   * was no path back to the UI once execution entered this call.
+   *
+   * flush() has no AbortSignal parameter in the WebCodecs spec, so it cannot
+   * be cancelled directly. What DOES work: closing the encoder while a flush
+   * is pending causes that flush's promise to reject. So on timeout or abort,
+   * we force-close and let the resulting rejection carry a clear message
+   * instead of leaving the UI parked forever.
+   */
+  async finish(options: { signal?: AbortSignal; deadlineMs?: number } = {}): Promise<FinishedEncode> {
     if (this.failure) throw this.failure;
-    await this.encoder.flush();
+    const { signal, deadlineMs = 30_000 } = options;
+    if (signal?.aborted) { try { this.encoder.close(); } catch { /* ignore */ } throw abortErrorFrom(signal); }
+
+    const startedAt = performance.now();
+    let settled = false;
+    let pollTimer: number | undefined;
+    let timer: number | undefined;
+    let onAbort: (() => void) | undefined;
+
+    const cleanup = () => {
+      settled = true;
+      if (pollTimer !== undefined) window.clearInterval(pollTimer);
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+    };
+
+    pollTimer = window.setInterval(() => {
+      if (settled) return;
+      const elapsedS = ((performance.now() - startedAt) / 1000).toFixed(0);
+      console.warn(
+        `[BLENDCRAFT Video Export] flush wait ${elapsedS}s — `
+        + `encoder.state=${this.encoder.state}, encodedFrames=${this.encodedFrames}, `
+        + `queue=${this.encoder.encodeQueueSize}`,
+      );
+    }, 5_000);
+
+    const guard = new Promise<never>((_, reject) => {
+      timer = window.setTimeout(() => {
+        if (settled) return;
+        cleanup();
+        try { this.encoder.close(); } catch { /* ignore */ }
+        reject(new Error(
+          `Video encoder flush stalled: no completion after ${deadlineMs} ms. `
+          + `encodedFrames=${this.encodedFrames}, encoder.state was configured before force-close.`,
+        ));
+      }, deadlineMs);
+      onAbort = () => {
+        if (settled) return;
+        cleanup();
+        try { this.encoder.close(); } catch { /* ignore */ }
+        reject(abortErrorFrom(signal));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+
+    try {
+      const flushPromise = this.encoder.flush().then(() => { cleanup(); });
+      // If the guard wins the race (timeout/abort forces close()), flush()
+      // will itself reject shortly after. That rejection is already handled
+      // by the guard's reject path — this catch only prevents it from
+      // surfacing a second, unhandled rejection.
+      flushPromise.catch(() => { /* handled via guard when it fires first */ });
+      await Promise.race([flushPromise, guard]);
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+
     if (this.failure) throw this.failure;
     const bytes = this.muxer.finalize();
     const encodeMs = performance.now() - this.startedAt;
