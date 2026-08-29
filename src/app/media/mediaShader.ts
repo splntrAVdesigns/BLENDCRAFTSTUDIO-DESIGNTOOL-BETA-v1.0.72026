@@ -90,7 +90,6 @@ const mediaFragmentShader = `
   uniform float uAnimEased;
   uniform float uAnimTime;
   uniform float uAnimIntensity;
-  uniform vec2  uAudioGlitch;   // STAGE 3.0.5b: audio-driven UV glitch (x=shove, y=slice). Zero at rest.
   uniform float uAnimType;
   uniform sampler2D uDisplacementMap;
   uniform float uDisplacementStrength;
@@ -151,13 +150,11 @@ const mediaFragmentShader = `
     vec2 animatedUV = applyDisplacement(vUv, uDisplacementMap, uDisplacementStrength);
     animatedUV += vec2(uDriftX, uDriftY);
 
-    // STAGE 3.0.5b: AUDIO MOTION GLITCH — same effect as the gradient shader so
-    // Motion behaves identically on media layers. (0,0) at rest = no-op.
-    if (uAudioGlitch.x != 0.0 || uAudioGlitch.y != 0.0) {
-      animatedUV += vec2(uAudioGlitch.x, uAudioGlitch.x * 0.6);
-      float glitchBand = floor(animatedUV.y * 12.0);
-      animatedUV.x += (fract(sin(glitchBand * 12.9898) * 43758.5453) - 0.5) * uAudioGlitch.y;
-    }
+    // STAGE 3.0.5b: AUDIO MOTION GLITCH — the shared shader chunk owns both
+    // the uAudioGlitch declaration and its implementation. Keeping one source
+    // of truth prevents duplicate GLSL declarations when this media shader
+    // embeds SHARED_FUNCTIONS.
+    animatedUV = applyAudioGlitch(animatedUV);
     // STAGE 2.9.3: media-safe field — vortex becomes a rigid differential
     // rotation, and every other field is magnitude-bounded so a texture can
     // never be pushed outside itself (see animationHelpers).
