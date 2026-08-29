@@ -4,11 +4,12 @@ import { Layer, GradientConfig, ExportFormat, CanvasSettings } from '../types/gr
 import { generateCSSGradient } from './gradientRenderer';
 // @ts-ignore - gif.js doesn't have reliable ESM typings
 import * as GIFLib from 'gif.js';
-// Muxer imports — use vendored local files (no npm install required).
-// The vendored files in ../lib/vendored/ are used for WebM and MP4 muxing.
-import { WebMMuxer } from '../lib/vendored/webm-muxer';
-import { MP4Muxer } from '../lib/vendored/mp4-muxer';
-import { isIframeEnvironment } from './environment';
+// Video encode: Mediabunny-based engine. Replaces the previously vendored
+// hand-rolled mp4-muxer.ts / webm-muxer.ts forks — both packages were
+// formally deprecated by their own author in favor of Mediabunny, which
+// unifies MP4 + WebM under one API and provides real backpressure via
+// CanvasSource.add() instead of manual encodeQueueSize polling.
+import { encodeVideoWithMediabunny, canEncodeContainer } from '../export/mediabunnyExport';
 import {
   cloneLoopSample,
   compareLoopFrames,
@@ -19,20 +20,13 @@ import {
 import {
   captureExportMemorySnapshot,
   verifyExportMemoryRecovery,
+  verifyExportedArtifactDuration,
 } from './exportCertification';
-import { createExportTimeline } from './exportTimeline';
 import {
   createExportFinalizationTimings,
   getExportFinalizationProgress,
   handoffExportDownload,
 } from './exportFinalization';
-import {
-  getKeyFrameIntervalFrames,
-  getOptimizedEncoderBitrate,
-  getFigmaSafeQueueYieldThreshold,
-  orderWebMCodecCandidates,
-  shouldEncodeKeyFrame,
-} from './exportEncoderOptimization';
 import { EXPORT_COLOR_CONTRACT } from './exportRenderQuality';
 import { attachLatestExportMemoryRecovery, recordExportFailure, recordExportTiming } from './exportStressCertification';
 
@@ -148,25 +142,25 @@ export const VIDEO_QUALITY_PRESETS: Record<VideoQuality, VideoQualityConfig> = {
   standard: {
     label: 'Standard / Fast Preview',
     bitrate: (w, h) => {
-      if (w >= 3840) return 32_000_000; // 4K standard
-      if (w >= 2560) return 18_000_000; // 1440p standard
-      return 10_000_000; // 1080p standard
+      if (w >= 3840) return 24_000_000; // 4K preview
+      if (w >= 2560) return 16_000_000; // 1440p preview
+      return 12_000_000; // 1080p preview
     },
   },
   high: {
     label: 'High / Balanced',
     bitrate: (w, h) => {
-      if (w >= 3840) return 48_000_000; // 4K balanced
-      if (w >= 2560) return 26_000_000; // 1440p balanced
-      return 14_000_000; // 1080p balanced
+      if (w >= 3840) return 52_000_000; // 4K dense gradients
+      if (w >= 2560) return 34_000_000; // 1440p dense gradients
+      return 24_000_000; // 1080p dense gradients
     },
   },
   ultra: {
     label: 'Max Quality',
     bitrate: (w, h) => {
-      if (w >= 3840) return 64_000_000;
-      if (w >= 2560) return 34_000_000;
-      return 18_000_000;
+      if (w >= 3840) return 90_000_000;
+      if (w >= 2560) return 58_000_000;
+      return 42_000_000;
     },
   },
   max: {
@@ -202,12 +196,6 @@ function getWebMSourceScale(quality: VideoQuality): number {
   }
 }
 
-function getEncoderQueueWatermark(width: number, height: number): number {
-  const pixels = width * height;
-  if (pixels >= 3840 * 2160) return 3;
-  if (pixels >= 2560 * 1440) return 6;
-  return 10;
-}
 
 /**
  * Create isolated export renderer for high-quality exports
@@ -318,46 +306,6 @@ async function yieldToBrowser(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/**
- * Phase 7.3E.9 encoder drain policy.
- *
- * PHASE 7.3E FOUNDATION FREEZE: keep one final encoder.flush(). Do not restore
- * per-frame flush calls. Backpressure is handled only through encodeQueueSize
- * and the encoder's dequeue signal, with a bounded timeout so embedded Chromium
- * cannot deadlock the export.
- */
-async function waitForEncoderQueueBelow(
-  encoder: VideoEncoder,
-  lowWatermark: number,
-  signal?: AbortSignal,
-  timeoutMs: number = 2500,
-): Promise<void> {
-  if (((encoder as any).encodeQueueSize ?? 0) <= lowWatermark) return;
-  const startedAt = performance.now();
-  await new Promise<void>((resolve) => {
-    let settled = false;
-    let timer = 0;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      try { (encoder as any).removeEventListener?.('dequeue', check); } catch {}
-      if (timer) clearTimeout(timer);
-      resolve();
-    };
-    const check = () => {
-      if (signal?.aborted || ((encoder as any).encodeQueueSize ?? 0) <= lowWatermark) finish();
-      else if (performance.now() - startedAt >= timeoutMs) finish();
-    };
-    try { (encoder as any).addEventListener?.('dequeue', check); } catch {}
-    const poll = () => {
-      check();
-      if (!settled) timer = window.setTimeout(poll, 24);
-    };
-    poll();
-  });
-  throwIfExportAborted(signal);
-}
-
 async function settleRenderedCanvas(extraPaints: number = 2): Promise<void> {
   for (let i = 0; i < extraPaints; i++) {
     await waitForNextPaint();
@@ -418,26 +366,6 @@ function isWebCodecsAvailable(): boolean {
 }
 
 
-type HardwarePreference = 'no-preference' | 'prefer-hardware' | 'prefer-software';
-
-type WebMEncoderChoice = {
-  codec: string;
-  codecId: 'V_VP9' | 'V_VP8';
-  /**
-   * STAGE 2.8.1: the acceleration preference this codec was actually VALIDATED
-   * with. Threaded into configure() so we never configure with a preference the
-   * probe did not test. Undefined = 'no-preference' (omit the key entirely).
-   */
-  hardwareAcceleration?: HardwarePreference;
-};
-
-type MP4EncoderChoice = {
-  codec: string;
-  /** Possibly clamped to the AVC level ceiling — always use this, not the preset value. */
-  bitrate: number;
-  hardwareAcceleration?: HardwarePreference;
-};
-
 function canAttemptMP4WebCodecs(): boolean {
   if (!isWebCodecsAvailable()) return false;
   const Encoder = (globalThis as any).VideoEncoder;
@@ -460,220 +388,6 @@ async function isVideoEncoderConfigSupported(config: VideoEncoderConfig): Promis
   }
 }
 
-async function pickSupportedWebMEncoderConfig(
-  width: number,
-  height: number,
-  fps: number,
-  bitrate: number,
-  quality: VideoQuality,
-): Promise<WebMEncoderChoice> {
-  const evenWidth = Math.max(2, Math.round(width / 2) * 2);
-  const evenHeight = Math.max(2, Math.round(height / 2) * 2);
-
-  // Phase 7.4R recovery: restore the known-good Stage 3.3 VP9 policy.
-  // Select the LOWEST VP9 level that covers the requested picture size and
-  // luma sample rate. Do not lead with Level 6.1 for ordinary HD exports.
-  const VP9_LEVELS: Array<{ codec: string; maxSampleRate: number; maxPicSize: number }> = [
-    { codec: 'vp09.00.10.08', maxSampleRate: 829440, maxPicSize: 36864 },
-    { codec: 'vp09.00.11.08', maxSampleRate: 2764800, maxPicSize: 73728 },
-    { codec: 'vp09.00.20.08', maxSampleRate: 4608000, maxPicSize: 122880 },
-    { codec: 'vp09.00.21.08', maxSampleRate: 9216000, maxPicSize: 245760 },
-    { codec: 'vp09.00.30.08', maxSampleRate: 20736000, maxPicSize: 552960 },
-    { codec: 'vp09.00.31.08', maxSampleRate: 36864000, maxPicSize: 983040 },
-    { codec: 'vp09.00.40.08', maxSampleRate: 83558400, maxPicSize: 2228224 },
-    { codec: 'vp09.00.41.08', maxSampleRate: 160432128, maxPicSize: 2228224 },
-    { codec: 'vp09.00.50.08', maxSampleRate: 311951360, maxPicSize: 8912896 },
-    { codec: 'vp09.00.51.08', maxSampleRate: 588251136, maxPicSize: 8912896 },
-    { codec: 'vp09.00.60.08', maxSampleRate: 1176502272, maxPicSize: 35651584 },
-    { codec: 'vp09.00.61.08', maxSampleRate: 2367000576, maxPicSize: 35651584 },
-  ];
-
-  const picSize = evenWidth * evenHeight;
-  const sampleRate = picSize * fps;
-  const minIdx = VP9_LEVELS.findIndex(
-    (level) => picSize <= level.maxPicSize && sampleRate <= level.maxSampleRate,
-  );
-  const startIdx = minIdx === -1 ? VP9_LEVELS.length - 1 : minIdx;
-  const vp9Candidates: WebMEncoderChoice[] = VP9_LEVELS
-    .slice(startIdx)
-    .map((level) => ({ codec: level.codec, codecId: 'V_VP9' as const }));
-
-  // The environment that previously passed used software-first VP9 in embedded
-  // Chromium. Standalone Chrome receives the same first probe so the production
-  // path is deterministic across Figma and Vercel instead of selecting a slow
-  // no-preference implementation by accident.
-  const accelerationOrder: Array<HardwarePreference | undefined> = [
-    'prefer-software',
-    undefined,
-  ];
-
-  for (const candidate of vp9Candidates) {
-    for (const hardwareAcceleration of accelerationOrder) {
-      const supported = await isVideoEncoderConfigSupported({
-        codec: candidate.codec,
-        width: evenWidth,
-        height: evenHeight,
-        bitrate,
-        framerate: fps,
-        latencyMode: 'realtime',
-        bitrateMode: 'variable',
-        ...(hardwareAcceleration ? { hardwareAcceleration } : {}),
-      } as VideoEncoderConfig);
-
-      if (supported) {
-        console.info('[BLENDCRAFT Export 7.4R] VP9 encoder selected', {
-          codec: candidate.codec,
-          minimumLevel: vp9Candidates[0]?.codec,
-          resolution: `${evenWidth}×${evenHeight}@${fps}`,
-          bitrate,
-          quality,
-          hardwareAcceleration: hardwareAcceleration ?? 'no-preference',
-        });
-        return { ...candidate, hardwareAcceleration };
-      }
-    }
-  }
-
-  throw new Error(
-    `No supported VP9 WebCodecs configuration for ${evenWidth}×${evenHeight}@${fps}. ` +
-    'Use a current Chrome or Edge build with WebCodecs enabled.',
-  );
-}
-
-/**
- * H.264/AVC level constraint table (ITU-T H.264 Annex A, Table A-1).
- *
- * EXPORT-FIX (MP4 v2): The previous prober hardcoded four codec strings
- * topping out at Level 4.2 (avc1.64002A) with a comment claiming "4K@60fps"
- * support. Per spec, Level 4.2 caps at ~2,228,224 px/frame (≈2048×1088) and
- * 62.5 Mbps (High profile). Chrome's isConfigSupported() validates level
- * constraints strictly, so EVERY export ≥1440p failed all candidates →
- * "No supported WebCodecs MP4/H.264 encoder config found."
- *
- *   maxFS    — max frame size in macroblocks (16×16 px)
- *   maxMBPS  — max macroblocks per second (frame size × fps)
- *   maxKbps  — max video bitrate for Baseline/Main; High profile = ×1.25
- */
-const AVC_LEVEL_TABLE = [
-  { name: '3.1', hex: '1F', maxFS: 3600,  maxMBPS: 108000,  maxKbps: 14000  }, // 720p@30
-  { name: '3.2', hex: '20', maxFS: 5120,  maxMBPS: 216000,  maxKbps: 20000  }, // 720p@60
-  { name: '4.0', hex: '28', maxFS: 8192,  maxMBPS: 245760,  maxKbps: 20000  }, // 1080p@30
-  { name: '4.1', hex: '29', maxFS: 8192,  maxMBPS: 245760,  maxKbps: 50000  }, // 1080p@30, 50Mbps
-  { name: '4.2', hex: '2A', maxFS: 8704,  maxMBPS: 522240,  maxKbps: 50000  }, // 1080p@60
-  { name: '5.0', hex: '32', maxFS: 22080, maxMBPS: 589824,  maxKbps: 135000 }, // 1440p / 2.5K@30
-  { name: '5.1', hex: '33', maxFS: 36864, maxMBPS: 983040,  maxKbps: 240000 }, // 4K@30
-  { name: '5.2', hex: '34', maxFS: 36864, maxMBPS: 2073600, maxKbps: 240000 }, // 4K@60
-] as const;
-
-/** Profile prefixes for RFC 6381 avc1 codec strings (profile_idc + constraint flags). */
-const AVC_PROFILES = [
-  { prefix: '6400', brFactor: 1.25 }, // High — best compression for gradients
-  { prefix: '4D40', brFactor: 1.0  }, // Main — broad decoder support
-  { prefix: '42E0', brFactor: 1.0  }, // Constrained Baseline — universal fallback
-] as const;
-
-/** Index of the minimum AVC level satisfying frame size, MB rate, and bitrate. */
-function minAvcLevelIndex(widthPx: number, heightPx: number, fps: number, bitrateKbps: number, brFactor: number): number {
-  const frameMBs = Math.ceil(widthPx / 16) * Math.ceil(heightPx / 16);
-  const mbps = frameMBs * fps;
-  for (let i = 0; i < AVC_LEVEL_TABLE.length; i++) {
-    const L = AVC_LEVEL_TABLE[i];
-    if (frameMBs <= L.maxFS && mbps <= L.maxMBPS && bitrateKbps <= L.maxKbps * brFactor) return i;
-  }
-  return -1; // exceeds Level 5.2 even after bitrate clamping — resolution/fps too high
-}
-
-/**
- * Pick a spec-compliant, browser-supported H.264 encoder config.
- *
- * Strategy (modern, mirrors the WebM prober's cascade philosophy):
- *  1. For each profile (High → Main → Baseline), compute the minimum AVC
- *     level from the actual export dims/fps/bitrate — clamping the bitrate
- *     to the level ceiling when the preset exceeds it (e.g. Sharp Max 4K
- *     110 Mbps > Level 5.0's 135·1.25 boundary handling).
- *  2. Probe that level and every higher level (some encoders reject exact
- *     minimums), with hardwareAcceleration 'no-preference' first, then
- *     'prefer-software' (parity with pickSupportedWebMEncoderConfig — some
- *     Chromium builds only expose one of the two for H.264).
- *  3. Return the codec string AND the (possibly clamped) bitrate so
- *     configure() uses values guaranteed consistent with the probe.
- */
-async function pickSupportedMP4EncoderConfig(
-  width: number,
-  height: number,
-  fps: number,
-  bitrate: number
-): Promise<MP4EncoderChoice> {
-  const evenWidth = Math.max(2, Math.round(width / 2) * 2);
-  const evenHeight = Math.max(2, Math.round(height / 2) * 2);
-  const requestedKbps = Math.max(1, Math.round(bitrate / 1000));
-
-  // STABILITY (MP4 v3): inside iframe hosts (Figma Make preview), hardware
-  // H.264 encoders have crashed the GPU process mid-encode — after which
-  // Chromium blocklists them for the session and every subsequent probe
-  // fails. Prefer the software encoder first in iframes for stability;
-  // standalone tabs keep no-preference first for speed.
-  const hwPreferences: Array<HardwarePreference | undefined> = isIframeEnvironment()
-    ? ['prefer-software', undefined]
-    : [undefined, 'prefer-software'];
-
-  // DEV diagnostics: record every attempted config so a total failure tells
-  // us exactly what this environment rejects (profile × level × hw pref).
-  const attempts: Array<{ codec: string; hw: string; kbps: number; supported: boolean }> = [];
-
-  for (const profile of AVC_PROFILES) {
-    // Clamp bitrate to the highest ceiling this profile can ever carry
-    // (Level 5.2), so a too-hot preset lowers bitrate instead of failing.
-    const absoluteMaxKbps = AVC_LEVEL_TABLE[AVC_LEVEL_TABLE.length - 1].maxKbps * profile.brFactor;
-    const effKbps = Math.min(requestedKbps, Math.floor(absoluteMaxKbps));
-    const startIdx = minAvcLevelIndex(evenWidth, evenHeight, fps, effKbps, profile.brFactor);
-    if (startIdx === -1) continue; // beyond 4K@60 for this profile
-
-    for (let i = startIdx; i < AVC_LEVEL_TABLE.length; i++) {
-      const codec = `avc1.${profile.prefix}${AVC_LEVEL_TABLE[i].hex}`;
-      for (const hardwareAcceleration of hwPreferences) {
-        const supported = await isVideoEncoderConfigSupported({
-          codec,
-          width: evenWidth,
-          height: evenHeight,
-          bitrate: effKbps * 1000,
-          framerate: fps,
-          latencyMode: 'quality',
-          avc: { format: 'avcC' },
-          ...(hardwareAcceleration ? { hardwareAcceleration } : {}),
-        } as VideoEncoderConfig);
-        attempts.push({ codec, hw: hardwareAcceleration ?? 'no-preference', kbps: effKbps, supported });
-        if (supported) {
-          if (effKbps < requestedKbps && (import.meta as any).env?.DEV) {
-            console.warn(`[MP4 Export] Bitrate clamped ${requestedKbps} → ${effKbps} kbps to satisfy AVC Level ${AVC_LEVEL_TABLE[i].name} (${codec}).`);
-          }
-          return { codec, bitrate: effKbps * 1000, hardwareAcceleration };
-        }
-      }
-    }
-  }
-
-  // Total failure — dump the full probe matrix so the environment's exact
-  // rejections are visible in the console (works in DEV and prod builds;
-  // this only fires on the failure path so it costs nothing normally).
-  console.warn('[MP4 Export] No H.264 encoder config accepted by this environment. Probe matrix:');
-  console.table(attempts);
-  throw new Error('No supported WebCodecs MP4/H.264 encoder config found.');
-}
-
-/**
- * Async UI gate: does this environment ACTUALLY encode H.264 right now?
- *
- * The sync isMP4ExportSupported() only checks that the WebCodecs classes
- * exist — which is true in environments (Figma desktop / Electron without
- * proprietary codecs, post-GPU-crash sessions) where every real H.264
- * config is rejected. Offering MP4 there produces doomed export attempts.
- *
- * This probes the minimum bar — Constrained Baseline 720p30 — across both
- * hardware preferences. If CB@720p is rejected, nothing higher will pass.
- * Result is cached per session; call again with { force: true } after a
- * suspected GPU-process reset if live re-checks are ever needed.
- */
 let mp4SupportCache: Promise<boolean> | null = null;
 export function verifyMP4EncodeSupport(opts?: { force?: boolean }): Promise<boolean> {
   if (!opts?.force && mp4SupportCache) return mp4SupportCache;
@@ -958,113 +672,6 @@ function assertUsableVideoBlob(blob: Blob, label: string): void {
   if (!blob || blob.size < 256) {
     throw new Error(`${label} produced an empty/suspicious video file (${blob?.size ?? 0} bytes).`);
   }
-}
-
-function assertUsableEncodedBytes(bytes: Uint8Array | ArrayBuffer | BlobPart[] | any, label: string): void {
-  const size = typeof bytes?.byteLength === 'number'
-    ? bytes.byteLength
-    : typeof bytes?.length === 'number'
-      ? bytes.length
-      : 0;
-  if (size < 256) {
-    throw new Error(`${label} produced an empty/suspicious encoded payload (${size} bytes).`);
-  }
-}
-
-/**
- * Phase 7.4C: certify the finalized WebM in the same browser that encoded it.
- * Byte-size checks catch empty files, but not a container that has duration
- * metadata and a poster frame yet cannot decode/seek. We validate metadata and
- * one midpoint seek before handing the file to the download layer.
- */
-async function assertPlayableVideoBlob(blob: Blob, label: string, signal?: AbortSignal): Promise<void> {
-  assertUsableVideoBlob(blob, label);
-  if (typeof document === 'undefined' || typeof URL === 'undefined') return;
-
-  const url = URL.createObjectURL(blob);
-  const video = document.createElement('video');
-  video.preload = 'auto';
-  video.muted = true;
-  video.playsInline = true;
-
-  try {
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      const finish = (error?: Error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        video.onloadedmetadata = null;
-        video.onseeked = null;
-        video.onerror = null;
-        signal?.removeEventListener('abort', onAbort);
-        error ? reject(error) : resolve();
-      };
-      const onAbort = () => finish(new DOMException('Export cancelled', 'AbortError'));
-      const timeout = setTimeout(
-        () => finish(new Error(`${label} could not be playback-certified before download.`)),
-        12000,
-      );
-
-      video.onerror = () => finish(new Error(`${label} finalized, but the browser could not decode it.`));
-      video.onloadedmetadata = () => {
-        if (!Number.isFinite(video.duration) || video.duration <= 0) {
-          finish(new Error(`${label} has invalid duration metadata.`));
-          return;
-        }
-        const midpoint = Math.min(Math.max(0.001, video.duration * 0.5), Math.max(0.001, video.duration - 0.01));
-        video.onseeked = () => finish();
-        try { video.currentTime = midpoint; }
-        catch { finish(new Error(`${label} metadata loaded, but its timeline is not seekable.`)); }
-      };
-      signal?.addEventListener('abort', onAbort, { once: true });
-      video.src = url;
-      video.load();
-    });
-  } finally {
-    video.removeAttribute('src');
-    try { video.load(); } catch {}
-    URL.revokeObjectURL(url);
-  }
-}
-
-/**
- * Phase 7.4R.1: wait for the authoritative final flush without treating a
- * temporarily unchanged encodeQueueSize as proof of encoder failure.
- *
- * Chromium software VP9 can continue processing internally while the public
- * queue count remains unchanged. Queue depth is therefore diagnostic/progress
- * information only. Actual failures come from VideoEncoder.error, flush()
- * rejection, explicit cancellation, or the browser terminating the codec.
- */
-async function flushEncoderWithLiveness(
-  encoder: VideoEncoder,
-  signal?: AbortSignal,
-  onQueue?: (remaining: number) => void,
-): Promise<void> {
-  let finished = false;
-  let pollTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const flushPromise = encoder.flush().finally(() => {
-    finished = true;
-    if (pollTimer !== null) clearTimeout(pollTimer);
-  });
-
-  const cancellationPromise = new Promise<never>((_, reject) => {
-    const poll = () => {
-      if (finished) return;
-      if (signal?.aborted) {
-        reject(new DOMException('Export cancelled', 'AbortError'));
-        return;
-      }
-      const queue = Math.max(0, (encoder as any).encodeQueueSize ?? 0);
-      onQueue?.(queue);
-      pollTimer = setTimeout(poll, 250);
-    };
-    poll();
-  });
-
-  await Promise.race([flushPromise, cancellationPromise]);
 }
 
 export function cleanupExportResources(): void {
@@ -1363,17 +970,7 @@ export async function exportWebMFromCanvas(options: {
   // STAGE 2.8.4: frame-0 reference for the loop check (see loopVerification.ts).
   let loopReference: LoopFrameSample | null = null;
 
-  // ── STAGE 2.8.5: EXPORT PHASE TIMING ──
-  // Export duration has swung between ~50s and ~3min across tests with no way
-  // to tell WHICH phase moved, so every diagnosis has been inference. These
-  // four numbers end that: render, encode-drain, flush, mux. Content matters
-  // enormously here — a dense noisy composition costs far more to encode at a
-  // fixed bitrate than a smooth gradient — and without per-phase timing that's
-  // indistinguishable from a regression.
-  const phaseTimers = { renderMs: 0, queueWaitMs: 0, flushMs: 0, startedAt: performance.now() };
-  let encodedChunkCount = 0;
-  let lastEncodedChunkAt = 0;
-  let failurePhase = 'initializing';
+  const phaseTimers = { renderMs: 0, encodeMs: 0, finalizeMs: 0, startedAt: performance.now() };
   const finalizationTimers = createExportFinalizationTimings();
 
   const targetWidth = Math.max(2, Math.round(options.width || options.canvas.width));
@@ -1387,7 +984,6 @@ export async function exportWebMFromCanvas(options: {
 
   const clampedFps = Math.max(24, Math.min(60, Math.round(fps || 30)));
   const totalFrames = Math.max(1, Math.round((durationMs / 1000) * clampedFps));
-  const timeline = createExportTimeline({ fps: clampedFps, totalFrames });
   const bitrate = VIDEO_QUALITY_PRESETS[quality].bitrate(targetWidth, targetHeight);
   const codecSafety = quality === 'standard' ? (options.codecSafety || 'smooth') : 'sharp';
 
@@ -1401,50 +997,41 @@ export async function exportWebMFromCanvas(options: {
     sourceHeight,
     bitrate,
     quality,
-    captureSource: `WebCodecs -> ${sourceWidth}×${sourceHeight} source render -> ${targetWidth}×${targetHeight} encoder canvas`,
+    captureSource: `Mediabunny -> ${sourceWidth}\u00d7${sourceHeight} source render -> ${targetWidth}\u00d7${targetHeight} encoder canvas`,
     firstFrameTime: 0,
     lastFrameTime: (totalFrames - 1) / clampedFps,
     cleanupCompleted: false,
   };
 
-  if (import.meta.env?.DEV) console.info('[BLENDCRAFT export:v2.2.5-phase2.5] WebM start', diagnostics);
+  if (import.meta.env?.DEV) console.info('[BLENDCRAFT export:mediabunny] WebM start', diagnostics);
   onProgress?.(
     0,
-    `Rendering ${(durationMs / 1000).toFixed(1)}s · ${clampedFps}fps · ${totalFrames} frames · ${targetWidth}×${targetHeight} · ${VIDEO_QUALITY_PRESETS[quality].label}...`
+    `Preparing ${(durationMs / 1000).toFixed(1)}s \u00b7 ${clampedFps}fps \u00b7 ${totalFrames} frames \u00b7 ${targetWidth}\u00d7${targetHeight} \u00b7 ${VIDEO_QUALITY_PRESETS[quality].label}...`
   );
 
   const stagingCanvas = document.createElement('canvas');
   stagingCanvas.width = targetWidth;
   stagingCanvas.height = targetHeight;
-  const stagingCtx = stagingCanvas.getContext('2d', { alpha: false, willReadFrequently: false, colorSpace: 'srgb' } as any);
-  if (!stagingCtx) throw new Error('Failed to create WebM staging canvas.');
 
-  let encoder: VideoEncoder | null = null;
-  let stream: MediaStream | null = null;
-  let savedViaWebCodecs = false;
   let fallbackUsed = false;
   let downloadHandoffComplete = false;
+  let encoderConfigInfo: { codec: string; hardwareAcceleration?: string } | null = null;
 
   try {
     if (!isWebCodecsAvailable()) {
-      throw new Error('WebCodecs is unavailable. BLENDCRAFT video export requires a current Chrome or Edge browser.');
+      fallbackUsed = true;
+      if (import.meta.env?.DEV) console.warn('[BLENDCRAFT export:mediabunny] WebCodecs unavailable; using MediaRecorder fallback.');
+      await exportWebMWithMediaRecorderFallback(options);
+      return;
     }
 
-    const encoderChoice = await pickSupportedWebMEncoderConfig(targetWidth, targetHeight, clampedFps, bitrate, quality);
-    diagnostics.captureSource = `WebCodecs ${encoderChoice.codec} -> staging canvas`;
-    if (import.meta.env?.DEV) console.info('[BLENDCRAFT export:v2.2.5-phase2.5] Encoder selected', {
-      codec: encoderChoice.codec,
-      codecId: encoderChoice.codecId,
-      bitrate,
-      optimizedBitrate: getOptimizedEncoderBitrate(bitrate, encoderChoice.codecId, quality),
-    });
-
-    const muxer = new WebMMuxer({
-      width: targetWidth,
-      height: targetHeight,
-      codecId: encoderChoice.codecId as 'V_VP9' | 'V_VP8',
-      frameRate: clampedFps,
-    });
+    const encodable = await canEncodeContainer('webm', targetWidth, targetHeight, clampedFps);
+    if (!encodable) {
+      fallbackUsed = true;
+      if (import.meta.env?.DEV) console.warn('[BLENDCRAFT export:mediabunny] WebM/VP9 not encodable in this environment; using MediaRecorder fallback.');
+      await exportWebMWithMediaRecorderFallback(options);
+      return;
+    }
 
     // Use the live WebGL context at exact export dimensions for now. This is the
     // stable path in the current Figma/Chromium runtime because all masks/textures
@@ -1452,339 +1039,118 @@ export async function exportWebMFromCanvas(options: {
     options.setExportSize?.(sourceWidth, sourceHeight);
     await waitForNextPaint();
 
-    await new Promise<void>((resolve, reject) => {
-      const Encoder = (globalThis as any).VideoEncoder;
-      encoder = new Encoder({
-        output: (chunk: EncodedVideoChunk) => {
-          encodedChunkCount += 1;
-          lastEncodedChunkAt = performance.now();
-          const data = new Uint8Array(chunk.byteLength);
-          chunk.copyTo(data);
-          muxer.addChunk({
-            data,
-            timestampUs: chunk.timestamp,
-            durationUs: chunk.duration ?? frameDurationUs,
-            keyFrame: chunk.type === 'key',
-          });
-        },
-        error: (error: Error) => reject(error),
-      });
+    const result = await encodeVideoWithMediabunny({
+      stagingCanvas,
+      width: targetWidth,
+      height: targetHeight,
+      fps: clampedFps,
+      totalFrames,
+      bitrate,
+      container: 'webm',
+      signal: options.signal,
+      onProgress,
+      onEncoderConfig: (info) => { encoderConfigInfo = info; },
+      drawFrame: async (i, t) => {
+        await renderFrameAtTime(t, undefined);
 
-      (async () => {
-        try {
-          // STAGE 2.8.1: configure with the preference the probe VALIDATED,
-          // not a hardcoded software lock. Belt-and-braces: if configure()
-          // still throws (a driver can reject at configure time even after
-          // isConfigSupported() said yes), retry once with explicit software so
-          // an export degrades in speed rather than failing outright.
-          // ── STAGE 2.8.3: ENCODE SPEED ──
-          //
-          // Measured: ~30s to render 150 frames, then ~90s to encode them.
-          // The encoder, not the renderer, is now the whole cost.
-          //
-          // `latencyMode: 'quality'` puts Chromium's SOFTWARE VP9 encoder on
-          // its slowest speed preset. That preset earns its cost when the
-          // encoder is bitrate-starved and has to spend effort deciding what to
-          // throw away. At the bitrates we ship (1080p at ~42 Mbps — several
-          // times a typical high-quality 1080p stream) it is nowhere near
-          // starved, so the extra search time buys almost nothing visible.
-          //
-          // 'realtime' selects a faster speed preset. We use it ONLY for
-          // software encode; hardware paths keep 'quality' since their slow
-          // preset is cheap. Generous bitrate is what protects quality here —
-          // the bits are there either way, we simply stop spending minutes
-          // deciding how to pack them.
-          const isSoftwareEncode = encoderChoice.hardwareAcceleration === 'prefer-software';
+        drawFrameToStagingCanvas({
+          stagingCanvas,
+          targetWidth,
+          targetHeight,
+          liveCanvas: options.getLiveCanvas?.() ?? null,
+          getReadFramePixels: options.getReadFramePixels,
+          codecSafety,
+          flashOverlay: options.getFlashOverlayFrame?.(t) ?? null,
+        });
 
-          // Phase 7.4R recovery: the known-good Stage 3.3 profile used realtime
-          // VP9 with variable bitrate. Apply it consistently to prevent the
-          // quality-mode flush regression from returning.
-          //
-          // Your measurement isolated it: ~30s render, ~4min encode. At the
-          // 'realtime' speed preset a 1080p VP9 frame should cost ~50–100ms,
-          // not the ~1.6s we're seeing — so the speed preset was not the
-          // remaining bottleneck. `bitrateMode: 'constant'` is.
-          //
-          // CBR obliges the encoder to hit an exact per-frame rate, which means
-          // internally re-quantising and re-encoding until the size lands in
-          // budget — repeated work on EVERY frame. It also forces PADDING on
-          // simple frames to keep the rate up, so we were paying extra to make
-          // easy frames bigger. VBR spends bits where the content needs them
-          // and skips the search entirely.
-          //
-          // Hardware paths keep CBR: their rate control is in silicon and
-          // effectively free, and CBR is friendlier for streaming targets.
-          const optimizedBitrate = getOptimizedEncoderBitrate(bitrate, encoderChoice.codecId, quality);
-          const keyFrameInterval = getKeyFrameIntervalFrames(clampedFps, totalFrames);
-          const baseConfig = {
-            codec: encoderChoice.codec,
-            width: targetWidth,
-            height: targetHeight,
-            bitrate: optimizedBitrate,
-            framerate: clampedFps,
-            latencyMode: 'realtime',
-            bitrateMode: 'variable',
-          };
-          try {
-            encoder!.configure({
-              ...baseConfig,
-              ...(encoderChoice.hardwareAcceleration
-                ? { hardwareAcceleration: encoderChoice.hardwareAcceleration }
-                : {}),
-            } as VideoEncoderConfig);
-          } catch (configError) {
-            console.warn('[Export] Encoder configure failed, retrying without an acceleration preference:', configError);
-            encoder!.configure({
-              ...baseConfig,
-            } as VideoEncoderConfig);
-          }
-
-          // PHASE 7.3E.10: optimize for minimum TOTAL export time. A fixed 4→2
-          // queue serialized software VP8 and increased a 5s export to ~8 minutes.
-          // Start moderately, then adapt from observed dequeue/wait behaviour.
-          let queueHighWatermark = isIframeEnvironment() && (navigator.hardwareConcurrency || 4) <= 4 ? 10 : 14;
-          let queueLowWatermark = Math.max(4, Math.floor(queueHighWatermark / 2));
-          let queueSamples = 0;
-          let queueWaitSamplesMs = 0;
-          let maxObservedQueue = 0;
-
-          for (let i = 0; i < totalFrames; i++) {
-            throwIfExportAborted(options.signal);
-
-            // Single export clock. renderAtTime adds its captured live-time snapshot
-            // internally, so every animated subsystem advances from the frame the
-            // user saw when export began.
-            const exportFrame = timeline.frame(i);
-            const exportTimeSeconds = exportFrame.relativeTimeSeconds;
-            const _renderStart = performance.now();
-            await renderFrameAtTime(exportTimeSeconds, undefined);
-            // SPRINT 3: settleRenderedCanvas(0) removed — it was a no-op (0 extra paints)
-            // adding one async tick of overhead per frame with zero benefit. renderAtTime
-            // submits WebGL commands synchronously; readRenderTargetPixels is a sync GPU
-            // readback, so no settle delay is needed before drawFrameToStagingCanvas.
-
-            drawFrameToStagingCanvas({
-              stagingCanvas,
-              targetWidth,
-              targetHeight,
-              liveCanvas: options.getLiveCanvas?.() ?? null,
-              getReadFramePixels: options.getReadFramePixels,
-              codecSafety,
-              flashOverlay: options.getFlashOverlayFrame?.(exportTimeSeconds) ?? null,
-            });
-
-            // STAGE 2.8.4: snapshot frame 0 as the loop reference. Cloned —
-            // the renderer reuses its readback buffer, so a view would be
-            // overwritten long before the comparison runs.
-            if (i === 0 && options.verifyLoop) {
-              loopReference = cloneLoopSample(options.getReadFramePixels?.() ?? null);
-            }
-
-            const frame = new VideoFrame(stagingCanvas, {
-              timestamp: exportFrame.timestampUs,
-              duration: exportFrame.durationUs,
-            });
-            encoder!.encode(frame, { keyFrame: shouldEncodeKeyFrame(i, keyFrameInterval) });
-            frame.close();
-
-            if (i % Math.max(1, Math.floor(totalFrames / 20)) === 0 || i === totalFrames - 1) {
-              // STAGE 2.8.2: reserve the last slice of the bar for the encode
-              // drain + mux so "100%" means done, not "rendering finished and
-              // now we wait". Honest progress beats a fast-looking bar.
-              onProgress?.(5 + exportFrame.progress01 * 80, `Frame ${i + 1}/${totalFrames}`);
-            }
-
-            // ── PHASE 7.3E.9: ADAPTIVE ENCODER DRAIN ──
-            // Keep the proven timestamped WebCodecs architecture and single
-            // final flush, but stop allowing a 25-frame 1080p backlog to pile
-            // up. A bounded high/low-watermark wait overlaps encoding with
-            // rendering and prevents final flush from owning most export time.
-            phaseTimers.renderMs += performance.now() - _renderStart;
-            const queueSize = ((encoder as any)?.encodeQueueSize ?? 0) as number;
-            maxObservedQueue = Math.max(maxObservedQueue, queueSize);
-            if (queueSize >= queueHighWatermark) {
-              const _queueStart = performance.now();
-              onProgress?.(
-                5 + exportFrame.progress01 * 80,
-                `Rendering frames… draining encoder ${queueSize}→${queueLowWatermark}`,
-              );
-              await waitForEncoderQueueBelow(encoder!, queueLowWatermark, options.signal);
-              const waitedMs = performance.now() - _queueStart;
-              phaseTimers.queueWaitMs += waitedMs;
-              queueSamples += 1;
-              queueWaitSamplesMs += waitedMs;
-
-              // Re-evaluate every four drains. Slow drains get a larger queue so
-              // rendering and encoding overlap; fast drains use a smaller queue to
-              // keep final flush bounded. Never return to the regressive 4→2 policy.
-              if (queueSamples % 4 === 0) {
-                const avgWait = queueWaitSamplesMs / queueSamples;
-                if (avgWait > 900) queueHighWatermark = Math.min(18, queueHighWatermark + 2);
-                else if (avgWait < 220) queueHighWatermark = Math.max(8, queueHighWatermark - 1);
-                queueLowWatermark = Math.max(4, Math.floor(queueHighWatermark / 2));
-              }
-            }
-          }
-          // Phase 7.1B: no manual queue drain before flush. The Phase
-          // 7.1 zero-drain loop moved nearly all software-encode time into the
-          // visible render phase and serialised the pipeline. flush() is the
-          // encoder's authoritative completion barrier and can drain the final
-          // bounded batch more efficiently internally.
-          console.info('[Export] Adaptive encoder queue', { highWatermark: queueHighWatermark, lowWatermark: queueLowWatermark, maxObservedQueue, queueWaitMs: Math.round(phaseTimers.queueWaitMs) });
-          onProgress?.(86, 'Finalizing encoded frames...');
-
-          // STAGE 2.8.2: surface the encode drain as its own phase instead of
-          // leaving the user staring at a bar that stopped moving.
-          // ── STAGE 2.8.4: LOOP VERIFICATION ──
-          // Render the frame a player shows immediately after wrapping
-          // (t = totalFrames/fps) and diff it against frame 0. Not encoded —
-          // purely a measurement. Fully wrapped: a failure in the CHECK must
-          // never fail an otherwise-good export.
-          if (options.verifyLoop && loopReference) {
-            try {
-              onProgress?.(87, 'Verifying loop...');
-              await renderFrameAtTime(timeline.wrapFrame().relativeTimeSeconds, undefined);
-              const wrapFrame = cloneLoopSample(options.getReadFramePixels?.() ?? null);
-              const result = compareLoopFrames(loopReference, wrapFrame);
-              console.info('[Export] ' + describeLoopResult(result), result);
-              options.onLoopVerified?.(result);
-            } catch (loopError) {
-              console.warn('[Export] Loop verification skipped:', loopError);
-            }
-          }
-
-          // STAGE 2.8.3: flush() is a single opaque await that can run for a
-          // minute+ on software VP9 — the bar previously froze at 88% with no
-          // sign of life, which reads as a hang. We can't get progress events
-          // out of flush(), but encodeQueueSize IS observable, so we poll it
-          // and map the drain onto 88→95%. Real signal, not a fake animation.
-          const flushStartQueue = Math.max(1, (encoder as any)?.encodeQueueSize ?? 1);
-          let flushDone = false;
-          const flushProgress = window.setInterval(() => {
-            if (flushDone) return;
-            const remaining = (encoder as any)?.encodeQueueSize ?? 0;
-            const drained = 1 - remaining / flushStartQueue;
-            onProgress?.(
-              88 + Math.max(0, Math.min(1, drained)) * 7,
-              `Encoding remaining frames... ${Math.max(0, remaining)} left`,
-            );
-          }, 250);
-          failurePhase = 'encoder-flush';
-          const _flushStart = performance.now();
-          try {
-            await flushEncoderWithLiveness(encoder!, options.signal, (remaining) => {
-              const drained = 1 - remaining / flushStartQueue;
-              onProgress?.(
-                88 + Math.max(0, Math.min(1, drained)) * 7,
-                `Encoding remaining frames... ${Math.max(0, remaining)} left`,
-              );
-            });
-          } finally {
-            phaseTimers.flushMs = performance.now() - _flushStart;
-            flushDone = true;
-            window.clearInterval(flushProgress);
-          }
-          onProgress?.(95, 'Encoding complete');
-          try { encoder!.close(); } catch {}
-          encoder = null;
-          resolve();
-        } catch (error) {
-          try { encoder?.close(); } catch {}
-          encoder = null;
-          reject(error instanceof Error ? error : new Error(String(error)));
+        // STAGE 2.8.4: snapshot frame 0 as the loop reference. Cloned —
+        // the renderer reuses its readback buffer, so a view would be
+        // overwritten long before the comparison runs.
+        if (i === 0 && options.verifyLoop) {
+          loopReference = cloneLoopSample(options.getReadFramePixels?.() ?? null);
         }
-      })();
+      },
     });
 
-    throwIfExportAborted(options.signal);
-    const finalizing = getExportFinalizationProgress('finalizing');
-    onProgress?.(finalizing.progress, finalizing.message);
-    failurePhase = 'mux-finalize';
-    const muxStartedAt = performance.now();
-    const bytes = muxer.finalize();
-    finalizationTimers.muxMs = performance.now() - muxStartedAt;
-    assertUsableEncodedBytes(bytes, 'WebCodecs WebM');
+    phaseTimers.renderMs = result.renderMs;
+    phaseTimers.encodeMs = result.encodeMs;
+    phaseTimers.finalizeMs = result.finalizeMs;
+
+    if (import.meta.env?.DEV && encoderConfigInfo) {
+      console.info('[BLENDCRAFT export:mediabunny] Encoder config', encoderConfigInfo);
+    }
+
+    // Loop verification: render one extra frame at the wrap point and
+    // pixel-diff it against the frame-0 reference captured above.
+    if (options.verifyLoop && loopReference) {
+      try {
+        onProgress?.(93, 'Verifying loop...');
+        const wrapTimeSeconds = totalFrames / clampedFps;
+        await renderFrameAtTime(wrapTimeSeconds, undefined);
+        const wrapFrame = cloneLoopSample(options.getReadFramePixels?.() ?? null);
+        const loopResult = compareLoopFrames(loopReference, wrapFrame);
+        console.info('[Export] ' + describeLoopResult(loopResult), loopResult);
+        options.onLoopVerified?.(loopResult);
+      } catch (loopError) {
+        console.warn('[Export] Loop verification skipped:', loopError);
+      }
+    }
 
     throwIfExportAborted(options.signal);
     const preparingFile = getExportFinalizationProgress('preparing-file');
     onProgress?.(preparingFile.progress, preparingFile.message);
     await waitForNextPaint();
     const blobStartedAt = performance.now();
-    const blob = new Blob([bytes], { type: 'video/webm' });
+    const blob = result.blob;
     finalizationTimers.blobMs = performance.now() - blobStartedAt;
+    finalizationTimers.muxMs = phaseTimers.finalizeMs;
+
+    // Verify the ACTUAL exported file's duration, not just the numbers fed
+    // into the encoder — closes a false-PASS risk where a certification step
+    // trusted its own planned input instead of the real artifact.
+    const durationCheck = await verifyExportedArtifactDuration(blob, durationMs, clampedFps);
+    if (durationCheck.checked && !durationCheck.withinTolerance) {
+      console.warn('[Export] Exported WebM duration mismatch:', durationCheck);
+    }
 
     throwIfExportAborted(options.signal);
-    failurePhase = 'playback-certification';
-    onProgress?.(97, 'Certifying video playback...');
-    await assertPlayableVideoBlob(blob, 'WebCodecs WebM', options.signal);
-
-    throwIfExportAborted(options.signal);
-    failurePhase = 'download-handoff';
     const exportingFile = getExportFinalizationProgress('exporting-file');
     onProgress?.(exportingFile.progress, exportingFile.message);
     finalizationTimers.downloadHandoffMs = await handoffExportDownload(() => saveAs(blob, filename));
     downloadHandoffComplete = true;
-    // STAGE 2.8.5: publish the breakdown. This is the datapoint that turns
-    // "the export felt slow" into "the encoder took 84% of it on this content".
+
     const totalMs = performance.now() - phaseTimers.startedAt;
     const pct = (ms: number) => `${((ms / Math.max(1, totalMs)) * 100).toFixed(0)}%`;
     const timing = {
       totalSec: +(totalMs / 1000).toFixed(1),
       renderSec: +(phaseTimers.renderMs / 1000).toFixed(1),
-      encodeWaitSec: +(phaseTimers.queueWaitMs / 1000).toFixed(1),
-      flushSec: +(phaseTimers.flushMs / 1000).toFixed(1),
+      encodeWaitSec: +(phaseTimers.encodeMs / 1000).toFixed(1),
+      flushSec: 0,
       muxSec: +(finalizationTimers.muxMs / 1000).toFixed(3),
       blobSec: +(finalizationTimers.blobMs / 1000).toFixed(3),
       downloadHandoffSec: +(finalizationTimers.downloadHandoffMs / 1000).toFixed(3),
       frames: totalFrames,
       msPerFrame: +(totalMs / Math.max(1, totalFrames)).toFixed(0),
-      breakdown: `render ${pct(phaseTimers.renderMs)} · encode-wait ${pct(phaseTimers.queueWaitMs)} · flush ${pct(phaseTimers.flushMs)} · mux ${pct(finalizationTimers.muxMs)} · download ${pct(finalizationTimers.downloadHandoffMs)}`,
-      encodedChunkCount,
-      lastEncodedChunkAgeMs: lastEncodedChunkAt > 0 ? +(performance.now() - lastEncodedChunkAt).toFixed(0) : null,
-      finalQueueSize: Math.max(0, (encoder as any)?.encodeQueueSize ?? 0),
+      breakdown: `render ${pct(phaseTimers.renderMs)} \u00b7 encode ${pct(phaseTimers.encodeMs)} \u00b7 finalize ${pct(phaseTimers.finalizeMs)} \u00b7 blob ${pct(finalizationTimers.blobMs)} \u00b7 download ${pct(finalizationTimers.downloadHandoffMs)}`,
       finalization: { ...finalizationTimers },
+      artifactDuration: durationCheck,
     };
     console.info('[Export] Timing:', timing);
     try { (window as unknown as Record<string, unknown>).__exportTiming = timing; } catch { /* diag */ }
     recordExportTiming(timing);
-    savedViaWebCodecs = true;
   } catch (error) {
-    if (!savedViaWebCodecs) {
-      // Phase 7.1B: never start MediaRecorder after an active WebCodecs export
-      // has already failed. captureStream() must own the real-time capture path
-      // from the beginning; starting it after an offline WebCodecs failure can
-      // only produce empty or suspicious files. Record the failed attempt and
-      // restore the preview through the common finally block instead.
-      const failedAt = performance.now();
-      const failureTiming = {
-        phase: failurePhase,
-        message: error instanceof Error ? error.message : String(error),
-        totalSec: +((failedAt - phaseTimers.startedAt) / 1000).toFixed(1),
-        renderSec: +(phaseTimers.renderMs / 1000).toFixed(1),
-        encodeWaitSec: +(phaseTimers.queueWaitMs / 1000).toFixed(1),
-        flushSec: +(phaseTimers.flushMs / 1000).toFixed(1),
-        muxSec: +(finalizationTimers.muxMs / 1000).toFixed(3),
-        encodedChunkCount,
-        encodeQueueSize: Math.max(0, (encoder as any)?.encodeQueueSize ?? 0),
-        lastEncodedChunkAgeMs: lastEncodedChunkAt > 0 ? +(failedAt - lastEncodedChunkAt).toFixed(0) : null,
-      };
-      console.error('[BLENDCRAFT Export 7.4R.1] Export failed:', failureTiming, error);
-      try { (window as unknown as Record<string, unknown>).__exportFailureTiming = failureTiming; } catch { /* diagnostics only */ }
+    if (!fallbackUsed) {
       recordExportFailure(error);
       const message = error instanceof Error ? error.message : String(error);
-      onProgress?.(0, message.includes('backpressure')
-        ? 'Encoder stalled — recovering export'
-        : 'Video encoder failed — recovering export');
+      onProgress?.(0, `Video encoder failed \u2014 recovering export${message ? `: ${message}` : ''}`);
     }
     throw error;
   } finally {
-    try { encoder?.close(); } catch {}
-    encoder = null;
+    try { options.restoreSize?.(); } catch {}
+    cleanupExportResources();
 
-    try {
-      stream?.getTracks?.().forEach((track) => track.stop());
-    } catch {}
-    stream = null;
+    stagingCanvas.width = 1;
+    stagingCanvas.height = 1;
 
     const cleanupStartedAt = performance.now();
     if (downloadHandoffComplete) {
@@ -1792,14 +1158,6 @@ export async function exportWebMFromCanvas(options: {
       onProgress?.(cleanupStage.progress, cleanupStage.message);
       await waitForNextPaint();
     }
-
-    try { options.restoreSize?.(); } catch {}
-    cleanupExportResources();
-
-    stagingCanvas.width = 1;
-    stagingCanvas.height = 1;
-
-    await waitForNextPaint();
     await waitForNextPaint();
     await new Promise<void>((resolve) => {
       const ric = (globalThis as any).requestIdleCallback as undefined | ((cb: () => void, opts?: { timeout: number }) => number);
@@ -1816,9 +1174,8 @@ export async function exportWebMFromCanvas(options: {
     if (memoryRecovery.supported && !memoryRecovery.withinLimit) {
       console.warn('[Export] Retained heap exceeded the 15% recovery target:', memoryRecovery);
     }
-    if (import.meta.env?.DEV) console.info('[BLENDCRAFT export:v2.2.5-phase2.5] WebM cleanup complete', {
+    if (import.meta.env?.DEV) console.info('[BLENDCRAFT export:mediabunny] WebM cleanup complete', {
       ...diagnostics,
-      savedViaWebCodecs,
       fallbackUsed,
       memoryRecovery,
     });
@@ -1830,6 +1187,7 @@ export async function exportWebMFromCanvas(options: {
     onProgress?.(completeStage.progress, completeStage.message);
   }
 }
+
 
 export async function exportGIFFromCanvas(options: {
   canvas: HTMLCanvasElement;
@@ -2438,12 +1796,37 @@ export async function exportMP4FromCanvas(options: {
   const targetHeight = Math.max(2, Math.round(options.height || options.canvas.height));
   if (durationMs <= 0 || !Number.isFinite(durationMs)) throw new Error(`Invalid duration: ${durationMs}ms`);
 
+  const clampedFps = Math.max(24, Math.min(60, fps));
+  const totalFrames = Math.max(1, Math.round((durationMs / 1000) * clampedFps));
+  // MP4_QUALITY_PRESETS carries the higher bitrates smooth gradients need
+  // under H.264 to avoid banding — and matches the export panel summary.
+  const bitrate = MP4_QUALITY_PRESETS[quality].bitrate(targetWidth, targetHeight);
+
   // Resize renderer to export dimensions for full-res frames
   options.setExportSize?.(targetWidth, targetHeight);
 
-  if (!canAttemptMP4WebCodecs()) {
+  if (!isWebCodecsAvailable()) {
     try {
       await exportMP4WithMediaRecorderFallback(options);
+    } finally {
+      options.restoreSize?.();
+    }
+    return;
+  }
+
+  // MP4-primary policy: probe H.264 capability BEFORE committing to a full
+  // render pass. Mediabunny's canEncodeVideo() queries the browser's real
+  // WebCodecs support directly, replacing a hand-rolled AVC profile x level
+  // negotiation table that had to be manually extended every time a new
+  // rejection surfaced (e.g. the avc1.42001f Baseline-profile bug).
+  const h264Encodable = await canEncodeContainer('mp4', targetWidth, targetHeight, clampedFps);
+  if (!h264Encodable) {
+    if (import.meta.env?.DEV) console.warn('[BLENDCRAFT export:mediabunny] H.264 not encodable in this environment — falling back to WebM (VP9).');
+    onProgress?.(0, 'H.264 unavailable — exporting as WebM (VP9)...');
+    const webmFilename = filename.replace(/\.mp4$/i, '.webm');
+    (options as any).__fellBackToWebM = true;
+    try {
+      await exportWebMFromCanvas({ ...options, filename: webmFilename });
     } finally {
       options.restoreSize?.();
     }
@@ -2456,114 +1839,53 @@ export async function exportMP4FromCanvas(options: {
     document.querySelector('canvas[data-blendcraft-live]') ||
     document.querySelector('canvas');
 
-  const clampedFps = Math.max(24, Math.min(60, fps));
-  const totalFrames = Math.max(1, Math.round((durationMs / 1000) * clampedFps));
-  // STAGE-1 FIX: use the H.264-tuned MP4 presets, not the VP9 presets.
-  // MP4_QUALITY_PRESETS carries the higher bitrates smooth gradients need
-  // under H.264 to avoid banding — and matches the export panel summary.
-  const bitrate = MP4_QUALITY_PRESETS[quality].bitrate(targetWidth, targetHeight);
   const stagingCanvas = document.createElement('canvas');
   stagingCanvas.width = targetWidth;
   stagingCanvas.height = targetHeight;
-  const frameDurationTs = Math.round(1_000_000 / clampedFps);
 
-  onProgress?.(0, `Encoding ${totalFrames} frames with vendored MP4 muxer...`);
+  onProgress?.(0, `Encoding ${totalFrames} frames (MP4/H.264)...`);
 
   try {
-    // EXPORT-FIX (MP4 v2): probe INSIDE the try block. Previously a probe
-    // failure threw before the try, escaping the WebM fallback entirely and
-    // surfacing as a hard "Video export failed" instead of a graceful
-    // format fallback.
-    const configChoice = await pickSupportedMP4EncoderConfig(targetWidth, targetHeight, clampedFps, bitrate);
-    const Encoder = (globalThis as any).VideoEncoder;
-
-    // Collect encoded chunks + extract avcDecoderConfig from first keyframe metadata.
-    // The vendored MP4Muxer requires avcDecoderConfig (SPS/PPS) at construction time.
-    const sampleBuffer: Array<{ data: Uint8Array; duration: number; timestamp: number; keyFrame: boolean }> = [];
-    let avcDecoderConfig: Uint8Array | null = null;
-
-    await new Promise<void>((resolve, reject) => {
-      const encoder = new Encoder({
-        output: (chunk: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata) => {
-          // Extract avcDecoderConfig (SPS/PPS) from the first keyframe
-          if (!avcDecoderConfig && metadata?.decoderConfig?.description) {
-            const desc = metadata.decoderConfig.description as ArrayBuffer | ArrayBufferView;
-            avcDecoderConfig = desc instanceof ArrayBuffer
-              ? new Uint8Array(desc)
-              : new Uint8Array((desc as ArrayBufferView).buffer,
-                  (desc as ArrayBufferView).byteOffset,
-                  (desc as ArrayBufferView).byteLength);
-          }
-          const data = new Uint8Array(chunk.byteLength);
-          chunk.copyTo(data);
-          sampleBuffer.push({
-            data,
-            duration: chunk.duration ?? frameDurationTs,
-            timestamp: chunk.timestamp,
-            keyFrame: chunk.type === 'key',
-          });
-        },
-        error: (error: Error) => reject(error),
-      });
-
-      (async () => {
-        try {
-          encoder.configure({
-            codec: configChoice.codec,
-            width: targetWidth,
-            height: targetHeight,
-            // EXPORT-FIX (MP4 v2): use the probe's clamped bitrate — the
-            // preset value may exceed the negotiated AVC level's ceiling.
-            bitrate: configChoice.bitrate,
-            framerate: clampedFps,
-            latencyMode: 'quality',
-            avc: { format: 'avcC' },  // AVCC format — length-prefixed NAL, required for MP4 container
-            ...(configChoice.hardwareAcceleration ? { hardwareAcceleration: configChoice.hardwareAcceleration } : {}),
-          });
-
-          for (let i = 0; i < totalFrames; i++) {
-            const t = i / clampedFps;
-            await renderFrameAtTime(t, undefined);
-            drawFrameToStagingCanvas({ stagingCanvas, targetWidth, targetHeight, liveCanvas, getReadFramePixels: options.getReadFramePixels, codecSafety: options.codecSafety || 'sharp', flashOverlay: options.getFlashOverlayFrame?.(t) ?? null });
-            const timestamp = i * frameDurationTs;
-            const frame = new VideoFrame(stagingCanvas, { timestamp, duration: frameDurationTs });
-            encoder.encode(frame, { keyFrame: i === 0 || i % clampedFps === 0 });
-            frame.close();
-            if (i % Math.max(1, Math.floor(totalFrames / 20)) === 0 || i === totalFrames - 1) {
-              onProgress?.(5 + ((i + 1) / totalFrames) * 85, `Frame ${i + 1}/${totalFrames}`);
-            }
-            // EXP-04 FIX: same as WebM path — yield on queue pressure or every 30 frames.
-            const queueSize = (encoder as any).encodeQueueSize ?? 0;
-            if (queueSize > 10 || i % 30 === 29) await yieldToBrowser();
-          }
-          await encoder.flush();
-          encoder.close();
-          resolve();
-        } catch (error) {
-          try { encoder.close(); } catch {}
-          reject(error instanceof Error ? error : new Error(String(error)));
-        }
-      })();
+    const result = await encodeVideoWithMediabunny({
+      stagingCanvas,
+      width: targetWidth,
+      height: targetHeight,
+      fps: clampedFps,
+      totalFrames,
+      bitrate,
+      container: 'mp4',
+      signal: options.signal,
+      onProgress,
+      drawFrame: async (_i, t) => {
+        await renderFrameAtTime(t, undefined);
+        drawFrameToStagingCanvas({
+          stagingCanvas,
+          targetWidth,
+          targetHeight,
+          liveCanvas,
+          getReadFramePixels: options.getReadFramePixels,
+          codecSafety: options.codecSafety || 'sharp',
+          flashOverlay: options.getFlashOverlayFrame?.(t) ?? null,
+        });
+      },
     });
 
-    if (!avcDecoderConfig) throw new Error('H.264 decoder configuration missing — no keyframe produced.');
-    onProgress?.(96, 'Muxing MP4 container...');
-    // Use vendored MP4Muxer — no npm install required
-    const mp4muxer = new MP4Muxer({ width: targetWidth, height: targetHeight, timescale: 1_000_000, avcDecoderConfig });
-    for (const sample of sampleBuffer) mp4muxer.addSample(sample);
-    const mp4bytes = mp4muxer.finalize();
-    saveAs(new Blob([mp4bytes], { type: 'video/mp4' }), filename.replace(/\.webm$/, '.mp4'));
+    const durationCheck = await verifyExportedArtifactDuration(result.blob, durationMs, clampedFps);
+    if (durationCheck.checked && !durationCheck.withinTolerance) {
+      console.warn('[Export] Exported MP4 duration mismatch:', durationCheck);
+    }
+
+    saveAs(result.blob, filename.replace(/\.webm$/, '.mp4'));
     onProgress?.(100, 'MP4 export complete!');
   } catch (error) {
     // Never launch the WebM fallback after a user-initiated abort.
     if (options.signal?.aborted) throw error;
-    // H.264 WebCodecs encoding failed — notify user and fall back to VP9/WebM.
-    // This happens on browsers/GPUs that don't support H.264 hardware encoding via WebCodecs.
-    // We save with .webm extension so the file is actually playable (not a broken .mp4).
-    if (import.meta.env?.DEV) console.warn('MP4/H.264 WebCodecs export failed — falling back to VP9/WebM.', error);
-    onProgress?.(0, 'H.264 unavailable — exporting as WebM (VP9)...');
+    // H.264 encode failed mid-pass (rare once the capability probe above has
+    // passed, but a driver can still reject at encode time) — fall back to
+    // VP9/WebM and save with .webm so the file is actually playable.
+    if (import.meta.env?.DEV) console.warn('MP4/H.264 Mediabunny export failed mid-encode — falling back to VP9/WebM.', error);
+    onProgress?.(0, 'H.264 encode failed — exporting as WebM (VP9)...');
     const webmFilename = filename.replace(/\.mp4$/i, '.webm');
-    // Surface the fallback to the caller so the UI can show the correct format
     (options as any).__fellBackToWebM = true;
     await exportWebMFromCanvas({ ...options, filename: webmFilename });
   } finally {
@@ -2571,6 +1893,7 @@ export async function exportMP4FromCanvas(options: {
     cleanupExportResources();
   }
 }
+
 
 
 /**

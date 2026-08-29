@@ -7,8 +7,8 @@ import { selectRecordingCodec } from '../src/app/export/recording/RecordingCodec
 
 test('resolves the 1080p high profile and estimates size', () => {
   const profile = resolveRecordingProfile({ width: 1920, height: 1080, fps: 30, quality: 'high', durationMs: 5_000 });
-  assert.equal(profile.videoBitsPerSecond, 16_000_000);
-  assert.equal(estimateRecordingBytes(profile.videoBitsPerSecond, 5_000), 10_000_000);
+  assert.equal(profile.videoBitsPerSecond, 24_000_000);
+  assert.equal(estimateRecordingBytes(profile.videoBitsPerSecond, 5_000), 15_000_000);
 });
 
 test('codec selection follows VP9, VP8, WebM fallback order', () => {

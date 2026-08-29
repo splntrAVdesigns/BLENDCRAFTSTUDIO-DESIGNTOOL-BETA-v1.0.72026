@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { saveAs } from 'file-saver';
 import { Button } from '../ui/button';
 import { Label } from '../ui/label';
 import { Input } from '../ui/input';
@@ -23,17 +24,23 @@ import {
 import { toast } from 'sonner';
 import { Layer, CanvasSettings, type RenderApi } from '../../types/gradient';
 import { 
+  exportMP4FromCanvas,
+  exportWebMFromCanvas,
+  verifyMP4EncodeSupport,
   exportPNGAtSize,
   exportAsSVG,
   generateCSSCode,
+  pickBestVideoMimeType,
   PNG_PRESETS,
   WEBM_PRESETS,
   VIDEO_QUALITY_PRESETS,
+  MP4_QUALITY_PRESETS,
   type VideoQuality,
   type ExportPreset,
 } from '../../utils/exportUtils';
 import { confirmWebMExportPlan, planWebMExport, WEBM_FRAME_WARN_LIMIT, WEBM_FRAME_CONFIRM_LIMIT } from '../../utils/exportPlanner';
 import { getMediaSourceMaxResolution } from '../../media';
+import type { LoopVerificationResult } from '../../utils/loopVerification';
 import {
   beginExportStatus,
   endExportStatus,
@@ -43,10 +50,6 @@ import {
 } from '../../state/exportStatus';
 import { createLayerExportDurationPlan } from '../../export/ExportDurationPlan';
 import { isolatePreview } from '../../export/recording/PreviewIsolationController';
-// PHASE 7.7d: exportRealtimeHiddenCanvasVideo import removed. It is no longer
-// wired as an automatic fallback (see the export handler below for why) and
-// nothing else in this file calls it.
-import { runWorkingWebMExport } from '../../export/recording/WorkingWebMExportBridge';
 
 interface ExportPanelProps {
   layers: Layer[];
@@ -124,7 +127,7 @@ export function ExportPanel({
   // WebM settings
   const [webmPreset, setWebmPreset] = useState<string>('1080p');
   const [webmFps, setWebmFps] = useState(30);
-  const [webmQuality, setWebmQuality] = useState<VideoQuality>('standard');
+  const [webmQuality, setWebmQuality] = useState<VideoQuality>('high');
   // STAGE 3.2: render scale — the highest-leverage speed control. Every
   // per-frame cost (GPU fill, readback, flip, encode) scales with pixel count,
   // so 0.75× ≈ 1.8× faster and 0.5× ≈ 4× faster. 1.0 is unchanged behaviour.
@@ -142,8 +145,28 @@ export function ExportPanel({
   // Phase 7.3D validation gate. Default OFF keeps the certified legacy engine
   // public while allowing direct renderer/MediaRecorder parity testing before
   // the Phase 7.3E cutover. This temporary control is removed at cutover.
-  // Phase 7.4R: production video is the recovered, known-good VP9/WebM path.
-  const [videoFormat] = useState<'webm'>('webm');
+  // Video container format. MP4 (H.264) is the primary, default export
+  // format — universal playback, matches what every other pro export tool
+  // treats as the standard deliverable. WebM (VP9) remains selectable as
+  // the explicit fallback format (smaller files, no H.264 involved).
+  // MP4 gracefully auto-falls-back to WebM when the browser/GPU can't
+  // encode H.264 at all (handled inside exportMP4FromCanvas via a
+  // Mediabunny capability probe, before any frames are rendered).
+  const [videoFormat, setVideoFormat] = useState<'webm' | 'mp4'>('mp4');
+  // MP4 v3: async REAL capability probe. The old sync check only verified
+  // the WebCodecs classes exist — true even in environments (Figma desktop /
+  // Electron builds, post-GPU-crash sessions) that reject every actual
+  // H.264 config, which produced doomed export attempts. null = probing.
+  const [mp4Supported, setMp4Supported] = useState<boolean | null>(null);
+  useEffect(() => {
+    let alive = true;
+    verifyMP4EncodeSupport().then((ok) => {
+      if (!alive) return;
+      setMp4Supported(ok);
+      if (!ok) setVideoFormat((f: 'webm' | 'mp4') => (f === 'mp4' ? 'webm' : f));
+    });
+    return () => { alive = false; };
+  }, []);
   // Custom resolution state — synced from preset dropdown, editable when preset = 'Custom'
   const [webmCustomWidth, setWebmCustomWidth] = useState(1920);
   const [webmCustomHeight, setWebmCustomHeight] = useState(1080);
@@ -523,86 +546,190 @@ ${colorInterpExpanded}
       toast.error('Render system not ready. Please try again.');
       return;
     }
-
     const canvas = getCanvas();
     if (!canvas) {
       toast.error('Canvas not available. Please try again.');
       return;
     }
+    const wantsMP4 = videoFormat === 'mp4';
+    if (!wantsMP4 && !pickBestVideoMimeType()) {
+      toast.error('WebM video not supported in this browser. Try Chrome or Firefox.');
+      return;
+    }
+    if (wantsMP4 && mp4Supported !== true) {
+      toast.error('MP4 export not available in this environment — use WebM instead.');
+      return;
+    }
 
     const base = getWebmResolution();
-    const width = Math.max(2, Math.round(base.width * webmRenderScale / 2) * 2);
+    // STAGE 3.2: apply render scale, keeping even dimensions (VP9 requires even).
+    const width  = Math.max(2, Math.round(base.width  * webmRenderScale / 2) * 2);
     const height = Math.max(2, Math.round(base.height * webmRenderScale / 2) * 2);
     const plan = planWebMExport({
       width,
       height,
       fps: webmFps,
       targetDurationMs: webmDuration * 1000,
+      // Phase 7.3B: duration and Loop Lock are resolved once by the shared
+      // authority used by both the UI preview and the active export path.
       durationPlan,
       quality: webmQuality,
       loopLockEnabled: durationPlan.loopLockEnabled,
     });
     if (!confirmWebMExportPlan(plan)) return;
+    const durationMs = plan.durationMs;
 
     const exportAbortController = new AbortController();
     exportAbortControllerRef.current = exportAbortController;
+
     setIsExporting(true, 'video', () => {
-      safeSetExportState(Math.max(1, exportProgress), 'Cancelling video export…');
+      safeSetExportState(Math.max(1, exportProgress), 'Cancelling export…');
       exportAbortController.abort('Export cancelled by user.');
     });
-    safeSetExportState(0, 'Preparing video export…');
-
-    // PHASE 7.12 — GIANT LEAP: this now calls exportWebMFromCanvas, the real
-    // engine that was already sprint-hardened in src/app/utils/exportUtils.ts
-    // and was simply never wired to this button. It already has the correct
-    // VP9 level selection, backpressure watermark, staging-canvas capture,
-    // and flush-drain progress polling. See WorkingWebMExportBridge.ts.
-    if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
-      toast.error('Video export requires a browser with WebCodecs support (VideoEncoder/VideoFrame). Please update your browser.');
-      setIsExporting(false);
-      return;
-    }
+    setExportProgress(0);
+    setExportMessage(`Preparing ${plan.estimateLabel}...`);
 
     try {
-      const filename = `gradient-${plan.width}x${plan.height}-${plan.fps}fps.webm`;
+      // Phase 7.3E.6 production cutover: MP4 retains its established encoder
+      // setup. WebM is now exclusively owned by the production recording bridge,
+      // including preview isolation, export timing, and renderer restoration.
+      if (wantsMP4) {
+        api.configureExportTimeline?.({
+          fps: plan.fps,
+          totalFrames: plan.totalFrames,
+          durationMs: plan.durationMs,
+          loopLockEnabled: durationPlan.loopLockEnabled,
+        });
+        if (durationPlan.loopLockEnabled) {
+          safeSetExportState(0, 'Resetting animation loop start...');
+        }
+        api.pauseAnimation?.({ resetExportPhase: durationPlan.loopLockEnabled });
+        await new Promise(r => setTimeout(r, 30));
+        if (exportAbortController.signal.aborted || !isMountedRef.current) return;
 
-      await runWorkingWebMExport({
-        api,
-        sourceCanvas: canvas,
+        const bakeStatus = await api.prepareAudioExport?.();
+        if (bakeStatus) safeSetExportState(0, bakeStatus);
+        if (exportAbortController.signal.aborted || !isMountedRef.current) {
+          api.finishAudioExport?.();
+          return;
+        }
+      }
+
+      const sharedExportOptions = {
+        canvas,
+        renderFrameAtTime: (t: number) => api.renderAtTime(t, undefined),
+        fps: plan.fps,
+        durationMs,
+        quality: plan.quality,
         width: plan.width,
         height: plan.height,
-        fps: plan.fps,
-        durationMs: plan.durationMs,
-        // exportWebMFromCanvas's VideoQuality natively includes 'max' — no
-        // downgrade mapping needed, unlike the old reconstruction.
-        quality: webmQuality,
-        loopLockEnabled: durationPlan.loopLockEnabled,
-        filename,
+        getLiveCanvas: () => api.getCanvas(),
+        getReadFramePixels: () => api.readFramePixels?.() ?? null,
+        getFlashOverlayFrame: (t: number) => api.getExportFlashOverlay?.(t) ?? null,
+        // ── STAGE 2.8.4: LOOP VERIFICATION ──
+        // Only meaningful when loop lock is on — that's the setting that
+        // CLAIMS the export loops, so it's the claim we measure. Costs one
+        // extra rendered frame; reports a number instead of an assurance.
+        verifyLoop: loopPerfect,
+        onLoopVerified: (result: LoopVerificationResult) => {
+          if (!isMountedRef.current) return;
+          if (result.error) return; // check unavailable — say nothing rather than alarm
+          if (result.seamless) {
+            toast.success(`Loop verified — seamless wrap (${result.matchLabel} match)`);
+          } else {
+            // Honest, actionable, and not alarmist: the file is fine, the loop
+            // point just isn't clean, and the usual cause is a subsystem whose
+            // cycle doesn't divide into the locked duration.
+            toast.warning(
+              `Loop is not seamless (${result.matchLabel} match at the wrap). ` +
+              `The export is fine — but an animated layer, texture, or video ` +
+              `doesn't complete a whole cycle in ${(durationMs / 1000).toFixed(2)}s.`,
+            );
+          }
+        },
+        setExportSize: (w: number, h: number) => api.setExportSize?.(w, h),
+        restoreSize: () => api.restoreSize?.(),
+        codecSafety: plan.codecSafety,
         signal: exportAbortController.signal,
-        onProgress: (progress, message) => safeSetExportState(progress, message || ''),
-      });
+        onProgress: (progress: number, message?: string) => safeSetExportState(progress, message || ''),
+      };
 
-      safeSetExportState(100, 'Export complete');
-      if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        toast.success(`WebM exported: ${plan.estimateLabel}`);
+      if (wantsMP4) {
+        // Repaired MP4/H.264 path: WebCodecs encode → vendored muxer (stco
+        // offset fix). Falls back to VP9/WebM internally when the hardware
+        // H.264 encoder is unavailable — surface that to the user.
+        const mp4Options = {
+          ...sharedExportOptions,
+          filename: `gradient-${plan.width}x${plan.height}-${plan.fps}fps.mp4`,
+        };
+        await exportMP4FromCanvas(mp4Options);
+        if (isMountedRef.current && !exportAbortController.signal.aborted) {
+          if ((mp4Options as any).__fellBackToWebM) {
+            toast.warning(`H.264 encoder unavailable — exported as WebM instead: ${plan.estimateLabel}`);
+          } else {
+            toast.success(`MP4 exported: ${plan.estimateLabel}`);
+          }
+        }
+      } else {
+        // Phase 7.3E.8 production cutover: WebM is rendered offline and encoded
+        // with explicit per-frame timestamps. Render time can exceed playback
+        // duration without stretching or duplicating the exported timeline.
+        const previewIsolation = isolatePreview({
+          sourceCanvas: canvas,
+          readFramePixels: api.readFramePixels,
+        });
+        try {
+          api.configureExportTimeline?.({
+            fps: plan.fps,
+            totalFrames: plan.totalFrames,
+            durationMs: plan.durationMs,
+            loopLockEnabled: durationPlan.loopLockEnabled,
+          });
+          if (durationPlan.loopLockEnabled) {
+            safeSetExportState(0, 'Resetting animation loop start…');
+          }
+          api.pauseAnimation?.({ resetExportPhase: durationPlan.loopLockEnabled });
+          const bakeStatus = await api.prepareAudioExport?.();
+          if (bakeStatus) safeSetExportState(1, bakeStatus);
+
+          await exportWebMFromCanvas({
+            ...sharedExportOptions,
+            filename: `gradient-${plan.width}x${plan.height}-${plan.fps}fps.webm`,
+          });
+          safeSetExportState(100, 'Export complete');
+          if (isMountedRef.current && !exportAbortController.signal.aborted) {
+            toast.success(`Frame-accurate WebM exported: ${plan.estimateLabel}`);
+          }
+        } finally {
+          try { previewIsolation.dispose(); } catch {}
+        }
       }
     } catch (error) {
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        console.error('[BLENDCRAFT Video Export] Export failed:', error);
-        const detail = error instanceof Error ? error.message : 'Unknown error';
-        toast.error(`Video export failed: ${detail}`, {
-          action: {
-            label: 'Retry',
-            onClick: () => { void handleWebmExport(); },
-          },
-        });
+        console.error('Video export error:', error);
+        toast.error(`Video export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     } finally {
       if (exportAbortControllerRef.current === exportAbortController) {
         exportAbortControllerRef.current = null;
       }
+      {
+        api.finishAudioExport?.();
+        if (api.cleanupExportSession) {
+          await api.cleanupExportSession();
+        } else {
+          api.clearExportTimeline?.();
+          api.resumeAnimation?.();
+          api.restoreSize?.();
+        }
+      }
+      // STAGE 2.8.3: hold the completed overlay briefly. The bar previously
+      // vanished mid-count, so a long render ended with the panel simply
+      // blanking and a file appearing — no confirmation that anything
+      // succeeded. A short beat on "Export complete" closes the loop.
+      // Skipped on abort (nothing completed) and when unmounted.
       if (isMountedRef.current && !exportAbortController.signal.aborted) {
-        await new Promise((resolve) => setTimeout(resolve, 700));
+        await new Promise((r) => setTimeout(r, 700));
       }
       if (isMountedRef.current) {
         setIsExporting(false);
@@ -611,6 +738,7 @@ ${colorInterpExpanded}
       }
     }
   };
+
 
   // ============================================================
   // SVG EXPORT
@@ -758,16 +886,36 @@ ${colorInterpExpanded}
               <Label>Format</Label>
               <SelectWrapper
                 value={videoFormat}
-                onValueChange={() => {}}
+                onValueChange={(v) => {
+                  if (v === 'mp4' && mp4Supported !== true) {
+                    toast.error(
+                      mp4Supported === null
+                        ? 'Still checking H.264 support — one moment.'
+                        : 'This environment cannot encode H.264 (common in embedded previews and Electron hosts). Use WebM here, or test MP4 in a standalone Chrome/Edge tab.'
+                    );
+                    return;
+                  }
+                  setVideoFormat(v as 'webm' | 'mp4');
+                }}
                 options={[
-                  { value: 'webm', label: 'WebM (VP9) — optimized export' },
+                  {
+                    value: 'mp4',
+                    label: mp4Supported === true
+                      ? 'MP4 (H.264) — universal playback (default)'
+                      : mp4Supported === null
+                        ? 'MP4 (H.264) — checking support…'
+                        : 'MP4 (H.264) — unavailable in this environment',
+                  },
+                  { value: 'webm', label: 'WebM (VP9) — fallback format, smaller files' },
                 ]}
                 triggerClassName="border-zinc-700 text-zinc-100"
                 contentClassName="bg-zinc-900 border-zinc-700"
               />
-              <p className="text-[10px] text-zinc-500">
-                Uses the recovered direct WebCodecs VP9 pipeline with the minimum valid codec level for the selected resolution.
-              </p>
+              {videoFormat === 'mp4' && (
+                <p className="text-[10px] text-zinc-500">
+                  Encoded with H.264. If this environment can't encode H.264, export falls back to WebM automatically before any frames are rendered.
+                </p>
+              )}
             </div>
 
             {/* Resolution preset */}
@@ -836,6 +984,7 @@ ${colorInterpExpanded}
                   { value: 'standard', label: 'Standard — fast preview' },
                   { value: 'high',     label: 'High — balanced' },
                   { value: 'ultra',    label: 'Ultra — max quality' },
+                  { value: 'sharpMax', label: 'Sharp Max — master / slow' },
                 ]}
                 triggerClassName="border-zinc-700 text-zinc-100"
                 contentClassName="bg-zinc-900 border-zinc-700"
@@ -927,7 +1076,7 @@ ${colorInterpExpanded}
             <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 space-y-1.5">
               <Label className="text-[10px] text-zinc-500 block">Export summary</Label>
               <p className="text-sm font-medium text-zinc-100">
-                {summaryW} × {summaryH} · {webmFps} fps · {effectiveDurationSec.toFixed(effectiveDurationSec % 1 === 0 ? 0 : 2)}s · Production WebM · optimized VP9
+                {summaryW} × {summaryH} · {webmFps} fps · {effectiveDurationSec.toFixed(effectiveDurationSec % 1 === 0 ? 0 : 2)}s · {videoFormat === 'mp4' ? 'MP4 H.264' : 'Production WebM'}
               </p>
               <div className="flex items-center gap-3 flex-wrap">
                 {/* Frame count with cap warning */}
@@ -997,7 +1146,7 @@ ${colorInterpExpanded}
               ) : (
                 <>
                   <Video className="w-4 h-4 mr-2" />
-                  Export WebM
+                  Export {videoFormat === 'mp4' ? 'MP4' : 'WebM'}
                 </>
               )}
             </Button>
