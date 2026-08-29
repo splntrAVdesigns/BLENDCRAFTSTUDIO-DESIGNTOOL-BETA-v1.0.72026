@@ -372,40 +372,26 @@ function canAttemptMP4WebCodecs(): boolean {
   return typeof Encoder?.isConfigSupported === 'function' || typeof Encoder === 'function';
 }
 
-async function isVideoEncoderConfigSupported(config: VideoEncoderConfig): Promise<boolean> {
-  const Encoder = (globalThis as any).VideoEncoder;
-  if (!Encoder) return false;
-
-  // Older Chromium/WebView builds may expose VideoEncoder but not isConfigSupported.
-  // In that case, allow configure() to be the final authority.
-  if (typeof Encoder.isConfigSupported !== 'function') return true;
-
-  try {
-    const result = await Encoder.isConfigSupported(config);
-    return !!result?.supported;
-  } catch {
-    return false;
-  }
-}
-
 let mp4SupportCache: Promise<boolean> | null = null;
+/**
+ * UI capability gate for the MP4 format option. Delegates to the same
+ * Mediabunny canEncodeVideo() probe the real encode path uses
+ * (canEncodeContainer in mediabunnyExport.ts) — previously this ran an
+ * independent, much narrower hand-rolled WebCodecs probe (a single exact
+ * config: avc1.42E01F Constrained Baseline @ 1280x720, 5 Mbps) that could
+ * report false negatives on environments where that ONE specific
+ * profile/level/resolution combination was rejected even though H.264 was
+ * genuinely encodable — which blocked the MP4 option in the UI while the
+ * real encode-time check would have succeeded. One source of truth now.
+ */
 export function verifyMP4EncodeSupport(opts?: { force?: boolean }): Promise<boolean> {
   if (!opts?.force && mp4SupportCache) return mp4SupportCache;
   mp4SupportCache = (async () => {
     if (!isWebCodecsAvailable()) return false;
-    for (const hardwareAcceleration of ['no-preference', 'prefer-software', 'prefer-hardware'] as const) {
-      const supported = await isVideoEncoderConfigSupported({
-        codec: 'avc1.42E01F', // Constrained Baseline, Level 3.1 — the floor
-        width: 1280,
-        height: 720,
-        bitrate: 5_000_000,
-        framerate: 30,
-        avc: { format: 'avcC' },
-        hardwareAcceleration,
-      } as unknown as VideoEncoderConfig);
-      if (supported) return true;
-    }
-    return false;
+    // Representative 1080p30 probe — matches the default export summary
+    // shown before the user picks a resolution. The real export re-probes
+    // at the actual target width/height/fps immediately before encoding.
+    return canEncodeContainer('mp4', 1920, 1080, 30);
   })();
   return mp4SupportCache;
 }
