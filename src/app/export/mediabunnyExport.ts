@@ -13,16 +13,26 @@
  * which call this module with a `drawFrame` callback.
  *
  * Why Mediabunny instead of hand-rolled VideoEncoder + muxer:
- * - `CanvasSource.add()` is awaited — genuine backpressure. The previous
- *   code polled `encoder.encodeQueueSize` against hand-tuned watermark
- *   tables per resolution/codec/hardware combination to approximate this.
- *   Mediabunny gives it for free.
+ * - `VideoSampleSource.add()` is awaited — genuine backpressure. The
+ *   previous code polled `encoder.encodeQueueSize` against hand-tuned
+ *   watermark tables per resolution/codec/hardware combination to
+ *   approximate this. Mediabunny gives it for free.
  * - `canEncodeVideo()` / `getFirstEncodableVideoCodec()` replace a
  *   hand-built AVC profile × level negotiation table (AVC_LEVEL_TABLE)
  *   that had to be manually extended every time a new rejection surfaced
  *   (e.g. the avc1.42001f Baseline-profile rejection bug).
  * - Actively maintained by the same author as the two deprecated
  *   packages this replaces; zero dependencies of its own.
+ *
+ * Uses Mediabunny's lower-level `VideoSampleSource` rather than
+ * `CanvasSource` — deliberately. `CanvasSource` constructs each frame's
+ * `VideoFrame` internally with no `colorSpace` hint, which inherits
+ * whatever default Chromium assigns to a canvas-sourced frame; real
+ * exported files confirmed that comes out tagged `color_range=tv`
+ * (limited/legal range) even though canvas pixel data is always full
+ * range. Constructing the `VideoFrame` explicitly, with an accurate
+ * `colorSpace`, is only possible via the lower-level API — see
+ * `CANVAS_SOURCE_COLOR_SPACE` below.
  */
 
 import {
@@ -30,11 +40,47 @@ import {
   Mp4OutputFormat,
   WebMOutputFormat,
   BufferTarget,
-  CanvasSource,
+  VideoSampleSource,
+  VideoSample,
   canEncodeVideo,
   type VideoCodec,
 } from 'mediabunny';
 import { isIframeEnvironment } from '../utils/environment';
+
+/**
+ * The color space to explicitly stamp on every canvas-sourced frame.
+ *
+ * The bug this fixes, traced directly (not guessed): Mediabunny's
+ * `CanvasSource` constructs frames via `new VideoFrame(canvas, {...})` with
+ * no `colorSpace` specified, so it inherits whatever default Chromium
+ * assigns — which real exported files confirmed comes out tagged
+ * `color_range=tv` (limited/legal range, 16-235). Canvas pixel data is
+ * ALWAYS full range (0-255); a canvas has no concept of legal video levels.
+ * Every spec-compliant player then applies legal→full expansion to data
+ * that was never legal-range-compressed, stretching values outward —
+ * highlights blow toward white, the effective range overshoots. That's the
+ * exact "saturation gone, brightness way up" symptom.
+ *
+ * This is the same color space Mediabunny's own raw-buffer RGBA/RGBX
+ * construction path already uses internally for genuine full-range RGB
+ * source data (see its `sample.ts` default for `format === 'RGBA'`) — not
+ * an invented value, matched to what the library's own author considers
+ * correct for this exact kind of source.
+ */
+const CANVAS_SOURCE_COLOR_SPACE: VideoColorSpaceInit = {
+  primaries: 'bt709',
+  transfer: 'iec61966-2-1',
+  matrix: 'rgb',
+  fullRange: true,
+};
+
+/**
+ * TypeScript's bundled DOM lib doesn't yet include `colorSpace` on the
+ * `CanvasImageSource` overload of `VideoFrameInit`, even though it's a real,
+ * runtime-supported field per the WebCodecs spec (and the one this whole
+ * fix depends on). Narrow, local augmentation rather than a blanket `any`.
+ */
+type VideoFrameInitWithColorSpace = VideoFrameInit & { colorSpace?: VideoColorSpaceInit };
 
 export type MediabunnyContainer = 'mp4' | 'webm';
 
@@ -71,9 +117,9 @@ export interface MediabunnyEncodeResult {
   mimeType: string;
   /** Wall-clock time spent inside drawFrame across all frames, ms. */
   renderMs: number;
-  /** Wall-clock time spent awaiting CanvasSource.add() across all frames, ms.
-   *  This is the real encode + backpressure cost — the honest replacement
-   *  for the old "queueWaitMs" watermark-drain metric. */
+  /** Wall-clock time spent awaiting VideoSampleSource.add() across all
+   *  frames, ms. This is the real encode + backpressure cost — the honest
+   *  replacement for the old "queueWaitMs" watermark-drain metric. */
   encodeMs: number;
   /** Wall-clock time spent inside output.finalize(), ms. */
   finalizeMs: number;
@@ -84,37 +130,76 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 /**
- * A genuine macrotask yield (not a microtask). Awaiting only
- * microtask-resolving promises in a loop — which is what a bare
- * `await CanvasSource.add()` does — never gives the browser a chance to
- * paint or process input, because the JS event loop drains every pending
- * microtask before it's willing to run a macrotask (paint, timer, click
- * handling). A render+encode loop with no periodic macrotask yield can run
- * to completion with the tab looking completely frozen: progress state
- * updates internally, but the DOM never repaints, and Cancel Export clicks
- * never get processed, until something external forces a task-queue
- * boundary (backgrounding/foregrounding the tab, opening devtools).
- * `CanvasSource.add()`'s real backpressure controls how far ahead of the
- * encoder rendering gets — it does not, by itself, guarantee the browser
- * ever gets to breathe.
+ * Runs the render+encode pass as a genuine `requestAnimationFrame` loop —
+ * each frame's work happens inside a real rAF callback, which schedules the
+ * next frame's rAF callback only once that frame's async work resolves.
+ *
+ * This replaces a plain `for` loop with a `setTimeout`-based yield between
+ * iterations, which turned out to be a materially weaker signal to
+ * Chromium than genuine rAF-paced work: the frame production loop in
+ * Visual Mood Lab's proven-stable architecture (Mediabunny + WebCodecs,
+ * documented in `video-export-architecture.md` §4) is *itself* a real rAF
+ * loop, not a for-loop with a decorative rAF running alongside it — "own
+ * requestAnimationFrame loop... each tick → draw, await add(), repeat."
+ * Driving the actual frame work through rAF, rather than merely pinging an
+ * empty rAF callback in parallel, is the structural difference worth
+ * testing directly against BlendCraft's finalize-stage stall.
  */
-function yieldToBrowser(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
+function runFrameLoopViaRAF(params: {
+  totalFrames: number;
+  fps: number;
+  signal?: AbortSignal;
+  onFrame: (frameIndex: number, timeSeconds: number) => Promise<void>;
+}): Promise<void> {
+  const { totalFrames, fps, signal, onFrame } = params;
+  return new Promise<void>((resolve, reject) => {
+    let rafHandle: number | null = null;
+    let cancelled = false;
+
+    const stop = () => {
+      cancelled = true;
+      if (rafHandle !== null) cancelAnimationFrame(rafHandle);
+    };
+
+    const onAbort = () => {
+      stop();
+      reject(new DOMException('Export cancelled.', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    const step = (i: number) => {
+      if (cancelled) return;
+      if (signal?.aborted) { onAbort(); return; }
+
+      if (i >= totalFrames) {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+        return;
+      }
+
+      const t = i / fps;
+      onFrame(i, t)
+        .then(() => {
+          if (cancelled) return;
+          rafHandle = requestAnimationFrame(() => step(i + 1));
+        })
+        .catch((error) => {
+          signal?.removeEventListener('abort', onAbort);
+          stop();
+          reject(error);
+        });
+    };
+
+    rafHandle = requestAnimationFrame(() => step(0));
+  });
 }
 
 /**
- * Keeps a minimal, no-op requestAnimationFrame loop alive for the duration
- * of an export. The export UI deliberately pauses the real preview render
- * loop while exporting ("Preview paused during render"), which means
- * nothing in the tab drives rAF at all during export. Chromium's internal
- * WebCodecs scheduling — particularly encoder flush / mux finalize work —
- * can stall waiting on compositor activity that's simply never being
- * requested, which reads exactly like a frozen tab that only unsticks when
- * something external (a tab switch, opening devtools) forces a compositor
- * tick. This project has hit variants of this exact rAF-starvation failure
- * mode before (see: will-change:transform suppressing WebGL rAF globally).
- * The loop does nothing but re-request itself; it exists purely to keep
- * the compositor pipeline alive through the whole encode + finalize pass.
+ * Keeps a minimal, no-op requestAnimationFrame loop alive during
+ * `output.finalize()` specifically — the one phase of the export that has
+ * no per-frame work of its own to ride on. The frame production loop above
+ * is now genuinely rAF-paced end to end, so this is only needed for the
+ * single-await finalize tail where nothing else is ticking the compositor.
  */
 function startCompositorKeepAlive(): () => void {
   let handle: number | null = null;
@@ -258,7 +343,7 @@ export async function encodeVideoWithMediabunny(
     const latencyMode: 'quality' | 'realtime' =
       container === 'webm' || preferredSoftware ? 'realtime' : 'quality';
 
-    const videoSource = new CanvasSource(stagingCanvas, {
+    const videoSource = new VideoSampleSource({
       codec: mediaCodecFor(container),
       bitrate,
       hardwareAcceleration,
@@ -278,30 +363,45 @@ export async function encodeVideoWithMediabunny(
     let renderMs = 0;
     let encodeMs = 0;
 
-    for (let i = 0; i < totalFrames; i++) {
-      throwIfAborted(signal);
-      const t = i / fps;
+    const progressStep = Math.max(1, Math.floor(totalFrames / 20));
 
-      const renderStart = performance.now();
-      await drawFrame(i, t);
-      renderMs += performance.now() - renderStart;
+    await runFrameLoopViaRAF({
+      totalFrames,
+      fps,
+      signal,
+      onFrame: async (i, t) => {
+        const renderStart = performance.now();
+        await drawFrame(i, t);
+        renderMs += performance.now() - renderStart;
 
-      throwIfAborted(signal);
-      const encodeStart = performance.now();
-      await videoSource.add(t, frameDurationSeconds);
-      encodeMs += performance.now() - encodeStart;
+        throwIfAborted(signal);
+        const encodeStart = performance.now();
 
-      // Real macrotask yield, every frame — see yieldToBrowser() doc comment
-      // above. This is what keeps the tab from appearing frozen during a
-      // 150+ frame render+encode pass: without it, progress-bar state updates
-      // happen but never paint, and Cancel Export clicks queue up unprocessed
-      // until something external forces a task-queue boundary.
-      await yieldToBrowser();
+        // Constructing the VideoFrame ourselves — rather than letting
+        // CanvasSource do it internally with no colorSpace hint — is the
+        // actual fix. See CANVAS_SOURCE_COLOR_SPACE doc comment above.
+        const frame = new VideoFrame(stagingCanvas, {
+          timestamp: Math.round(t * 1_000_000),
+          duration: Math.round(frameDurationSeconds * 1_000_000),
+          colorSpace: CANVAS_SOURCE_COLOR_SPACE,
+        } satisfies VideoFrameInitWithColorSpace as VideoFrameInit);
+        const sample = new VideoSample(frame, { timestamp: t, duration: frameDurationSeconds });
+        try {
+          // VideoSampleSource.add() does NOT take ownership of the sample
+          // (unlike CanvasSource, which closes it internally) — caller is
+          // responsible for closing it once encoding has consumed it.
+          await videoSource.add(sample);
+        } finally {
+          sample.close();
+        }
 
-      if (i % Math.max(1, Math.floor(totalFrames / 20)) === 0 || i === totalFrames - 1) {
-        onProgress?.(5 + ((i + 1) / totalFrames) * 85, `Frame ${i + 1}/${totalFrames}`);
-      }
-    }
+        encodeMs += performance.now() - encodeStart;
+
+        if (i % progressStep === 0 || i === totalFrames - 1) {
+          onProgress?.(5 + ((i + 1) / totalFrames) * 85, `Frame ${i + 1}/${totalFrames}`);
+        }
+      },
+    });
 
     throwIfAborted(signal);
     onProgress?.(92, `Finalizing ${container.toUpperCase()} container...`);
