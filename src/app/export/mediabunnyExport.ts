@@ -83,6 +83,25 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException('Export cancelled.', 'AbortError');
 }
 
+/**
+ * A genuine macrotask yield (not a microtask). Awaiting only
+ * microtask-resolving promises in a loop — which is what a bare
+ * `await CanvasSource.add()` does — never gives the browser a chance to
+ * paint or process input, because the JS event loop drains every pending
+ * microtask before it's willing to run a macrotask (paint, timer, click
+ * handling). A render+encode loop with no periodic macrotask yield can run
+ * to completion with the tab looking completely frozen: progress state
+ * updates internally, but the DOM never repaints, and Cancel Export clicks
+ * never get processed, until something external forces a task-queue
+ * boundary (backgrounding/foregrounding the tab, opening devtools).
+ * `CanvasSource.add()`'s real backpressure controls how far ahead of the
+ * encoder rendering gets — it does not, by itself, guarantee the browser
+ * ever gets to breathe.
+ */
+function yieldToBrowser(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function mediaCodecFor(container: MediabunnyContainer): VideoCodec {
   return container === 'mp4' ? 'avc' : 'vp9';
 }
@@ -155,12 +174,24 @@ export async function encodeVideoWithMediabunny(
   // previously-diagnosed bug — not a defensive guess.
   const hardwareAcceleration = isIframeEnvironment() ? 'prefer-software' : 'no-preference';
 
+  // 'quality' puts the encoder on its slowest, most exhaustive speed preset —
+  // a real cost worth paying for genuine hardware encode, where it's still
+  // fast, but punishing for software encode, where it can turn a 150-frame
+  // pass into minutes. VP9 (WebM) essentially never has a hardware encoder in
+  // Chrome regardless of the hint above, so it always gets 'realtime'. H.264
+  // gets 'realtime' too whenever software has been explicitly requested
+  // (the iframe case) — otherwise 'quality', since real hardware H.264 is
+  // common and the extra quality is cheap there.
+  const preferredSoftware = hardwareAcceleration === 'prefer-software';
+  const latencyMode: 'quality' | 'realtime' =
+    container === 'webm' || preferredSoftware ? 'realtime' : 'quality';
+
   const videoSource = new CanvasSource(stagingCanvas, {
     codec: mediaCodecFor(container),
     bitrate,
     hardwareAcceleration,
     keyFrameInterval: options.keyFrameIntervalSeconds ?? 2,
-    latencyMode: 'quality',
+    latencyMode,
     onEncoderConfig: (config) => {
       onEncoderConfig?.({
         codec: (config as { codec?: string }).codec ?? mediaCodecFor(container),
@@ -187,6 +218,13 @@ export async function encodeVideoWithMediabunny(
     const encodeStart = performance.now();
     await videoSource.add(t, frameDurationSeconds);
     encodeMs += performance.now() - encodeStart;
+
+    // Real macrotask yield, every frame — see yieldToBrowser() doc comment
+    // above. This is what keeps the tab from appearing frozen during a
+    // 150+ frame render+encode pass: without it, progress-bar state updates
+    // happen but never paint, and Cancel Export clicks queue up unprocessed
+    // until something external forces a task-queue boundary.
+    await yieldToBrowser();
 
     if (i % Math.max(1, Math.floor(totalFrames / 20)) === 0 || i === totalFrames - 1) {
       onProgress?.(5 + ((i + 1) / totalFrames) * 85, `Frame ${i + 1}/${totalFrames}`);
