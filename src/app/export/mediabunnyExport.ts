@@ -130,6 +130,42 @@ function startCompositorKeepAlive(): () => void {
   };
 }
 
+/**
+ * Acquires a Screen Wake Lock for the duration of encode + finalize.
+ *
+ * Traced the actual stall into Mediabunny's own source: `output.finalize()`
+ * calls into `flushAndClose()`, which does `await this.encoder.flush()` —
+ * a call straight into the browser's native VideoEncoder, not JS code
+ * Mediabunny controls (Mediabunny's own source even carries a comment citing
+ * a specific Chromium bug it already works around at that exact call site).
+ * A no-op rAF loop can't fix a stall inside the browser's own media
+ * pipeline — flush()'s completion isn't driven by anything JS scheduling
+ * touches. But the symptom (genuinely stuck, not slow — confirmed by
+ * waiting 1 minute vs 5 minutes making no difference, only opening devtools
+ * unsticking it either way) matches Chromium's idle/backgrounding
+ * throttling being lifted, which devtools attachment is known to do
+ * incidentally. Wake Lock is the real API for "don't throttle this tab
+ * because it looks idle" — the actual intended fix for this class of
+ * problem, not a workaround bolted on from the outside.
+ */
+async function acquireExportWakeLock(): Promise<{ release: () => void }> {
+  const nav = navigator as Navigator & {
+    wakeLock?: { request(type: 'screen'): Promise<{ release(): Promise<void> }> };
+  };
+  if (!nav.wakeLock) return { release: () => {} };
+  try {
+    const sentinel = await nav.wakeLock.request('screen');
+    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) console.info('[BLENDCRAFT export:mediabunny] Screen Wake Lock acquired for export.');
+    return { release: () => { sentinel.release().catch(() => {}); } };
+  } catch (error) {
+    // Wake Lock can be refused (no user activation, permissions policy,
+    // low battery on some platforms) — export should proceed regardless,
+    // just without this mitigation.
+    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) console.warn('[BLENDCRAFT export:mediabunny] Screen Wake Lock unavailable:', error);
+    return { release: () => {} };
+  }
+}
+
 function mediaCodecFor(container: MediabunnyContainer): VideoCodec {
   return container === 'mp4' ? 'avc' : 'vp9';
 }
@@ -199,6 +235,7 @@ export async function encodeVideoWithMediabunny(
   // encoder work begins, stopped unconditionally in the finally block below
   // (success, thrown error, or abort all need it torn down).
   const stopKeepAlive = startCompositorKeepAlive();
+  const wakeLock = await acquireExportWakeLock();
 
   try {
     // Iframe hardware-encoder instability (Figma Make host): hardware H.264 has
@@ -288,5 +325,6 @@ export async function encodeVideoWithMediabunny(
     };
   } finally {
     stopKeepAlive();
+    wakeLock.release();
   }
 }
