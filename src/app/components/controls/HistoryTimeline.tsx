@@ -149,7 +149,7 @@ export function HistoryTimeline({
                       <span className="text-[10px] opacity-60 truncate">
                         {state.layers.length} layer{state.layers.length !== 1 ? 's' : ''}
                         {' • '}
-                        {state.layers.find(l => l.id === state.activeLayerId)?.gradient.type || 'linear'}
+                        {state.layers.find(l => l.id === state.activeLayerId)?.gradient?.type || 'linear'}
                       </span>
                     </div>
 

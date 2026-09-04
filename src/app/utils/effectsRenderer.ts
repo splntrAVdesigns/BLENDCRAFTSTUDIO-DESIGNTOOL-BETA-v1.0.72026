@@ -1,5 +1,6 @@
 import * as THREE from '../lib/three';
 import { EffectsConfig } from '../components/controls/EffectsControls';
+import { withOutputColorSpace } from '../shaders/outputColorSpace';
 
 // Convert shape string to integer for shader
 function shapeToInt(shape: string): number {
@@ -762,7 +763,7 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
       uFlashBlendMode: { value: 0 }, // 0=screen (light), 1=multiply (dark)
     },
     vertexShader,
-    fragmentShader,
+    fragmentShader: withOutputColorSpace(fragmentShader),
     transparent: true, // Enable transparency to respect alpha channel
     depthWrite: false, // Disable depth writing for proper alpha blending
   });
@@ -789,4 +790,35 @@ export function hasActiveEffects(effects: EffectsConfig): boolean {
     effects.fresnelEnabled || // PHASE 1: Fresnel effect
     effects.flashEnabled      // Flash FX — needs post-process path to run the flash shader
   );
+}
+
+export interface PostProcessAudioDeltas {
+  shakeX: number;
+  shakeY: number;
+  chromaAdd: number;
+  brightnessAdd: number;
+  blurAdd: number;
+  saturationAdd: number;
+  vignetteAdd: number;
+  strobeAdd: number;
+}
+
+/**
+ * Single authority for deciding whether a frame uses the post-process graph.
+ * Preview and deterministic export must call this same predicate or their
+ * pixels can diverge even before capture/encoding begins.
+ */
+export function shouldUsePostProcess(
+  effects: EffectsConfig,
+  audio: PostProcessAudioDeltas,
+): boolean {
+  return hasActiveEffects(effects) ||
+    audio.shakeX !== 0 ||
+    audio.shakeY !== 0 ||
+    audio.chromaAdd > 0.001 ||
+    audio.brightnessAdd > 0.001 ||
+    audio.blurAdd > 0.001 ||
+    audio.saturationAdd > 0.001 ||
+    audio.vignetteAdd > 0.001 ||
+    audio.strobeAdd > 0.001;
 }

@@ -191,6 +191,11 @@ export function ExportPanel({
           const anim = visibleLayer.animation;
           const tex = visibleLayer.texture;
 
+          if (!g) {
+            setCodeContent('// Shader export requires a gradient layer. The selected layer is media-based.');
+            return;
+          }
+
           const colorDefs = g.colors.map((c, i) => {
             const hex = c.color.replace('#', '');
             const r = (parseInt(hex.substring(0, 2), 16) / 255).toFixed(3);

@@ -31,7 +31,9 @@ export function AIToolsPanel({ activeLayer, onUpdateLayer }: AIToolsPanelProps) 
     localStorage.setItem('adv-tools-accordion-state', JSON.stringify(openSections));
   }, [openSections]);
 
-  const selectedColor = activeLayer.gradient.colors[selectedColorIndex]?.color || '#5200FF';
+  const gradient = activeLayer.gradient;
+  if (!gradient) return null;
+  const selectedColor = gradient.colors[selectedColorIndex]?.color || '#5200FF';
 
   // Save current gradient to favorites
   const handleSaveToFavorites = () => {
@@ -39,7 +41,7 @@ export function AIToolsPanel({ activeLayer, onUpdateLayer }: AIToolsPanelProps) 
     const newFavorite = {
       id: `fav-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       name: `Gradient ${favorites.length + 1}`,
-      gradient: activeLayer.gradient,
+      gradient,
       timestamp: Date.now(),
     };
     const updatedFavorites = [newFavorite, ...favorites];
@@ -54,19 +56,19 @@ export function AIToolsPanel({ activeLayer, onUpdateLayer }: AIToolsPanelProps) 
   const handleGradientGenerated = (gradient: GradientConfig) => {
     onUpdateLayer({
       gradient: {
-        ...activeLayer.gradient,
+        ...gradient,
         ...gradient,
       },
     });
   };
 
   const handleColorSelect = (color: string) => {
-    const newColors = [...activeLayer.gradient.colors];
+    const newColors = [...gradient.colors];
     if (selectedColorIndex < newColors.length) {
       newColors[selectedColorIndex] = { ...newColors[selectedColorIndex], color };
       onUpdateLayer({
         gradient: {
-          ...activeLayer.gradient,
+          ...gradient,
           colors: newColors,
         },
       });
@@ -80,13 +82,13 @@ export function AIToolsPanel({ activeLayer, onUpdateLayer }: AIToolsPanelProps) 
 
   const handleSchemeApply = (colors: string[]) => {
     const newColors = colors.map((color, index) => {
-      const existingPosition = activeLayer.gradient.colors[index]?.position || (index / (colors.length - 1));
+      const existingPosition = gradient.colors[index]?.position || (index / (colors.length - 1));
       return { color, position: existingPosition };
     });
 
     onUpdateLayer({
       gradient: {
-        ...activeLayer.gradient,
+        ...gradient,
         colors: newColors,
       },
     });
@@ -118,7 +120,7 @@ export function AIToolsPanel({ activeLayer, onUpdateLayer }: AIToolsPanelProps) 
           <AccordionContent className="pb-4 pt-2">
             <div className="space-y-2">
               <div className="flex gap-2">
-                {activeLayer.gradient.colors.map((stop, index) => (
+                {gradient.colors.map((stop, index) => (
                   <button
                     key={index}
                     className={`flex-1 h-12 rounded border-2 transition-all ${
@@ -132,7 +134,7 @@ export function AIToolsPanel({ activeLayer, onUpdateLayer }: AIToolsPanelProps) 
                 ))}
               </div>
               <p className="text-xs text-zinc-400 text-center">
-                Stop {selectedColorIndex + 1} of {activeLayer.gradient.colors.length}
+                Stop {selectedColorIndex + 1} of {gradient.colors.length}
               </p>
             </div>
           </AccordionContent>
@@ -168,7 +170,7 @@ export function AIToolsPanel({ activeLayer, onUpdateLayer }: AIToolsPanelProps) 
 
               <TabsContent value="randomizer">
                 <GradientRandomizerPanel
-                  currentGradient={activeLayer.gradient}
+                  currentGradient={gradient}
                   onGradientGenerated={handleGradientGenerated}
                 />
               </TabsContent>

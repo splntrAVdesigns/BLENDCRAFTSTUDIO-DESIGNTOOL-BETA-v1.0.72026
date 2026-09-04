@@ -1,4 +1,5 @@
 import * as THREE from '../lib/three';
+import { withOutputColorSpace } from '../shaders/outputColorSpace';
 import type { GradientConfig } from '../types/gradient';
 
 /**
@@ -214,7 +215,7 @@ export function createEditableMeshGradient(
   const geometry = new THREE.PlaneGeometry(2, 2);
   const material = new THREE.ShaderMaterial({
     vertexShader,
-    fragmentShader,
+    fragmentShader: withOutputColorSpace(fragmentShader),
     uniforms,
     transparent: true,
   });

@@ -277,7 +277,11 @@ export function MaskControls({ layer, layers, onUpdate, isPlaying, onPlayToggle 
       positionX: 0,
       positionY: 0,
       animation: {
-        ...(currentMask.animation || {}),
+        enabled: currentMask.animation?.enabled ?? false,
+        type: currentMask.animation?.type ?? 'rotate',
+        easing: currentMask.animation?.easing ?? 'linear',
+        loop: currentMask.animation?.loop ?? true,
+        direction: currentMask.animation?.direction ?? 'forward',
         speed: 5,
         intensity: 50,
       },

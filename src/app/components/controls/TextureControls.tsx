@@ -12,7 +12,7 @@ import {
   type MaskShapeCategory,
 } from '../../lib/maskShapes';
 import { useState, useEffect, useCallback, useRef, memo } from 'react';
-import type { TextureConfig } from '../../types/gradient';
+import type { BlendMode, TextureConfig } from '../../types/gradient';
 
 interface TextureControlsProps {
   texture?: TextureConfig;

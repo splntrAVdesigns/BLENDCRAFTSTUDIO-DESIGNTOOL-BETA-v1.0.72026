@@ -77,7 +77,7 @@ export function serializeDocumentState(
     canvasSettings: {
       width: canvasSettings.width,
       height: canvasSettings.height,
-      background: canvasSettings.background || canvasSettings.backgroundColor,
+      background: canvasSettings.backgroundColor,
     },
     effects,
     activeLayerId,

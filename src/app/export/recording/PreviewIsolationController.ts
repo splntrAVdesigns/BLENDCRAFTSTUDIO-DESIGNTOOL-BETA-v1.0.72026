@@ -21,7 +21,8 @@ function copyReadbackToCanvas(
   const stagingContext = staging.getContext('2d', { alpha: false, willReadFrequently: false });
   if (!stagingContext) return false;
 
-  const clamped = new Uint8ClampedArray(pixels.data.buffer, pixels.data.byteOffset, pixels.data.byteLength);
+  const clamped = new Uint8ClampedArray(new ArrayBuffer(pixels.data.byteLength));
+  clamped.set(pixels.data);
   stagingContext.putImageData(new ImageData(clamped, pixels.width, pixels.height), 0, 0);
   ctx.save();
   ctx.translate(0, target.height);
@@ -69,7 +70,7 @@ export function isolatePreview(input: PreviewIsolationInput): PreviewIsolationHa
   // first. Raw FBO readback can be linear/display-unconverted and previously
   // caused the preview to brighten during PNG export. Keep readback only as a
   // fallback for hosts where the presentation buffer cannot be copied.
-  let captured = false;
+  let captured: boolean;
   const context = overlay.getContext('2d', { alpha: false, willReadFrequently: false });
   if (!context) throw new Error('Unable to create preview isolation canvas context.');
   try {

@@ -4,7 +4,7 @@
  * for debugging and inspection purposes but should not be passed to DOM elements
  */
 
-export function filterFigmaProps<T extends Record<string, any>>(props: T): Partial<T> {
+export function filterFigmaProps<T extends Record<string, any>>(props: T): T {
   const filtered: any = {};
   
   for (const key in props) {
@@ -14,5 +14,5 @@ export function filterFigmaProps<T extends Record<string, any>>(props: T): Parti
     }
   }
   
-  return filtered;
+  return filtered as T;
 }

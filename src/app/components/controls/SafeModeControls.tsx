@@ -8,6 +8,9 @@ import { Layer, CanvasSettings as CanvasSettingsType } from '../../types/gradien
 import { EffectsConfig } from './EffectsControls';
 
 interface SafeModeControlsProps {
+  onStartDrag?: () => void;
+  onEndDrag?: () => void;
+  onCommitHistory?: () => void;
   layers: Layer[];
   effects: EffectsConfig;
   canvasSettings: CanvasSettingsType;
@@ -33,12 +36,14 @@ export function SafeModeControls({
   // Detect if any expensive features are active
   const hasExpensiveFeatures = 
     layers.some(layer => 
-      layer.textureEnabled || 
-      (layer.animation && Object.values(layer.animation).some(v => v !== 0))
+      Boolean(layer.texture) ||
+      Boolean(layer.animation?.enabled)
     ) ||
-    effects.noise > 0 ||
+    effects.filmGrain > 0 ||
+    effects.blur > 0 ||
     effects.chromaticAberration > 0 ||
-    effects.bloom > 0 ||
+    effects.pixelateEnabled ||
+    effects.halftoneEnabled ||
     effects.vignette > 0.3 ||
     isPlaying;
 
@@ -49,7 +54,7 @@ export function SafeModeControls({
     // Disable textures on all layers and reset animation to correct shape
     const safeLayers = layers.map(layer => ({
       ...layer,
-      textureEnabled: false,
+      texture: undefined,
       animation: layer.animation ? {
         ...layer.animation,
         enabled: false,
@@ -70,11 +75,12 @@ export function SafeModeControls({
     // Reset expensive effects
     onEffectsChange({
       ...effects,
-      noise: 0,
+      filmGrain: 0,
+      blur: 0,
       chromaticAberration: 0,
-      bloom: 0,
+      pixelateEnabled: false,
+      halftoneEnabled: false,
       vignette: 0,
-      grain: 0,
     });
 
     // Set safe canvas resolution if too high

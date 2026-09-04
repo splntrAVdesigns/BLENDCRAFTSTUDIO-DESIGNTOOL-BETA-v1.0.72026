@@ -1,36 +1,24 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const root = new URL('../', import.meta.url);
-const read = (path: string) => readFile(new URL(path, root), 'utf8');
+const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
-test('7.3F.2 lab is URL-gated and clearly isolated from production export', async () => {
-  const panel = await read('src/app/components/controls/VideoExportLabPanel.tsx');
-  assert.match(panel, /videoLab.*=== '1'/);
-  assert.match(panel, /does not replace the production exporter/i);
+test('preview and export share the post-process predicate', () => {
+  const source = read('src/app/components/gradient/GradientCanvas.tsx');
+  assert.ok((source.match(/shouldUsePostProcess\(/g) ?? []).length >= 2);
 });
 
-test('7.3F.2 exposes runtime codec probing before proof execution', async () => {
-  const panel = await read('src/app/components/controls/VideoExportLabPanel.tsx');
-  assert.match(panel, /probeVideoLabCapabilities/);
-  assert.match(panel, /selectedCapability\?\.supported/);
+test('intermediate targets are linear and presentation output is sRGB', () => {
+  const source = read('src/app/components/gradient/GradientCanvas.tsx');
+  assert.match(source, /renderer\.outputColorSpace = THREE\.SRGBColorSpace/);
+  assert.ok((source.match(/colorSpace: THREE\.LinearSRGBColorSpace/g) ?? []).length >= 3);
 });
 
-test('7.3F.2 uses deterministic renderer controls and cleanup', async () => {
-  const panel = await read('src/app/components/controls/VideoExportLabPanel.tsx');
-  assert.match(panel, /configureExportTimeline/);
-  assert.match(panel, /pauseAnimation/);
-  assert.match(panel, /renderAtTime\(timeSeconds/);
-  assert.match(panel, /cleanupExportSession/);
-});
-
-test('production exporter remains free of video-lab imports', async () => {
-  const production = await read('src/app/utils/exportUtils.ts');
-  assert.doesNotMatch(production, /video-lab|mediabunny/i);
-});
-
-test('Mediabunny is pinned for repeatable GitHub and Vercel installs', async () => {
-  const pkg = JSON.parse(await read('package.json')) as { dependencies: Record<string, string> };
-  assert.equal(pkg.dependencies.mediabunny, '1.51.0');
+test('actual encoded artifact receives decoded-frame fidelity verification', () => {
+  const exporter = read('src/app/utils/exportUtils.ts');
+  const verifier = read('src/app/export/exportFrameFidelity.ts');
+  assert.ok((exporter.match(/verifyExportedFrameFidelity\(/g) ?? []).length >= 2);
+  assert.match(verifier, /new VideoSampleSink/);
+  assert.match(verifier, /sample\.draw/);
 });

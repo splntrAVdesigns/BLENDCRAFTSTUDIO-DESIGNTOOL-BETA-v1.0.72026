@@ -226,7 +226,7 @@ export const DEFAULT_PRESETS: GradientPreset[] = [
         blendMode: 'normal',
         locked: false,
         gradient: {
-          type: 'noise',
+          type: 'noise-spiral',
           colors: paletteToColorStops(COLOR_PALETTES.cosmic),
           octaves: 6,
           frequency: 2,

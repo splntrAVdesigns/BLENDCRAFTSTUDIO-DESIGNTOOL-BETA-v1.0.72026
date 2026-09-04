@@ -1,8 +1,9 @@
 # Phase 7.3F.1 — Mediabunny Main-Thread Proof Runner
 
-## Purpose
+## Status
 
-This sprint adds the first real Mediabunny proof engine while preserving the frozen production PNG and WebM exporters.
+Superseded by Phase 7.3F.3. Mediabunny is now the production MP4/WebM engine;
+this document remains as historical evidence for the original proof runner.
 
 The lab now:
 
@@ -33,11 +34,14 @@ Commit both `package.json` and `package-lock.json` after npm completes. Do not h
 
 The caller must first run `probeVideoLabCapabilities()` and only invoke a supported pairing.
 
-## Integration contract
+## Production contract after promotion
 
-Call `runMediabunnyMainThread()` only from a development-only Video Export Lab control. Pass the same deterministic `renderAtTime` callback used by the established export bridge and the exact export canvas.
-
-Do not call this runner from the normal PNG, WebM or MP4 actions. Promotion remains blocked until Liquid, animated texture, animated mask, independent layer speeds, ping-pong, Loop Lock on/off, cancellation, duration, memory recovery and deployed Vercel tests pass.
+Normal MP4 and WebM actions call the shared `mediabunnyExport.ts` engine. Each
+deterministic `renderAtTime()` frame is copied from the final presentation
+canvas into a fixed sRGB staging canvas, then submitted through awaited
+`CanvasSource.add(timestamp, duration)`. Raw render-target readback is a
+compatibility fallback only. The lab remains available for benchmarking but is
+no longer the architectural authority.
 
 ## Vercel comparison
 

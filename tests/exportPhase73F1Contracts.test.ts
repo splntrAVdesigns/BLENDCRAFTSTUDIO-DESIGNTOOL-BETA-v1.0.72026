@@ -1,37 +1,22 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const root = new URL('../', import.meta.url);
-const read = (path: string) => readFile(new URL(path, root), 'utf8');
+const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
-test('7.3F.1 runner certifies before loading or starting Mediabunny', async () => {
-  const source = await read('src/app/export/video-lab/mainThreadRunner.ts');
-  const certification = source.indexOf('await certifyAnimationFrames');
-  const load = source.indexOf('await loadMediabunny');
-  const start = source.indexOf('await output.start');
-  assert.ok(certification >= 0 && load > certification && start > load);
+test('production encoder uses CanvasSource with awaited deterministic timing', () => {
+  const source = read('src/app/export/mediabunnyExport.ts');
+  assert.match(source, /new CanvasSource\(stagingCanvas/);
+  assert.match(source, /const t = i \/ fps/);
+  assert.match(source, /await videoSource\.add\(t, frameDurationSeconds\)/);
 });
 
-test('7.3F.1 production exporter remains isolated from video-lab', async () => {
-  const production = await read('src/app/utils/exportUtils.ts');
-  assert.equal(production.includes("export/video-lab"), false);
-  assert.equal(production.includes('mediabunny'), false);
+test('manual canvas VideoFrame color metadata workaround is absent', () => {
+  const source = read('src/app/export/mediabunnyExport.ts');
+  assert.doesNotMatch(source, /CANVAS_SOURCE_COLOR_SPACE|VideoFrameInitWithColorSpace|new VideoFrame\(/);
 });
 
-test('7.3F.1 awaits CanvasSource.add to respect encoder backpressure', async () => {
-  const source = await read('src/app/export/video-lab/mainThreadRunner.ts');
-  assert.match(source, /await source\.add\(timestamp, frameDuration/);
-});
-
-test('7.3F.1 captures environment and persists benchmark results', async () => {
-  const source = await read('src/app/export/video-lab/mainThreadRunner.ts');
-  assert.match(source, /captureVideoLabEnvironment\(\)/);
-  assert.match(source, /saveVideoLabBenchmark\(benchmark\)/);
-});
-
-test('7.3F.1 rejects invalid codec and container pairings', async () => {
-  const source = await read('src/app/export/video-lab/mainThreadRunner.ts');
-  assert.match(source, /MP4 proof runs require H\.264\/AVC/);
-  assert.match(source, /WebM proof runs require VP8 or VP9/);
+test('output finalization remains after all frame submissions', () => {
+  const source = read('src/app/export/mediabunnyExport.ts');
+  assert.ok(source.indexOf('await output.finalize()') > source.indexOf('await runFrameLoopViaRAF'));
 });

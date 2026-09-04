@@ -16,7 +16,7 @@ export function runPerformanceDiagnostics() {
   // 1. WebGL Support
   console.group('1️⃣  WebGL Support');
   const canvas = document.createElement('canvas');
-  const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+  const gl = (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')) as WebGLRenderingContext | null;
   
   if (!gl) {
     console.error('❌ WebGL is NOT supported or disabled!');
