@@ -67,7 +67,7 @@ export const PERFORMANCE_PRESETS: Record<string, PerformancePreset> = {
 export function detectOptimalPerformance(): PerformancePreset {
   // Check if we have GPU info
   const canvas = document.createElement('canvas');
-  const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+  const gl = (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')) as WebGLRenderingContext | null;
   
   if (!gl) {
     // No WebGL support - ultra low

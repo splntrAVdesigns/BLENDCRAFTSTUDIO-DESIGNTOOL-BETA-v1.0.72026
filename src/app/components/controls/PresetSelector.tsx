@@ -64,7 +64,6 @@ export function PresetSelector({
             case 'radial':
               return `radial-gradient(circle, ${colorStops})`;
             case 'conic':
-            case 'angular':
               return `conic-gradient(${colorStops})`;
             default:
               return `linear-gradient(135deg, ${colorStops})`;

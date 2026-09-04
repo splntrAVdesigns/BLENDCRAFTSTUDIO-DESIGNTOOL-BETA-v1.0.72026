@@ -31,7 +31,7 @@ export function getOrCreateExportRenderTarget(
     minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
     format: THREE.RGBAFormat,
-    colorSpace: THREE.SRGBColorSpace,
+    colorSpace: THREE.LinearSRGBColorSpace,
   });
 
   if ((renderer.capabilities as any).isWebGL2) {

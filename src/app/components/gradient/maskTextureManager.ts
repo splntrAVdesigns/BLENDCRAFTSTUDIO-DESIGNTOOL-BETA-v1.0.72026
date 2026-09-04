@@ -84,9 +84,9 @@ export async function createSvgMaskTexture(
   // Adaptive rasterization size based on SVG complexity.
   // Simple path-only shapes (circle, square, triangle) need at most 512px for crisp edges.
   // Moderate shapes need 1024px. Only complex multi-path SVGs justify 2048px.
-  const isPathOnly = !processedSvg.includes('<svg');
+  const remainsPathOnly = !processedSvg.includes('<svg');
   const svgByteLen = processedSvg.length;
-  const adaptiveMax = isPathOnly
+  const adaptiveMax = remainsPathOnly
     ? 512                           // Simple path-data shapes — 512px is plenty
     : svgByteLen < 5000
       ? 1024                        // Small SVG documents

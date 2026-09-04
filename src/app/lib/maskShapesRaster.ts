@@ -20,7 +20,7 @@ export const RASTER_MASK_SHAPES: ShapePreset[] = [
     renderMode: 'fill',
     description: 'Shape Pack v1 SVG asset: Mtn Range.',
     tags: ['shape-pack-v1', 'custom'],
-  },,
+  },
   {
     id: 'hud-orbital-one',
     name: 'Orbital One',
@@ -31,7 +31,7 @@ export const RASTER_MASK_SHAPES: ShapePreset[] = [
     renderMode: 'fill',
     description: 'Shape Pack v1 SVG asset: Orbital One.',
     tags: ['shape-pack-v1', 'hud'],
-  },,
+  },
   {
     id: 'hud-two-future-x-tech',
     name: 'Two Future X Tech',
@@ -42,7 +42,7 @@ export const RASTER_MASK_SHAPES: ShapePreset[] = [
     renderMode: 'fill',
     description: 'Shape Pack v1 SVG asset: Two Future X Tech.',
     tags: ['shape-pack-v1', 'hud'],
-  },,
+  },
   {
     id: 'pattern-dot-pattern-one',
     name: 'Dot Pattern One',
@@ -53,7 +53,7 @@ export const RASTER_MASK_SHAPES: ShapePreset[] = [
     renderMode: 'fill',
     description: 'Shape Pack v1 SVG asset: Dot Pattern One.',
     tags: ['shape-pack-v1', 'pattern'],
-  },,
+  },
   {
     id: 'pattern-star-pattern-cell',
     name: 'Star Pattern Cell',

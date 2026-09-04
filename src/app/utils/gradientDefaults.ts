@@ -174,6 +174,22 @@ export const GRADIENT_TYPE_CONFIGS: Record<GradientType, GradientTypeConfig> = {
     showCenter: false,
   },
 
+  // Legacy saved-project alias; renders through the wave shader.
+  wave2: {
+    defaults: {
+      angle: 90,
+      scale: 1,
+      twist: 0,
+      intensity: 1,
+      frequency: 5,
+      waveAmplitude: 0.3,
+    },
+    showAngle: true,
+    showScale: true,
+    showTwist: true,
+    showCenter: false,
+  },
+
   // Noise Spiral gradients - turbulent rotation
   'noise-spiral': {
     defaults: {

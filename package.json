@@ -1,7 +1,7 @@
 {
   "name": "@figma/my-make-file",
   "private": true,
-  "version": "0.1.0-phase7.3f.2",
+  "version": "0.1.0-phase7.3f.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -90,6 +90,9 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.1.12",
+    "@types/node": "22.18.1",
+    "@types/react": "18.3.28",
+    "@types/react-dom": "18.3.7",
     "@vitejs/plugin-react": "4.7.0",
     "svgo": "^4.0.1",
     "tailwindcss": "4.1.12",

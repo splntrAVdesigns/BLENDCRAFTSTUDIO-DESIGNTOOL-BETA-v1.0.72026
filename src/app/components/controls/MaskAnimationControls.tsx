@@ -19,7 +19,7 @@ interface MaskAnimationControlsProps {
   onResetPosition?: () => void; // snap mask position back to current slider X/Y values
 }
 
-const DEFAULT_ANIMATION: MaskConfig['animation'] = {
+const DEFAULT_ANIMATION: NonNullable<MaskConfig['animation']> = {
   enabled: false,
   type: 'rotate',
   speed: 5,
@@ -30,7 +30,7 @@ const DEFAULT_ANIMATION: MaskConfig['animation'] = {
 };
 
 export function MaskAnimationControls({ maskConfig, onUpdate, isPlaying, onPlayToggle, onResetPosition }: MaskAnimationControlsProps) {
-  const animation = {
+  const animation: NonNullable<MaskConfig['animation']> = {
     ...DEFAULT_ANIMATION,
     ...(maskConfig.animation || {}),
   };
@@ -78,13 +78,13 @@ export function MaskAnimationControls({ maskConfig, onUpdate, isPlaying, onPlayT
     { value: 'sliceWipe',    label: 'Slice Wipe',   description: 'Directional slice sweep' },
     { value: 'glitchMask',   label: 'Glitch Mask',  description: 'Controlled digital jump cuts' },
     { value: 'orbitDrift',   label: 'Orbit Drift',  description: 'Orbital motion with subtle turn' },
-  ] as const;
+  ];
 
   const directions = [
     { value: 'forward', label: 'Forward' },
     { value: 'reverse', label: 'Reverse' },
     { value: 'pingPong', label: 'Ping-Pong' },
-  ] as const;
+  ];
 
   return (
     <div className="space-y-3 pt-3 border-t border-zinc-800">

@@ -1,17 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectMediaRecorderCapability } from '../src/app/export/MediaRecorderCapability.ts';
+import fs from 'node:fs';
 
-test('chooses VP9 before VP8 and generic WebM', () => {
-  const fake = { isTypeSupported: (type: string) => type.includes('vp8') || type.includes('vp9') } as typeof MediaRecorder;
-  const result = detectMediaRecorderCapability(fake);
-  assert.equal(result.supported, true);
-  assert.equal(result.mimeType, 'video/webm;codecs=vp9');
+const source = fs.readFileSync(new URL('../src/app/utils/exportUtils.ts', import.meta.url), 'utf8');
+
+test('MediaRecorder remains capability fallback only', () => {
+  assert.match(source, /WebCodecs unavailable; using MediaRecorder fallback/);
+  assert.match(source, /WebM\/VP9 not encodable.*using MediaRecorder fallback/);
 });
 
-test('returns a clear unsupported result', () => {
-  const fake = { isTypeSupported: () => false } as unknown as typeof MediaRecorder;
-  const result = detectMediaRecorderCapability(fake);
-  assert.equal(result.supported, false);
-  assert.equal(result.mimeType, null);
+test('MediaRecorder fallback captures the same presentation staging path', () => {
+  const start = source.indexOf('async function exportWebMWithMediaRecorderFallback');
+  const end = source.indexOf('async function exportMP4WithMediaRecorderFallback', start);
+  const fallback = source.slice(start, end);
+  assert.match(fallback, /await renderFrameAtTime\(t, undefined\)/);
+  assert.match(fallback, /drawFrameToStagingCanvas\(\{/);
+  assert.doesNotMatch(fallback, /createIsolatedExportRenderer/);
 });

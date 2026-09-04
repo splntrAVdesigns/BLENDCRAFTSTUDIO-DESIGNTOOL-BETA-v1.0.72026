@@ -11,7 +11,12 @@ import * as GIFLib from 'gif.js';
 // CanvasSource.add() instead of manual encodeQueueSize polling.
 import { encodeVideoWithMediabunny, canEncodeContainer } from '../export/mediabunnyExport';
 import {
-  cloneLoopSample,
+  captureExportFrameSample,
+  compareExportFrameSamples,
+  verifyExportedFrameFidelity,
+  type ExportFrameSample,
+} from '../export/exportFrameFidelity';
+import {
   compareLoopFrames,
   describeLoopResult,
   type LoopFrameSample,
@@ -64,16 +69,18 @@ function getGIFConstructor(): any {
 const saveAs = FileSaver.saveAs || (FileSaver as any).default?.saveAs || (FileSaver as any);
 
 /**
- * ISOLATED EXPORT SYSTEM
- * =======================
- * Export uses a completely separate renderer and canvas from the live preview.
+ * AUTHORITATIVE PRESENTATION-CAPTURE SYSTEM
+ * =========================================
+ * Deterministic frames render through the live Three.js renderer at export
+ * resolution, then the final presentation canvas is copied to a dedicated
+ * encoder staging canvas.
  * 
  * KEY PRINCIPLES:
- * 1. LIVE RENDERER: preserveDrawingBuffer: false (FAST)
- * 2. EXPORT RENDERER: preserveDrawingBuffer: true (CAPTURABLE, ISOLATED)
- * 3. Deterministic time-stepping for perfect animation exports
- * 4. Render at exact target resolution (no upscaling)
- * 5. Separate render loop and timeline
+ * 1. Preview and export share one render graph and color contract
+ * 2. Presentation canvas is the display-referred sRGB authority
+ * 3. Deterministic time-stepping preserves exact animation timing
+ * 4. Dedicated staging canvas isolates encoder ownership
+ * 5. Raw framebuffer bytes remain compatibility fallback only
  */
 
 export type ProgressCallback = (progress: number, message?: string) => void;
@@ -510,7 +517,7 @@ export async function exportPNGAtSize(
         bitmapCanvas.width = frame.width;
         bitmapCanvas.height = frame.height;
         const bctx = bitmapCanvas.getContext('2d', { alpha: true })!;
-        bctx.putImageData(new ImageData(new Uint8ClampedArray(flipped.buffer), frame.width, frame.height), 0, 0);
+        bctx.putImageData(new ImageData(toImageDataArray(flipped), frame.width, frame.height), 0, 0);
         ctx.clearRect(0, 0, targetWidth, targetHeight);
         if (frame.width !== sourceRenderWidth || frame.height !== sourceRenderHeight) {
           throw new Error(
@@ -557,50 +564,6 @@ export async function exportPNGAtSize(
  * CRITICAL: Prevents memory leaks during long sessions with multiple exports
  */
 
-function createIsolatedExportRenderer(width: number, height: number, alpha: boolean = true): THREE.WebGLRenderer {
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const renderer = new THREE.WebGLRenderer({
-    canvas,
-    antialias: true,
-    preserveDrawingBuffer: true,
-    alpha,
-    premultipliedAlpha: false,
-    precision: 'highp',
-    powerPreference: 'high-performance',
-    stencil: false,
-    depth: false,
-  });
-  renderer.autoClear = false;
-  renderer.setPixelRatio(1);
-  renderer.setSize(width, height, false);
-  renderer.setClearColor(0x000000, alpha ? 0 : 1);
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NoToneMapping;
-  return renderer;
-}
-
-function disposeIsolatedExportRenderer(renderer: THREE.WebGLRenderer | null | undefined): void {
-  if (!renderer) return;
-  try { renderer.setRenderTarget(null); } catch {}
-  try { renderer.clear(); } catch {}
-  try { renderer.dispose(); } catch {}
-  const canvas = renderer.domElement;
-  if (canvas) {
-    canvas.width = 1;
-    canvas.height = 1;
-  }
-}
-
-function copyCanvasToCanvas(source: HTMLCanvasElement, target: HTMLCanvasElement, alpha: boolean): void {
-  const ctx = target.getContext('2d', { alpha, willReadFrequently: false, colorSpace: EXPORT_COLOR_CONTRACT.outputSpace } as any);
-  if (!ctx) throw new Error('Failed to create export staging context.');
-  ctx.clearRect(0, 0, target.width, target.height);
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(source, 0, 0, source.width, source.height, 0, 0, target.width, target.height);
-}
-
 function isCanvasMostlyBlank(canvas: HTMLCanvasElement): boolean {
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx || canvas.width < 2 || canvas.height < 2) return true;
@@ -633,6 +596,12 @@ let _rtReadbackH = 0;
 // export. A single reused buffer removes that entirely; the flip work itself is
 // unchanged.
 let _flipBuf: Uint8Array | null = null;
+function toImageDataArray(source: Uint8Array): Uint8ClampedArray<ArrayBuffer> {
+  const result = new Uint8ClampedArray(new ArrayBuffer(source.byteLength));
+  result.set(source);
+  return result;
+}
+
 function flipRgbaBuffer(source: Uint8Array, width: number, height: number): Uint8Array {
   const rowBytes = width * 4;
   const expected = rowBytes * height;
@@ -682,16 +651,29 @@ function drawFrameToStagingCanvas(params: {
   flashOverlay?: ExportFlashOverlayFrame | null;
 }): void {
   const { stagingCanvas, targetWidth, targetHeight, liveCanvas, getReadFramePixels, codecSafety = 'sharp', flashOverlay } = params;
-  const ctx = stagingCanvas.getContext('2d', { alpha: false, willReadFrequently: false, colorSpace: EXPORT_COLOR_CONTRACT.outputSpace } as any);
+  const ctx = stagingCanvas.getContext('2d', { alpha: false, willReadFrequently: false, colorSpace: EXPORT_COLOR_CONTRACT.outputSpace } as any) as CanvasRenderingContext2D | null;
   if (!ctx) throw new Error('Failed to get 2D staging context for video export.');
 
   ctx.clearRect(0, 0, targetWidth, targetHeight);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
+  // AUTHORITATIVE PRIMARY SOURCE: the presentation canvas is the final,
+  // display-referred sRGB image produced by Three.js. This is the same capture
+  // contract used by Visual Mood Labs and by BLENDCRAFT's corrected PNG path.
+  // It avoids reinterpreting raw render-target bytes through ImageData.
+  if (liveCanvas && liveCanvas.width > 1 && liveCanvas.height > 1) {
+    const sameSize = liveCanvas.width === targetWidth && liveCanvas.height === targetHeight;
+    ctx.imageSmoothingEnabled = !sameSize;
+    if (!sameSize) ctx.imageSmoothingQuality = 'high';
+    ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(liveCanvas, 0, 0, liveCanvas.width, liveCanvas.height, 0, 0, targetWidth, targetHeight);
+    ctx.globalCompositeOperation = 'source-over';
+    applyCodecSafetyResolve(ctx, targetWidth, targetHeight, codecSafety);
+    applyFlashOverlay(ctx, targetWidth, targetHeight, flashOverlay);
+    return;
+  }
 
-  // PRIMARY: export-size GPU readback. This is slower than live-canvas blitting,
-  // but it preserves the exact full-resolution render produced by renderAtTime().
-  // WebM quality depends on this path for dense gradients, masks, dither, and textures.
+  // Last-resort compatibility fallback for hosts where the presentation
+  // canvas cannot be obtained. Production WebCodecs exports must normally
+  // take the branch above.
   const frame = getReadFramePixels?.();
   if (frame && frame.data.length === frame.width * frame.height * 4) {
     const flipped = flipRgbaBuffer(frame.data, frame.width, frame.height);
@@ -699,38 +681,35 @@ function drawFrameToStagingCanvas(params: {
       _rtReadbackCanvas = document.createElement('canvas');
       _rtReadbackCanvas.width = frame.width;
       _rtReadbackCanvas.height = frame.height;
-      _rtReadbackCtx = _rtReadbackCanvas.getContext('2d', { alpha: false, colorSpace: EXPORT_COLOR_CONTRACT.outputSpace } as any)!;
+      _rtReadbackCtx = _rtReadbackCanvas.getContext('2d', { alpha: false, colorSpace: EXPORT_COLOR_CONTRACT.outputSpace } as any) as CanvasRenderingContext2D | null;
       _rtReadbackW = frame.width;
       _rtReadbackH = frame.height;
     }
-    _rtReadbackCtx!.putImageData(new ImageData(new Uint8ClampedArray(flipped.buffer), frame.width, frame.height), 0, 0);
-    // STAGE 3.2: only pay for high-quality resampling when the readback is
-    // actually a different size than the target (supersampled source). When
-    // they match — the common 1:1 export case — smoothing is pure cost with no
-    // benefit (it's a same-size copy), and the 'high' filter is one of the more
-    // expensive per-frame CPU operations. Match → nearest copy; mismatch →
-    // keep the high-quality downsample the supersampled path needs.
+    if (!_rtReadbackCtx) throw new Error('Failed to create raw-readback compatibility canvas.');
+    _rtReadbackCtx.putImageData(new ImageData(toImageDataArray(flipped), frame.width, frame.height), 0, 0);
     const sameSize = frame.width === targetWidth && frame.height === targetHeight;
     ctx.imageSmoothingEnabled = !sameSize;
     if (!sameSize) ctx.imageSmoothingQuality = 'high';
+    ctx.globalCompositeOperation = 'copy';
     ctx.drawImage(_rtReadbackCanvas, 0, 0, frame.width, frame.height, 0, 0, targetWidth, targetHeight);
-    applyCodecSafetyResolve(ctx, targetWidth, targetHeight, codecSafety);
-    applyFlashOverlay(ctx, targetWidth, targetHeight, flashOverlay);
-    return;
-  }
-
-  // FALLBACK ONLY: live canvas. This may be preview-sized, so it is intentionally
-  // not the primary source for pro exports.
-  if (liveCanvas) {
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(liveCanvas, 0, 0, liveCanvas.width, liveCanvas.height, 0, 0, targetWidth, targetHeight);
+    ctx.globalCompositeOperation = 'source-over';
     applyCodecSafetyResolve(ctx, targetWidth, targetHeight, codecSafety);
     applyFlashOverlay(ctx, targetWidth, targetHeight, flashOverlay);
     return;
   }
 
   throw new Error('No canvas source available for frame capture. Check liveCanvas and getReadFramePixels.');
+}
+
+function captureCanvasLoopSample(canvas: HTMLCanvasElement): LoopFrameSample | null {
+  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+  if (!ctx || canvas.width <= 0 || canvas.height <= 0) return null;
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return {
+    data: new Uint8Array(image.data),
+    width: image.width,
+    height: image.height,
+  };
 }
 
 function applyFlashOverlay(
@@ -816,14 +795,14 @@ async function exportWebMWithMediaRecorderFallback(options: {
   const targetHeight = Math.max(2, Math.round(options.height || options.canvas.height));
   const mimeType = pickBestVideoMimeType();
   if (!mimeType) throw new Error('WebM not supported. Try Chrome or Firefox.');
-  const liveCanvas: HTMLCanvasElement | null = null;
+  const liveCanvas = options.getLiveCanvas?.() ?? options.canvas;
   const clampedFps = Math.max(24, Math.min(60, fps));
   const totalFrames = Math.max(1, Math.round((durationMs / 1000) * clampedFps));
   const bitrate = VIDEO_QUALITY_PRESETS[quality].bitrate(targetWidth, targetHeight);
   const offscreen = document.createElement('canvas');
   offscreen.width = targetWidth;
   offscreen.height = targetHeight;
-  let exportRenderer: THREE.WebGLRenderer | null = createIsolatedExportRenderer(targetWidth, targetHeight, false);
+  options.setExportSize?.(targetWidth, targetHeight);
   const stream = offscreen.captureStream(0);
   const track = stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
   if (!track) throw new Error('Failed to create video track.');
@@ -831,7 +810,7 @@ async function exportWebMWithMediaRecorderFallback(options: {
   const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
   recorder.ondataavailable = (e) => { if (e.data?.size > 0) chunks.push(e.data); };
   const stopped = new Promise<Blob>((resolve, reject) => {
-    recorder.onerror = () => reject(recorder.error ?? new Error('MediaRecorder error'));
+    recorder.onerror = (event) => reject((event as ErrorEvent).error ?? new Error('MediaRecorder error'));
     recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
   });
   recorder.start();
@@ -840,10 +819,16 @@ async function exportWebMWithMediaRecorderFallback(options: {
   for (let i = 0; i < totalFrames; i++) {
     throwIfExportAborted(options.signal);
     const t = i / clampedFps;
-    await renderFrameAtTime(t, exportRenderer ?? undefined);
-    copyCanvasToCanvas(exportRenderer!.domElement, offscreen, false);
-    applyCodecSafetyResolve(offscreen.getContext('2d')!, targetWidth, targetHeight, options.codecSafety || 'sharp');
-    applyFlashOverlay(offscreen.getContext('2d')!, targetWidth, targetHeight, options.getFlashOverlayFrame?.(t) ?? null);
+    await renderFrameAtTime(t, undefined);
+    drawFrameToStagingCanvas({
+      stagingCanvas: offscreen,
+      targetWidth,
+      targetHeight,
+      liveCanvas,
+      getReadFramePixels: options.getReadFramePixels,
+      codecSafety: options.codecSafety || 'sharp',
+      flashOverlay: options.getFlashOverlayFrame?.(t) ?? null,
+    });
     track.requestFrame?.();
     if (i % Math.max(1, Math.floor(totalFrames / 20)) === 0 || i === totalFrames - 1) {
       onProgress?.(5 + ((i + 1) / totalFrames) * 85, `Frame ${i + 1}/${totalFrames}`);
@@ -856,8 +841,6 @@ async function exportWebMWithMediaRecorderFallback(options: {
   const blob = await stopped;
   assertUsableVideoBlob(blob, 'MediaRecorder WebM fallback');
   stream.getTracks().forEach(t => t.stop());
-  disposeIsolatedExportRenderer(exportRenderer);
-  exportRenderer = null;
   options.restoreSize?.();
   const preparingFile = getExportFinalizationProgress('preparing-file');
   onProgress?.(preparingFile.progress, preparingFile.message);
@@ -876,8 +859,6 @@ async function exportWebMWithMediaRecorderFallback(options: {
       if (recorder.state !== 'inactive') recorder.stop();
     } catch {}
     stream.getTracks().forEach(t => t.stop());
-    disposeIsolatedExportRenderer(exportRenderer);
-    exportRenderer = null;
     options.restoreSize?.();
     cleanupExportResources();
     throw error;
@@ -955,6 +936,7 @@ export async function exportWebMFromCanvas(options: {
 
   // STAGE 2.8.4: frame-0 reference for the loop check (see loopVerification.ts).
   let loopReference: LoopFrameSample | null = null;
+  let encodedFrameReference: ExportFrameSample | null = null;
 
   const phaseTimers = { renderMs: 0, encodeMs: 0, finalizeMs: 0, startedAt: performance.now() };
   const finalizationTimers = createExportFinalizationTimings();
@@ -983,7 +965,7 @@ export async function exportWebMFromCanvas(options: {
     sourceHeight,
     bitrate,
     quality,
-    captureSource: `Mediabunny -> ${sourceWidth}\u00d7${sourceHeight} source render -> ${targetWidth}\u00d7${targetHeight} encoder canvas`,
+    captureSource: `live WebGL canvas -> ${targetWidth}\u00d7${targetHeight} sRGB staging canvas -> Mediabunny CanvasSource`,
     firstFrameTime: 0,
     lastFrameTime: (totalFrames - 1) / clampedFps,
     cleanupCompleted: false,
@@ -1038,22 +1020,36 @@ export async function exportWebMFromCanvas(options: {
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
       drawFrame: async (i, t) => {
         await renderFrameAtTime(t, undefined);
+        const liveCanvas = options.getLiveCanvas?.() ?? null;
+        const presentationReference = i === 0 && liveCanvas
+          ? captureExportFrameSample(liveCanvas)
+          : null;
 
         drawFrameToStagingCanvas({
           stagingCanvas,
           targetWidth,
           targetHeight,
-          liveCanvas: options.getLiveCanvas?.() ?? null,
+          liveCanvas,
           getReadFramePixels: options.getReadFramePixels,
           codecSafety,
           flashOverlay: options.getFlashOverlayFrame?.(t) ?? null,
         });
 
-        // STAGE 2.8.4: snapshot frame 0 as the loop reference. Cloned —
-        // the renderer reuses its readback buffer, so a view would be
-        // overwritten long before the comparison runs.
+        // Snapshot the exact canvas sent to CanvasSource. Loop certification
+        // now measures the production video input instead of a separate raw
+        // framebuffer path with different color semantics.
         if (i === 0 && options.verifyLoop) {
-          loopReference = cloneLoopSample(options.getReadFramePixels?.() ?? null);
+          loopReference = captureCanvasLoopSample(stagingCanvas);
+        }
+        if (i === 0) {
+          encodedFrameReference = captureExportFrameSample(stagingCanvas);
+          if (presentationReference && encodedFrameReference) {
+            const captureFidelity = compareExportFrameSamples(presentationReference, encodedFrameReference);
+            try { (window as unknown as Record<string, unknown>).__blendcraftLastCaptureFidelity = captureFidelity; } catch { /* diagnostics only */ }
+            if (!captureFidelity.passed) {
+              console.warn('[Export] Presentation-to-staging color drift detected:', captureFidelity);
+            }
+          }
         }
       },
     });
@@ -1073,7 +1069,16 @@ export async function exportWebMFromCanvas(options: {
         onProgress?.(93, 'Verifying loop...');
         const wrapTimeSeconds = totalFrames / clampedFps;
         await renderFrameAtTime(wrapTimeSeconds, undefined);
-        const wrapFrame = cloneLoopSample(options.getReadFramePixels?.() ?? null);
+        drawFrameToStagingCanvas({
+          stagingCanvas,
+          targetWidth,
+          targetHeight,
+          liveCanvas: options.getLiveCanvas?.() ?? null,
+          getReadFramePixels: options.getReadFramePixels,
+          codecSafety,
+          flashOverlay: options.getFlashOverlayFrame?.(wrapTimeSeconds) ?? null,
+        });
+        const wrapFrame = captureCanvasLoopSample(stagingCanvas);
         const loopResult = compareLoopFrames(loopReference, wrapFrame);
         console.info('[Export] ' + describeLoopResult(loopResult), loopResult);
         options.onLoopVerified?.(loopResult);
@@ -1099,6 +1104,16 @@ export async function exportWebMFromCanvas(options: {
       console.warn('[Export] Exported WebM duration mismatch:', durationCheck);
     }
 
+    const frameFidelity = await verifyExportedFrameFidelity(blob, encodedFrameReference);
+    if (!frameFidelity.checked) {
+      console.warn('[Export] WebM decoded-frame fidelity check unavailable:', frameFidelity.reason);
+    } else if (!frameFidelity.passed) {
+      console.warn('[Export] WebM decoded frame differs from the CanvasSource input:', frameFidelity);
+    } else if (import.meta.env?.DEV) {
+      console.info('[Export] WebM decoded-frame fidelity verified:', frameFidelity);
+    }
+    try { (window as unknown as Record<string, unknown>).__blendcraftLastFrameFidelity = frameFidelity; } catch { /* diagnostics only */ }
+
     throwIfExportAborted(options.signal);
     const exportingFile = getExportFinalizationProgress('exporting-file');
     onProgress?.(exportingFile.progress, exportingFile.message);
@@ -1120,6 +1135,7 @@ export async function exportWebMFromCanvas(options: {
       breakdown: `render ${pct(phaseTimers.renderMs)} \u00b7 encode ${pct(phaseTimers.encodeMs)} \u00b7 finalize ${pct(phaseTimers.finalizeMs)} \u00b7 blob ${pct(finalizationTimers.blobMs)} \u00b7 download ${pct(finalizationTimers.downloadHandoffMs)}`,
       finalization: { ...finalizationTimers },
       artifactDuration: durationCheck,
+      frameFidelity,
     };
     console.info('[Export] Timing:', timing);
     try { (window as unknown as Record<string, unknown>).__exportTiming = timing; } catch { /* diag */ }
@@ -1411,6 +1427,14 @@ export function generateCSSCode(layers: Layer[]): { code: string; supported: boo
   const gradient = visibleLayer.gradient;
   const cssCompatibleTypes = ['linear', 'radial', 'conic'];
 
+  if (!gradient) {
+    return {
+      code: '',
+      supported: false,
+      message: 'The selected layer is media-based and has no CSS gradient specification.',
+    };
+  }
+
   if (!cssCompatibleTypes.includes(gradient.type)) {
     return {
       code: `/* Blendcraft Studio CSS gradient spec export */
@@ -1448,6 +1472,7 @@ export function generateCSSCode(layers: Layer[]): { code: string; supported: boo
  */
 export function extractShaderCode(layer: Layer): { code: string; uniforms: string } {
   const gradient = layer.gradient;
+  if (!gradient) throw new Error('Shader export requires a gradient layer.');
   
   // Generate uniforms block
   const uniforms = `// Uniforms
@@ -1668,7 +1693,7 @@ export async function exportGIFDeterministic(options: {
             const frame = options.getReadFramePixels?.();
             if (frame && frame.data.length === frame.width * frame.height * 4) {
               const flipped = flipRgbaBuffer(frame.data, frame.width, frame.height);
-              blitCtx.putImageData(new ImageData(new Uint8ClampedArray(flipped.buffer), frame.width, frame.height), 0, 0);
+              blitCtx.putImageData(new ImageData(toImageDataArray(flipped), frame.width, frame.height), 0, 0);
             }
           }
 
@@ -1830,6 +1855,7 @@ export async function exportMP4FromCanvas(options: {
   stagingCanvas.height = targetHeight;
 
   onProgress?.(0, `Encoding ${totalFrames} frames (MP4/H.264)...`);
+  let encodedFrameReference: ExportFrameSample | null = null;
 
   try {
     const result = await encodeVideoWithMediabunny({
@@ -1842,8 +1868,11 @@ export async function exportMP4FromCanvas(options: {
       container: 'mp4',
       signal: options.signal,
       onProgress,
-      drawFrame: async (_i, t) => {
+      drawFrame: async (i, t) => {
         await renderFrameAtTime(t, undefined);
+        const presentationReference = i === 0 && liveCanvas
+          ? captureExportFrameSample(liveCanvas)
+          : null;
         drawFrameToStagingCanvas({
           stagingCanvas,
           targetWidth,
@@ -1853,6 +1882,16 @@ export async function exportMP4FromCanvas(options: {
           codecSafety: options.codecSafety || 'sharp',
           flashOverlay: options.getFlashOverlayFrame?.(t) ?? null,
         });
+        if (i === 0) {
+          encodedFrameReference = captureExportFrameSample(stagingCanvas);
+          if (presentationReference && encodedFrameReference) {
+            const captureFidelity = compareExportFrameSamples(presentationReference, encodedFrameReference);
+            try { (window as unknown as Record<string, unknown>).__blendcraftLastCaptureFidelity = captureFidelity; } catch { /* diagnostics only */ }
+            if (!captureFidelity.passed) {
+              console.warn('[Export] Presentation-to-staging color drift detected:', captureFidelity);
+            }
+          }
+        }
       },
     });
 
@@ -1860,6 +1899,16 @@ export async function exportMP4FromCanvas(options: {
     if (durationCheck.checked && !durationCheck.withinTolerance) {
       console.warn('[Export] Exported MP4 duration mismatch:', durationCheck);
     }
+
+    const frameFidelity = await verifyExportedFrameFidelity(result.blob, encodedFrameReference);
+    if (!frameFidelity.checked) {
+      console.warn('[Export] MP4 decoded-frame fidelity check unavailable:', frameFidelity.reason);
+    } else if (!frameFidelity.passed) {
+      console.warn('[Export] MP4 decoded frame differs from the CanvasSource input:', frameFidelity);
+    } else if (import.meta.env?.DEV) {
+      console.info('[Export] MP4 decoded-frame fidelity verified:', frameFidelity);
+    }
+    try { (window as unknown as Record<string, unknown>).__blendcraftLastFrameFidelity = frameFidelity; } catch { /* diagnostics only */ }
 
     saveAs(result.blob, filename.replace(/\.webm$/, '.mp4'));
     onProgress?.(100, 'MP4 export complete!');

@@ -78,6 +78,8 @@ const createDefaultTransformState = (layer: Layer): LayerTransformState => {
     baseCenterX:     g?.centerX  || 0.5,
     baseCenterY:     g?.centerY  || 0.5,
     baseScale:       g?.scale    || 1,
+    signedPhase:     0,
+    smoothedSpeed:   layer.animation?.speed ?? 0,
   };
 };
 
@@ -660,4 +662,3 @@ export const ANIMATION_FIELD_KIND: Partial<Record<AnimationType, AnimationFieldK
 export function isMediaFriendlyAnimation(type: AnimationType): boolean {
   return (ANIMATION_FIELD_KIND[type] ?? 'field') === 'rigid';
 }
-

@@ -13,7 +13,7 @@
  * which call this module with a `drawFrame` callback.
  *
  * Why Mediabunny instead of hand-rolled VideoEncoder + muxer:
- * - `VideoSampleSource.add()` is awaited — genuine backpressure. The
+ * - `CanvasSource.add()` is awaited — genuine backpressure. The
  *   previous code polled `encoder.encodeQueueSize` against hand-tuned
  *   watermark tables per resolution/codec/hardware combination to
  *   approximate this. Mediabunny gives it for free.
@@ -24,15 +24,10 @@
  * - Actively maintained by the same author as the two deprecated
  *   packages this replaces; zero dependencies of its own.
  *
- * Uses Mediabunny's lower-level `VideoSampleSource` rather than
- * `CanvasSource` — deliberately. `CanvasSource` constructs each frame's
- * `VideoFrame` internally with no `colorSpace` hint, which inherits
- * whatever default Chromium assigns to a canvas-sourced frame; real
- * exported files confirmed that comes out tagged `color_range=tv`
- * (limited/legal range) even though canvas pixel data is always full
- * range. Constructing the `VideoFrame` explicitly, with an accurate
- * `colorSpace`, is only possible via the lower-level API — see
- * `CANVAS_SOURCE_COLOR_SPACE` below.
+ * Uses Mediabunny's `CanvasSource`, matching the proven Visual Mood Labs
+ * export contract. The caller draws the authoritative presentation canvas
+ * into one fixed staging canvas, then this module asks CanvasSource to capture
+ * that canvas at an explicit deterministic timestamp and duration.
  */
 
 import {
@@ -40,47 +35,11 @@ import {
   Mp4OutputFormat,
   WebMOutputFormat,
   BufferTarget,
-  VideoSampleSource,
-  VideoSample,
+  CanvasSource,
   canEncodeVideo,
   type VideoCodec,
 } from 'mediabunny';
 import { isIframeEnvironment } from '../utils/environment';
-
-/**
- * The color space to explicitly stamp on every canvas-sourced frame.
- *
- * The bug this fixes, traced directly (not guessed): Mediabunny's
- * `CanvasSource` constructs frames via `new VideoFrame(canvas, {...})` with
- * no `colorSpace` specified, so it inherits whatever default Chromium
- * assigns — which real exported files confirmed comes out tagged
- * `color_range=tv` (limited/legal range, 16-235). Canvas pixel data is
- * ALWAYS full range (0-255); a canvas has no concept of legal video levels.
- * Every spec-compliant player then applies legal→full expansion to data
- * that was never legal-range-compressed, stretching values outward —
- * highlights blow toward white, the effective range overshoots. That's the
- * exact "saturation gone, brightness way up" symptom.
- *
- * This is the same color space Mediabunny's own raw-buffer RGBA/RGBX
- * construction path already uses internally for genuine full-range RGB
- * source data (see its `sample.ts` default for `format === 'RGBA'`) — not
- * an invented value, matched to what the library's own author considers
- * correct for this exact kind of source.
- */
-const CANVAS_SOURCE_COLOR_SPACE: VideoColorSpaceInit = {
-  primaries: 'bt709',
-  transfer: 'iec61966-2-1',
-  matrix: 'rgb',
-  fullRange: true,
-};
-
-/**
- * TypeScript's bundled DOM lib doesn't yet include `colorSpace` on the
- * `CanvasImageSource` overload of `VideoFrameInit`, even though it's a real,
- * runtime-supported field per the WebCodecs spec (and the one this whole
- * fix depends on). Narrow, local augmentation rather than a blanket `any`.
- */
-type VideoFrameInitWithColorSpace = VideoFrameInit & { colorSpace?: VideoColorSpaceInit };
 
 export type MediabunnyContainer = 'mp4' | 'webm';
 
@@ -117,7 +76,7 @@ export interface MediabunnyEncodeResult {
   mimeType: string;
   /** Wall-clock time spent inside drawFrame across all frames, ms. */
   renderMs: number;
-  /** Wall-clock time spent awaiting VideoSampleSource.add() across all
+  /** Wall-clock time spent awaiting CanvasSource.add() across all
    *  frames, ms. This is the real encode + backpressure cost — the honest
    *  replacement for the old "queueWaitMs" watermark-drain metric. */
   encodeMs: number;
@@ -343,7 +302,7 @@ export async function encodeVideoWithMediabunny(
     const latencyMode: 'quality' | 'realtime' =
       container === 'webm' || preferredSoftware ? 'realtime' : 'quality';
 
-    const videoSource = new VideoSampleSource({
+    const videoSource = new CanvasSource(stagingCanvas, {
       codec: mediaCodecFor(container),
       bitrate,
       hardwareAcceleration,
@@ -377,23 +336,10 @@ export async function encodeVideoWithMediabunny(
         throwIfAborted(signal);
         const encodeStart = performance.now();
 
-        // Constructing the VideoFrame ourselves — rather than letting
-        // CanvasSource do it internally with no colorSpace hint — is the
-        // actual fix. See CANVAS_SOURCE_COLOR_SPACE doc comment above.
-        const frame = new VideoFrame(stagingCanvas, {
-          timestamp: Math.round(t * 1_000_000),
-          duration: Math.round(frameDurationSeconds * 1_000_000),
-          colorSpace: CANVAS_SOURCE_COLOR_SPACE,
-        } satisfies VideoFrameInitWithColorSpace as VideoFrameInit);
-        const sample = new VideoSample(frame, { timestamp: t, duration: frameDurationSeconds });
-        try {
-          // VideoSampleSource.add() does NOT take ownership of the sample
-          // (unlike CanvasSource, which closes it internally) — caller is
-          // responsible for closing it once encoding has consumed it.
-          await videoSource.add(sample);
-        } finally {
-          sample.close();
-        }
+        // Deterministic offline timing is retained even though capture now uses
+        // the same CanvasSource contract as Visual Mood Labs. Awaiting add()
+        // is the encoder/writer backpressure barrier for every frame.
+        await videoSource.add(t, frameDurationSeconds);
 
         encodeMs += performance.now() - encodeStart;
 

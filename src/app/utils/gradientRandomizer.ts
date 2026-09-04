@@ -222,13 +222,13 @@ export function generateVariation(gradient: GradientConfig, variationType: 'colo
   if (variationType === 'structure' || variationType === 'both') {
     // Vary angle
     if (gradient.type === 'linear' || gradient.type === 'conic') {
-      variation.angle = (gradient.angle + (Math.random() > 0.5 ? 45 : -45)) % 360;
+      variation.angle = ((gradient.angle ?? 0) + (Math.random() > 0.5 ? 45 : -45)) % 360;
     }
 
     // Vary center position
     if (gradient.type === 'radial') {
-      variation.centerX = Math.max(0.2, Math.min(0.8, gradient.centerX + (Math.random() - 0.5) * 0.3));
-      variation.centerY = Math.max(0.2, Math.min(0.8, gradient.centerY + (Math.random() - 0.5) * 0.3));
+      variation.centerX = Math.max(0.2, Math.min(0.8, (gradient.centerX ?? 0.5) + (Math.random() - 0.5) * 0.3));
+      variation.centerY = Math.max(0.2, Math.min(0.8, (gradient.centerY ?? 0.5) + (Math.random() - 0.5) * 0.3));
     }
   }
 
@@ -279,13 +279,13 @@ export function generateSmartRefine(gradient: GradientConfig, count: number = 6)
     
     // Subtle angle variation (±15 degrees max)
     if (gradient.type === 'linear' || gradient.type === 'conic') {
-      variation.angle = (gradient.angle + (-15 + Math.random() * 30) + 360) % 360;
+      variation.angle = ((gradient.angle ?? 0) + (-15 + Math.random() * 30) + 360) % 360;
     }
     
     // Subtle center position variation (±10% max)
     if (gradient.type === 'radial') {
-      variation.centerX = Math.max(0.3, Math.min(0.7, gradient.centerX + (Math.random() - 0.5) * 0.2));
-      variation.centerY = Math.max(0.3, Math.min(0.7, gradient.centerY + (Math.random() - 0.5) * 0.2));
+      variation.centerX = Math.max(0.3, Math.min(0.7, (gradient.centerX ?? 0.5) + (Math.random() - 0.5) * 0.2));
+      variation.centerY = Math.max(0.3, Math.min(0.7, (gradient.centerY ?? 0.5) + (Math.random() - 0.5) * 0.2));
     }
     
     variations.push(variation);

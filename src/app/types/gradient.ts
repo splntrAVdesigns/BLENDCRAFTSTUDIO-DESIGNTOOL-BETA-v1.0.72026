@@ -9,6 +9,7 @@ export type GradientType =
   | 'blob'
   | 'stripe'
   | 'wave'
+  | 'wave2' // Legacy saved-project alias retained for backward compatibility.
   | 'noise-spiral'
   | 'fractal'
   | 'turbulence'
@@ -24,7 +25,8 @@ export type GradientType =
   | 'concentric' // NEW: Circular ripple patterns
   | 'radial-waves' // NEW: Expanding circular waves with interference
   | 'mandala' // NEW: Symmetrical radial patterns with sacred geometry
-  | 'starburst'; // NEW: Radial star/sunburst rays from center
+  | 'starburst' // NEW: Radial star/sunburst rays from center
+  | 'four-corners'; // Four-corner bilinear gradient
 
 export type BlendMode = 
   | 'normal'

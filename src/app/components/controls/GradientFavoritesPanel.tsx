@@ -179,12 +179,12 @@ export function GradientFavoritesPanel({ onGradientGenerated }: GradientFavorite
           .join(', ')})`;
         break;
       case 'radial':
-        backgroundStyle = `radial-gradient(circle at ${gradient.centerX * 100}% ${gradient.centerY * 100}%, ${gradient.colors
+        backgroundStyle = `radial-gradient(circle at ${(gradient.centerX ?? 0.5) * 100}% ${(gradient.centerY ?? 0.5) * 100}%, ${gradient.colors
           .map(c => `${c.color} ${c.position * 100}%`)
           .join(', ')})`;
         break;
       case 'conic':
-        backgroundStyle = `conic-gradient(from ${gradient.angle}deg at ${gradient.centerX * 100}% ${gradient.centerY * 100}%, ${gradient.colors
+        backgroundStyle = `conic-gradient(from ${gradient.angle ?? 0}deg at ${(gradient.centerX ?? 0.5) * 100}% ${(gradient.centerY ?? 0.5) * 100}%, ${gradient.colors
           .map(c => `${c.color} ${c.position * 360}deg`)
           .join(', ')})`;
         break;

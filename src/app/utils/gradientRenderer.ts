@@ -28,6 +28,7 @@ import { plasmaGradientShader } from '../shaders/plasmaShader'; // Flowing inter
 import { marbleGradientShader, concentricGradientShader } from '../shaders/newGradients';
 import { radialWavesGradientShader, mandalaGradientShader, starburstGradientShader, fourCornersGradientShader } from '../shaders/newGradients';
 import { wrapShaderWithMask } from '../shaders/maskShaderWrapper';
+import { withOutputColorSpace } from '../shaders/outputColorSpace';
 import { createMediaMaterial, isMediaLayerActive } from '../media/mediaShader';
 import { deterministicRange } from './deterministicAnimation';
 
@@ -48,16 +49,16 @@ export function renderGradientLayer(
   // Once a layer has displacement configured, always use subdivided geometry
   // This prevents visual jumps when toggling warp mode on/off
   const hasDisplacement = layer.displacement !== undefined && layer.displacement !== null;
-  const hasVertexOffsets = layer.displacement?.vertexOffsets && layer.displacement.vertexOffsets.length > 0;
+  const offsets = layer.displacement?.vertexOffsets;
+  const hasVertexOffsets = Boolean(offsets?.length);
   const meshResolution = layer.displacement?.meshResolution || 64;
   const geometry = hasDisplacement 
     ? new THREE.PlaneGeometry(width, height, meshResolution, meshResolution)
     : new THREE.PlaneGeometry(width, height);
   
   // Apply stored vertex offsets if they exist (preserves warp edits even when warp mode is off)
-  if (hasVertexOffsets) {
+  if (hasVertexOffsets && offsets) {
     const positions = geometry.attributes.position;
-    const offsets = layer.displacement.vertexOffsets;
     
     // CRITICAL: Verify that offsets array matches expected size
     // Expected: positions.count vertices * 3 components (x, y, z)
@@ -92,7 +93,7 @@ export function renderGradientLayer(
       canvasAspect: height > 0 ? width / height : 1,
     });
   } else if (layer.gradient) {
-    material = createGradientMaterial(layer.gradient, layer.texture, interaction);
+    material = createGradientMaterial(layer.id, layer.gradient, layer.texture, interaction);
   } else if (layer.texture) {
     // Texture-only rendering (simplified for now)
     material = new THREE.MeshBasicMaterial({ color: 0x808080 });
@@ -184,9 +185,10 @@ export function getAnimationTypeValue(type?: string): number {
 }
 
 function createGradientMaterial(
+  layerId: string,
   gradient: GradientConfig,
   texture?: TextureConfig,
-  interaction: { mouseX: number; mouseY: number; mouseIntensity: number } = { mouseX: 0, mouseY: 0, mouseIntensity: 0 },
+  interaction: InteractionState = { mouseX: 0, mouseY: 0, intensity: 0 },
   displacementTexture?: THREE.Texture,
   displacementStrength: number = 0
 ): THREE.ShaderMaterial {
@@ -275,7 +277,7 @@ function createGradientMaterial(
     // Interactive mode uniforms (X/Y pad)
     mouseX: { value: interaction.mouseX },
     mouseY: { value: interaction.mouseY },
-    mouseIntensity: { value: interaction.mouseIntensity },
+    mouseIntensity: { value: interaction.intensity },
     // Layer opacity uniform (applied in shader)
     layerOpacity: { value: 1.0 }, // Will be updated by GradientCanvas
     // Mask uniforms
@@ -372,7 +374,7 @@ function createGradientMaterial(
     case 'noise-spiral':
       fragmentShader = noiseGradientShader;
       additionalUniforms = {
-        scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) * (1 + interaction.mouseIntensity * 0.2) },
+        scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) * (1 + interaction.intensity * 0.2) },
         octaves: { value: gradient.octaves || 4 },
         frequency: { value: gradient.frequency || 2 },
       };
@@ -381,7 +383,7 @@ function createGradientMaterial(
     case 'fractal':
       fragmentShader = fractalGradientShader;
       additionalUniforms = {
-        scale: { value: (gradient.scale || 2.5) * (gradient.scaleBoost || 1) * (1 + interaction.mouseIntensity * 0.2) },
+        scale: { value: (gradient.scale || 2.5) * (gradient.scaleBoost || 1) * (1 + interaction.intensity * 0.2) },
         octaves: { value: gradient.octaves || 6 },
         frequency: { value: gradient.frequency || 1 },
       };
@@ -390,7 +392,7 @@ function createGradientMaterial(
     case 'turbulence':
       fragmentShader = turbulenceGradientShader;
       additionalUniforms = {
-        scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) * (1 + interaction.mouseIntensity * 0.2) },
+        scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) * (1 + interaction.intensity * 0.2) },
         octaves: { value: gradient.octaves || 6 },
         frequency: { value: gradient.frequency || 2 },
       };
@@ -401,7 +403,7 @@ function createGradientMaterial(
       additionalUniforms = {
         angle: { value: gradient.angle || 0 },
         stripeCount: { value: gradient.stripeCount || 5 },
-        waveAmplitude: { value: (gradient.waveAmplitude || 0.2) * (1 + interaction.mouseIntensity * 0.3) },
+        waveAmplitude: { value: (gradient.waveAmplitude || 0.2) * (1 + interaction.intensity * 0.3) },
       };
       break;
 
@@ -410,7 +412,7 @@ function createGradientMaterial(
       additionalUniforms = {
         angle: { value: gradient.angle || 0 },
         frequency: { value: gradient.stripeCount || gradient.frequency || 5 },
-        waveAmplitude: { value: (gradient.waveAmplitude || 0.2) * (1 + interaction.mouseIntensity * 0.3) },
+        waveAmplitude: { value: (gradient.waveAmplitude || 0.2) * (1 + interaction.intensity * 0.3) },
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
       };
       break;
@@ -420,7 +422,7 @@ function createGradientMaterial(
       additionalUniforms = {
         angle: { value: gradient.angle || 0 },
         stripeCount: { value: gradient.stripeCount || 5 },
-        waveAmplitude: { value: (gradient.waveAmplitude || 0.2) * (1 + interaction.mouseIntensity * 0.3) },
+        waveAmplitude: { value: (gradient.waveAmplitude || 0.2) * (1 + interaction.intensity * 0.3) },
       };
       break;
 
@@ -441,7 +443,7 @@ function createGradientMaterial(
           ));
           // Stable per-layer/per-blob size. Math.random() made material rebuilds
           // produce a different blob field between preview and deterministic export.
-          blobSizes.push(deterministicRange(`${layer.id}:blob-size`, i, 0.4, 0.6));
+          blobSizes.push(deterministicRange(`${layerId}:blob-size`, i, 0.4, 0.6));
         } else {
           blobPositions.push(new THREE.Vector2(0, 0));
           blobSizes.push(0);
@@ -617,7 +619,7 @@ function createGradientMaterial(
   }
 
   // Wrap fragment shader with mask support
-  fragmentShader = wrapShaderWithMask(fragmentShader);
+  fragmentShader = withOutputColorSpace(wrapShaderWithMask(fragmentShader));
 
   // CACHE-BUSTING: Add unique comment to force Three.js to recompile shader when texture type changes
   // This prevents Three.js from reusing a cached shader program that might not have the new texture code

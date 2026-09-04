@@ -221,7 +221,7 @@ export const GradientControls = memo(function GradientControls({ gradient, onCha
                 <Label className="text-xs text-zinc-400">Type</Label>
                 <SelectWrapper
                   value={gradient.type}
-                  onValueChange={handleTypeChange}
+                  onValueChange={(value) => handleTypeChange(value as GradientType)}
                   options={gradientTypes}
                   disabled={isMediaLayer}
                   triggerClassName="border-zinc-700 text-zinc-100 hover:border-zinc-600"

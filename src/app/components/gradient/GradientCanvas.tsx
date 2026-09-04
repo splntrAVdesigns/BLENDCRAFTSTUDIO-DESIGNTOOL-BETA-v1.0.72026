@@ -18,7 +18,7 @@ import { publishLayerRoster } from '../../audio/audioLayerRoster';
 import { pumpAnalysisFrame, setAnalysisExternallyDriven } from '../../audio/audioEngine';
 import { beginAnalysis, endAnalysis, installAudioPerf } from '../../audio/audioPerf';
 import { phaseBegin, phaseEnd, installFrameProfile } from '../../utils/frameProfile';
-import { createEffectsMaterial, hasActiveEffects } from '../../utils/effectsRenderer';
+import { createEffectsMaterial, hasActiveEffects, shouldUsePostProcess } from '../../utils/effectsRenderer';
 import { InteractiveControls } from '../controls/InteractiveControls';
 import { sortColorStops } from '../../utils/colorStopValidation';
 import { getPatternCanvas, createPatternThreeTexture } from '../../utils/texturePatternCache';
@@ -268,7 +268,7 @@ async function createSvgMaskTexture(
     // alpha coverage only, so sRGB tagging is GPU-safe and does not alter the
     // sampled alpha channel used by the mask shader.
     applyTextureQualityPolicy(texture, {
-      colorSpace: THREE.SRGBColorSpace,
+      colorSpace: THREE.LinearSRGBColorSpace,
       wrapS: THREE.ClampToEdgeWrapping,
       wrapT: THREE.ClampToEdgeWrapping,
       minFilter: THREE.LinearFilter,
@@ -1087,7 +1087,7 @@ export const GradientCanvas = memo(function GradientCanvas({
       // Figma WebGL1 runtime. Mask coverage is read from alpha, so this does
       // not alter the mask while avoiding the r183 `primaries` GL fault.
       applyTextureQualityPolicy(texture, {
-        colorSpace: THREE.SRGBColorSpace,
+        colorSpace: THREE.LinearSRGBColorSpace,
         wrapS: THREE.ClampToEdgeWrapping,
         wrapT: THREE.ClampToEdgeWrapping,
         minFilter: THREE.LinearFilter,
@@ -1170,7 +1170,7 @@ export const GradientCanvas = memo(function GradientCanvas({
         const svgIdent = effectiveMask.svgShapeId ? `id:${effectiveMask.svgShapeId}` : `len:${effectiveMask.svgText?.length ?? 0}`;
         const cacheKey = isSvgSource
           ? `svg:${svgIdent}:${effectiveMask.svgViewBox?.width ?? ''}x${effectiveMask.svgViewBox?.height ?? ''}:${effectiveMask.svgRenderMode ?? 'fill'}:${effectiveMask.svgStrokeWidth ?? 0}`
-          : effectiveMask.imageUrl;
+          : (effectiveMask.imageUrl ?? '');
 
         const existingTexture = maskTexturesRef.current.get(layer.id);
         if (!existingTexture || (existingTexture.userData as any).url !== cacheKey) {
@@ -1791,6 +1791,7 @@ export const GradientCanvas = memo(function GradientCanvas({
     // Enable alpha channel and proper clearing for masked layers
     renderer.setClearColor(0x000000, 0); // Clear to transparent (alpha = 0)
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.NoToneMapping;
     
     renderer.domElement.style.display = 'block';
     renderer.domElement.style.margin = '0';
@@ -1832,9 +1833,9 @@ export const GradientCanvas = memo(function GradientCanvas({
     });
     renderTargetRef.current = renderTarget;
 
-    // Capture RT for PNG/video export: same dimensions, same type.
-    // Gets the post-processed composite rendered into it during renderAtTime
-    // so readFramePixels returns screen-accurate (gamma-correct) pixel values.
+    // Linear working-space target used for diagnostics and compatibility
+    // fallbacks. Production image/video capture uses the final sRGB
+    // presentation canvas after Three.js applies the output transfer.
     captureRTRef.current = new THREE.WebGLRenderTarget(
       drawingBufferSize.x, drawingBufferSize.y, {
         minFilter: THREE.LinearFilter,
@@ -2892,7 +2893,7 @@ export const GradientCanvas = memo(function GradientCanvas({
               material.uniforms.uMaskTexture.value = maskTexture;
               
               // Get mask texture dimensions
-              const maskImage = maskTexture.image;
+              const maskImage = maskTexture.image as { width?: number; height?: number };
               if (maskImage && maskImage.width && maskImage.height) {
                 const maskAspect = maskImage.width / maskImage.height;
                 material.uniforms.uMaskAspect.value = maskAspect;
@@ -2986,7 +2987,7 @@ export const GradientCanvas = memo(function GradientCanvas({
       }
       
       // Update blend mode (only if changed to avoid triggering needsUpdate)
-      let targetBlending = THREE.NormalBlending;
+      let targetBlending: THREE.Blending = THREE.NormalBlending;
       switch (layer.blendMode) {
         case 'multiply':
           targetBlending = THREE.MultiplyBlending;
@@ -3134,6 +3135,7 @@ export const GradientCanvas = memo(function GradientCanvas({
     const postProcessScene = postProcessSceneRef.current;
     const postProcessCamera = postProcessCameraRef.current;
     const effectsMaterial = effectsMaterialRef.current;
+    if (!postProcessCamera) return;
     
     const animate = () => {
       // RAF is scheduled at the BOTTOM of this function, AFTER render completes.
@@ -3303,20 +3305,13 @@ export const GradientCanvas = memo(function GradientCanvas({
         needsRenderRef.current || shouldAnimateTextures;
       // Cache the effects-active flag so hasActiveEffects() isn't called on every frame
       // (it checks ~18 conditions). Only recalculates when effects change via effectsRef.
-      let activeEffectsThisFrame = hasActiveEffects(effectsRef.current);
-      // STAGE 3.0.5: audio-driven POST-FX (Shake, RGB Split, Brightness) live in
-      // the post-process shader. When the user routes to one of those but has no
-      // MANUAL effect enabled, hasActiveEffects() is false and the single-pass
-      // fast path would skip the effects shader entirely — so the audio effect
-      // would silently do nothing. Force the double-pass whenever a global audio
-      // delta is live. Cheap check; only flips on while audio drives a global.
-      {
-        const g = getGlobalAudioDeltas();
-        if (g.shakeX !== 0 || g.shakeY !== 0 || g.chromaAdd > 0.001 || g.brightnessAdd > 0.001 ||
-            g.blurAdd > 0.001 || g.saturationAdd > 0.001 || g.vignetteAdd > 0.001 || g.strobeAdd > 0.001) {
-          activeEffectsThisFrame = true;
-        }
-      }
+      // Preview and deterministic export share this exact render-graph decision.
+      // This prevents a neutral export from being forced through a shader pass
+      // that the live preview did not use.
+      const activeEffectsThisFrame = shouldUsePostProcess(
+        effectsRef.current,
+        getGlobalAudioDeltas(),
+      );
       if (!shouldRenderFrame || isExportingRef.current) {
         // STAGE 3.0.3: close the frame phase on this early-return path too —
         // otherwise idle/export frames would open 'total' and never close it,
@@ -4536,7 +4531,8 @@ export const GradientCanvas = memo(function GradientCanvas({
       }
 
       const texture = maskTexturesRef.current.get(layer.id);
-      return !texture || !(texture.image && texture.image.width && texture.image.height);
+      const image = texture?.image as { width?: number; height?: number } | undefined;
+      return !image?.width || !image.height;
     });
 
     while (pendingMasks().length > 0) {
@@ -4633,13 +4629,14 @@ export const GradientCanvas = memo(function GradientCanvas({
         const layer = layersRef.current[index];
         const material = mesh.material as THREE.ShaderMaterial;
         const maskTexture = layer ? maskTexturesRef.current.get(layer.id) : undefined;
+        const maskImage = maskTexture?.image as { width?: number; height?: number } | undefined;
         return {
           layerId: layer?.id ?? `layer-${index}`,
           mesh,
           layer,
           uniforms: (material.uniforms ?? {}) as Record<string, { value: any }>,
-          maskTextureWidth: maskTexture?.image?.width || 0,
-          maskTextureHeight: maskTexture?.image?.height || 0,
+          maskTextureWidth: maskImage?.width || 0,
+          maskTextureHeight: maskImage?.height || 0,
         };
       }).filter((entry: ExportLayerCacheEntry) => Boolean(entry.layer));
 
@@ -4689,7 +4686,7 @@ export const GradientCanvas = memo(function GradientCanvas({
               minFilter: THREE.LinearFilter,
               magFilter: THREE.LinearFilter,
               format: THREE.RGBAFormat,
-              colorSpace: THREE.SRGBColorSpace,
+              colorSpace: THREE.LinearSRGBColorSpace,
             });
             if ((renderer.capabilities as any).isWebGL2) {
               (rt as any).samples = 4;
@@ -5175,7 +5172,12 @@ export const GradientCanvas = memo(function GradientCanvas({
       if (eu.uShake) eu.uShake.value.set(exportGlobal.shakeX, exportGlobal.shakeY);
     }
 
-    if (renderTarget) {
+    // Use the same render-graph authority as the live RAF path. Previously the
+    // mere existence of renderTarget forced every export through post-process,
+    // even when preview used the single-pass scene path.
+    const exportUsesPostProcess = shouldUsePostProcess(effectsRef.current, exportGlobal);
+
+    if (renderTarget && exportUsesPostProcess) {
       renderer.setRenderTarget(renderTarget);
       renderer.clear();
       renderer.render(scene, camera);
@@ -5762,8 +5764,8 @@ export const GradientCanvas = memo(function GradientCanvas({
               in2="SourceGraphic" 
               operator="arithmetic"
               k1="0"
-              k2={(effects.dithering || 0) * 0.01}
-              k3={1 - (effects.dithering || 0) * 0.01}
+              k2={(effects.ditherStrength || 0) * 0.01}
+              k3={1 - (effects.ditherStrength || 0) * 0.01}
               k4="0"
             />
           </filter>

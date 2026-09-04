@@ -30,6 +30,8 @@ interface LayerPanelProps {
   onActiveLayerChange: (layerId: string) => void;
   /** STAGE 2.7C: fired once on drop so a drag produces ONE history entry. */
   onCommitHistory?: () => void;
+  onStartDrag?: () => void;
+  onEndDrag?: () => void;
   /**
    * STAGE 2.7C: applies a reorder WITHOUT committing history. moveLayer() runs
    * on every hover tick during a drag; routing it through the committing
@@ -169,7 +171,7 @@ const DraggableLayerItem = ({
     }),
   });
 
-  const [{ isOver }, drop] = useDrop({
+  const [{ isOver }, drop] = useDrop<{ index: number }, void, { isOver: boolean }>({
     accept: LAYER_ITEM_TYPE,
     hover(item: { index: number }, monitor) {
       if (!ref.current) {

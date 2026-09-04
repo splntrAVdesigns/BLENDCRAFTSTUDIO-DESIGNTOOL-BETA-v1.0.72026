@@ -6,6 +6,8 @@ import {
   createLayerExportDurationPlan,
 } from '../src/app/export/ExportDurationPlan.ts';
 import { planWebMExport } from '../src/app/utils/exportPlanner.ts';
+import { estimateCycleTime } from '../src/app/animation/estimateAnimationCycle.ts';
+import { mapLayerAnimationSpeed } from '../src/app/components/gradient/gradientMath.ts';
 
 function animatedLayer(type: string, speed: number, visible = true): Layer {
   return {
@@ -41,12 +43,16 @@ test('Loop Lock uses the longest visible enabled animation cycle', () => {
     ],
   });
 
-  assert.equal(plan.referenceCycleMs, 5_000);
-  assert.equal(plan.cycleCount, 2);
-  assert.equal(plan.effectiveDurationMs, 10_000);
-  assert.equal(plan.totalFrames, 300);
+  const expectedReference = Math.max(
+    estimateCycleTime('pulse', mapLayerAnimationSpeed(1)),
+    estimateCycleTime('rotation', mapLayerAnimationSpeed(2)),
+  );
+  assert.equal(plan.referenceCycleMs, expectedReference);
+  assert.equal(plan.cycleCount, 1);
+  assert.equal(plan.effectiveDurationMs, expectedReference);
+  assert.equal(plan.totalFrames, Math.round(expectedReference / 1000 * 30));
   assert.equal(plan.animatedLayerCount, 2);
-  assert.match(plan.statusLabel, /Snapping to 10\.00s/);
+  assert.match(plan.statusLabel, /Snapping to 32\.38s/);
 });
 
 test('Loop Lock with no animated layers falls back to target duration', () => {
