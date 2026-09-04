@@ -15,6 +15,7 @@ test('finalization progress is monotonic and reserves 98% for browser download h
 
 test('finalization timings start at zero for each export', () => {
   assert.deepEqual(createExportFinalizationTimings(), {
+    encoderDrainAndMuxMs: 0,
     muxMs: 0,
     blobMs: 0,
     downloadHandoffMs: 0,

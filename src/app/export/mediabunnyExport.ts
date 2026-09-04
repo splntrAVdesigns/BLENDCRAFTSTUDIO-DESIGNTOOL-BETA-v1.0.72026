@@ -71,6 +71,8 @@ export interface MediabunnyEncodeOptions {
   onEncoderConfig?: (info: {
     codec: string;
     hardwareAcceleration?: string;
+    width: number;
+    height: number;
     latencyMode: 'quality' | 'realtime';
     policy: 'iframe-software' | 'hardware-first' | 'software-fallback' | 'measured-software-fallback' | 'realtime-default';
   }) => void;
@@ -86,9 +88,8 @@ export interface MediabunnyEncodeResult {
    *  frames, ms. This is the real encode + backpressure cost — the honest
    *  replacement for the old "queueWaitMs" watermark-drain metric. */
   encodeMs: number;
-  /** Wall-clock time spent closing/flushing the native VideoEncoder, ms. */
-  flushMs: number;
-  /** Wall-clock time spent finalizing the muxer/target after encoder flush, ms. */
+  /** Public Mediabunny completion boundary: encoder drain + mux/target finalize.
+   *  These cannot be safely split without depending on private internals. */
   finalizeMs: number;
 }
 
@@ -99,11 +100,11 @@ interface EncoderPolicy {
 }
 
 interface H264PerformanceHistory {
-  hardware?: { msPerFrame: number; sampledAt: number };
-  software?: { msPerFrame: number; sampledAt: number };
+  hardware?: { totalEncoderMsPerFrame: number; sampledAt: number };
+  software?: { totalEncoderMsPerFrame: number; sampledAt: number };
 }
 
-const H264_PERFORMANCE_PREFIX = 'blendcraft:h264-encoder-performance:v1';
+const H264_PERFORMANCE_PREFIX = 'blendcraft:h264-encoder-performance:v2';
 const H264_PERFORMANCE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function h264PerformanceKey(width: number, height: number, fps: number, bitrate: number): string {
@@ -130,12 +131,12 @@ function recordH264Performance(
   fps: number,
   bitrate: number,
   policy: EncoderPolicy['policy'],
-  msPerFrame: number,
+  totalEncoderMsPerFrame: number,
 ): void {
-  if (!Number.isFinite(msPerFrame) || msPerFrame <= 0 || policy === 'iframe-software') return;
+  if (!Number.isFinite(totalEncoderMsPerFrame) || totalEncoderMsPerFrame <= 0 || policy === 'iframe-software') return;
   try {
     const history = readH264Performance(width, height, fps, bitrate);
-    const sample = { msPerFrame, sampledAt: Date.now() };
+    const sample = { totalEncoderMsPerFrame, sampledAt: Date.now() };
     if (policy === 'hardware-first') history.hardware = sample;
     if (policy === 'software-fallback' || policy === 'measured-software-fallback') history.software = sample;
     localStorage.setItem(h264PerformanceKey(width, height, fps, bitrate), JSON.stringify(history));
@@ -148,26 +149,11 @@ function shouldUseMeasuredSoftwareFallback(history: H264PerformanceHistory, fps:
   const hardware = history.hardware;
   if (!hardware || Date.now() - hardware.sampledAt > H264_PERFORMANCE_TTL_MS) return false;
   const slowThresholdMs = Math.max(50, (1000 / fps) * 1.5);
-  if (hardware.msPerFrame <= slowThresholdMs) return false;
+  if (hardware.totalEncoderMsPerFrame <= slowThresholdMs) return false;
 
   const software = history.software;
   if (!software || Date.now() - software.sampledAt > H264_PERFORMANCE_TTL_MS) return true;
-  return software.msPerFrame < hardware.msPerFrame * 0.9;
-}
-
-/**
- * Mediabunny's public close() starts an asynchronous native encoder flush but
- * intentionally returns void. The pinned 1.51.0 source exposes the resulting
- * promise to subclasses, allowing us to measure flush independently from mux
- * finalization without changing its backpressure or sample contract.
- */
-class MeasuredCanvasSource extends CanvasSource {
-  async closeAndWait(): Promise<void> {
-    super.close();
-    const closingPromise = (this as unknown as { _closingPromise: Promise<void> | null })._closingPromise;
-    if (!closingPromise) throw new Error('Mediabunny did not start the CanvasSource close operation.');
-    await closingPromise;
-  }
+  return software.totalEncoderMsPerFrame < hardware.totalEncoderMsPerFrame * 0.9;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -359,7 +345,9 @@ async function resolveEncoderPolicy(
     if (hardwareSupported) {
       return {
         hardwareAcceleration: 'prefer-hardware',
-        latencyMode: 'quality',
+        // Realtime bounds internal frame reordering and avoids a large native
+        // queue being deferred until finalize. Bitrate remains quality-owned.
+        latencyMode: 'realtime',
         policy: 'hardware-first',
       };
     }
@@ -431,7 +419,7 @@ export async function encodeVideoWithMediabunny(
     const encoderPolicy = await resolveEncoderPolicy(container, width, height, fps, bitrate);
     const { hardwareAcceleration, latencyMode } = encoderPolicy;
 
-    const videoSource = new MeasuredCanvasSource(stagingCanvas, {
+    const videoSource = new CanvasSource(stagingCanvas, {
       codec: mediaCodecFor(container),
       bitrate,
       hardwareAcceleration,
@@ -441,6 +429,8 @@ export async function encodeVideoWithMediabunny(
         onEncoderConfig?.({
           codec: (config as { codec?: string }).codec ?? mediaCodecFor(container),
           hardwareAcceleration: (config as { hardwareAcceleration?: string }).hardwareAcceleration,
+          width: (config as { width?: number }).width ?? stagingCanvas.width,
+          height: (config as { height?: number }).height ?? stagingCanvas.height,
           latencyMode,
           policy: encoderPolicy.policy,
         });
@@ -480,6 +470,16 @@ export async function encodeVideoWithMediabunny(
       },
     });
 
+    throwIfAborted(signal);
+    // Match Visual Mood Labs exactly: after the last awaited CanvasSource.add,
+    // let the public Output API own source drain, encoder flush, mux closure,
+    // and target finalization. Do not call source.close() or inspect private
+    // Mediabunny promises.
+    onProgress?.(91, `Draining encoder and finalizing ${container.toUpperCase()}...`);
+    const finalizeStart = performance.now();
+    await output.finalize();
+    const finalizeMs = performance.now() - finalizeStart;
+
     if (container === 'mp4') {
       recordH264Performance(
         width,
@@ -487,21 +487,9 @@ export async function encodeVideoWithMediabunny(
         fps,
         bitrate,
         encoderPolicy.policy,
-        encodeMs / Math.max(1, totalFrames),
+        (encodeMs + finalizeMs) / Math.max(1, totalFrames),
       );
     }
-
-    throwIfAborted(signal);
-    onProgress?.(91, 'Flushing video encoder...');
-    const flushStart = performance.now();
-    await videoSource.closeAndWait();
-    const flushMs = performance.now() - flushStart;
-
-    throwIfAborted(signal);
-    onProgress?.(94, `Finalizing ${container.toUpperCase()} container...`);
-    const finalizeStart = performance.now();
-    await output.finalize();
-    const finalizeMs = performance.now() - finalizeStart;
 
     const buffer = target.buffer;
     if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) {
@@ -515,7 +503,6 @@ export async function encodeVideoWithMediabunny(
       mimeType,
       renderMs,
       encodeMs,
-      flushMs,
       finalizeMs,
     };
   } finally {

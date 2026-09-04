@@ -6,7 +6,7 @@ const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.ur
 
 test('production encoder uses CanvasSource with awaited deterministic timing', () => {
   const source = read('src/app/export/mediabunnyExport.ts');
-  assert.match(source, /new MeasuredCanvasSource\(stagingCanvas/);
+  assert.match(source, /new CanvasSource\(stagingCanvas/);
   assert.match(source, /const t = i \/ fps/);
   assert.match(source, /await videoSource\.add\(t, frameDurationSeconds\)/);
 });

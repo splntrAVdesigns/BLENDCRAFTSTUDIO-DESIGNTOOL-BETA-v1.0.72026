@@ -1,7 +1,7 @@
 {
   "name": "@figma/my-make-file",
   "private": true,
-  "version": "0.1.0-phase7.3f.4",
+  "version": "0.1.0-phase7.3f.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,10 +15,11 @@
     "certify": "npm run test:export && npm run typecheck && npm run lint && npm run build",
     "test:mask": "node --experimental-strip-types --test tests/maskTexturePipeline.test.ts",
     "test:phase73f0": "node --experimental-strip-types --test tests/exportPhase73F0Contracts.test.ts",
-    "verify:deploy": "npm run typecheck && npm run test:phase73f0 && npm run test:phase73f1 && npm run test:phase73f2 && npm run test:phase73f4 && npm run build",
+    "verify:deploy": "npm run typecheck && npm run test:phase73f0 && npm run test:phase73f1 && npm run test:phase73f2 && npm run test:phase73f4 && npm run test:phase73f5 && npm run build",
     "test:phase73f1": "node --experimental-strip-types --test tests/exportPhase73F1Contracts.test.ts",
     "test:phase73f2": "node --experimental-strip-types --test tests/exportPhase73F2Contracts.test.ts",
-    "test:phase73f4": "node --experimental-strip-types --test tests/exportPhase73F4Contracts.test.ts"
+    "test:phase73f4": "node --experimental-strip-types --test tests/exportPhase73F4Contracts.test.ts",
+    "test:phase73f5": "node --experimental-strip-types --test tests/exportPhase73F5Contracts.test.ts"
   },
   "dependencies": {
     "@eslint/js": "^10.0.1",

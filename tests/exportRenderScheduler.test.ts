@@ -10,7 +10,7 @@ test('production frame loop is RAF-paced and deterministic', () => {
 });
 
 test('each CanvasSource frame awaits real encoder backpressure', () => {
-  assert.match(source, /new MeasuredCanvasSource\(stagingCanvas/);
+  assert.match(source, /new CanvasSource\(stagingCanvas/);
   assert.match(source, /await videoSource\.add\(t, frameDurationSeconds\)/);
 });
 

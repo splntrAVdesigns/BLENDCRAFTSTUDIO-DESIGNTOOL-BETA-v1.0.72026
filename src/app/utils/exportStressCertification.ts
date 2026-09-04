@@ -7,6 +7,9 @@ export interface ExportTimingSample {
   encodeWaitSec: number;
   flushSec: number;
   muxSec: number;
+  /** Public Mediabunny completion boundary. Prefer this over attempting to
+   *  split native encoder drain from muxing through private internals. */
+  encoderDrainAndMuxSec?: number;
   blobSec: number;
   downloadHandoffSec: number;
   durationCheckSec?: number;
@@ -61,11 +64,12 @@ function round(value: number): number {
 }
 
 export function identifyExportBottleneck(timing: ExportTimingSample): ExportProductionGate['bottleneck'] {
-  const finalization = timing.muxSec + timing.blobSec + timing.downloadHandoffSec;
+  const publicFinalize = timing.encoderDrainAndMuxSec ?? (timing.flushSec + timing.muxSec);
+  const finalization = publicFinalize + timing.blobSec + timing.downloadHandoffSec;
   const entries = [
     ['render', timing.renderSec],
     ['encode-wait', timing.encodeWaitSec],
-    ['flush', timing.flushSec],
+    ['flush', timing.encoderDrainAndMuxSec == null ? timing.flushSec : 0],
     ['finalization', finalization],
   ] as const;
   const winner = entries.reduce((best, current) => current[1] > best[1] ? current : best, entries[0]);
@@ -90,6 +94,7 @@ export function evaluateExportProductionGate(input: ExportCertificationSample[])
     encodeWaitSec: acc.encodeWaitSec + timing.encodeWaitSec,
     flushSec: acc.flushSec + timing.flushSec,
     muxSec: acc.muxSec + timing.muxSec,
+    encoderDrainAndMuxSec: (acc.encoderDrainAndMuxSec ?? 0) + (timing.encoderDrainAndMuxSec ?? 0),
     blobSec: acc.blobSec + timing.blobSec,
     downloadHandoffSec: acc.downloadHandoffSec + timing.downloadHandoffSec,
     durationCheckSec: (acc.durationCheckSec ?? 0) + (timing.durationCheckSec ?? 0),
@@ -97,7 +102,7 @@ export function evaluateExportProductionGate(input: ExportCertificationSample[])
     cleanupSec: (acc.cleanupSec ?? 0) + (timing.cleanupSec ?? 0),
     frames: acc.frames + timing.frames,
     msPerFrame: acc.msPerFrame + timing.msPerFrame,
-  }), { totalSec: 0, renderSec: 0, encodeWaitSec: 0, flushSec: 0, muxSec: 0, blobSec: 0, downloadHandoffSec: 0, durationCheckSec: 0, fidelityCheckSec: 0, cleanupSec: 0, frames: 0, msPerFrame: 0 });
+  }), { totalSec: 0, renderSec: 0, encodeWaitSec: 0, flushSec: 0, muxSec: 0, encoderDrainAndMuxSec: 0, blobSec: 0, downloadHandoffSec: 0, durationCheckSec: 0, fidelityCheckSec: 0, cleanupSec: 0, frames: 0, msPerFrame: 0 });
 
   const blockers: string[] = [];
   if (timings.length < 3) blockers.push('Run at least three successful exports for a meaningful production gate.');

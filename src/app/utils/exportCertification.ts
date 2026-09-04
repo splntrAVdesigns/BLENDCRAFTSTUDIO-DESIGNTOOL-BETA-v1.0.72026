@@ -80,6 +80,11 @@ export interface ExportArtifactDurationResult {
   expectedMs: number;
   actualMs: number | null;
   withinTolerance: boolean;
+  expectedWidth: number | null;
+  expectedHeight: number | null;
+  actualWidth: number | null;
+  actualHeight: number | null;
+  resolutionMatches: boolean | null;
   reason?: string;
 }
 
@@ -97,6 +102,8 @@ export async function verifyExportedArtifactDuration(
   blob: Blob,
   expectedMs: number,
   fps: number,
+  expectedWidth?: number,
+  expectedHeight?: number,
 ): Promise<ExportArtifactDurationResult> {
   return new Promise((resolve) => {
     const video = document.createElement('video');
@@ -110,14 +117,41 @@ export async function verifyExportedArtifactDuration(
     };
     const timeout = window.setTimeout(() => {
       cleanup();
-      resolve({ checked: false, expectedMs, actualMs: null, withinTolerance: true, reason: 'Metadata decode timed out.' });
+      resolve({
+        checked: false,
+        expectedMs,
+        actualMs: null,
+        withinTolerance: true,
+        expectedWidth: expectedWidth ?? null,
+        expectedHeight: expectedHeight ?? null,
+        actualWidth: null,
+        actualHeight: null,
+        resolutionMatches: null,
+        reason: 'Metadata decode timed out.',
+      });
     }, 8000);
     video.onloadedmetadata = () => {
       window.clearTimeout(timeout);
       const actualMs = Number.isFinite(video.duration) ? video.duration * 1000 : null;
+      const actualWidth = video.videoWidth > 0 ? video.videoWidth : null;
+      const actualHeight = video.videoHeight > 0 ? video.videoHeight : null;
+      const resolutionMatches = expectedWidth == null || expectedHeight == null
+        ? null
+        : actualWidth === expectedWidth && actualHeight === expectedHeight;
       cleanup();
       if (actualMs == null) {
-        resolve({ checked: false, expectedMs, actualMs: null, withinTolerance: true, reason: 'Decoded duration was not finite.' });
+        resolve({
+          checked: false,
+          expectedMs,
+          actualMs: null,
+          withinTolerance: true,
+          expectedWidth: expectedWidth ?? null,
+          expectedHeight: expectedHeight ?? null,
+          actualWidth,
+          actualHeight,
+          resolutionMatches,
+          reason: 'Decoded duration was not finite.',
+        });
         return;
       }
       resolve({
@@ -125,12 +159,28 @@ export async function verifyExportedArtifactDuration(
         expectedMs,
         actualMs,
         withinTolerance: durationWithinOneFrame(actualMs, expectedMs, fps),
+        expectedWidth: expectedWidth ?? null,
+        expectedHeight: expectedHeight ?? null,
+        actualWidth,
+        actualHeight,
+        resolutionMatches,
       });
     };
     video.onerror = () => {
       window.clearTimeout(timeout);
       cleanup();
-      resolve({ checked: false, expectedMs, actualMs: null, withinTolerance: true, reason: 'Browser could not decode the exported artifact for verification.' });
+      resolve({
+        checked: false,
+        expectedMs,
+        actualMs: null,
+        withinTolerance: true,
+        expectedWidth: expectedWidth ?? null,
+        expectedHeight: expectedHeight ?? null,
+        actualWidth: null,
+        actualHeight: null,
+        resolutionMatches: null,
+        reason: 'Browser could not decode the exported artifact for verification.',
+      });
     };
     video.src = url;
   });

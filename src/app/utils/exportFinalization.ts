@@ -13,6 +13,9 @@ export interface ExportFinalizationProgress {
 }
 
 export interface ExportFinalizationTimings {
+  encoderDrainAndMuxMs: number;
+  /** Retained for older diagnostics; zero when the mux cannot be safely
+   *  measured independently from the public encoder-finalization boundary. */
   muxMs: number;
   blobMs: number;
   downloadHandoffMs: number;
@@ -65,5 +68,5 @@ export async function handoffExportDownload(startDownload: () => void): Promise<
 }
 
 export function createExportFinalizationTimings(): ExportFinalizationTimings {
-  return { muxMs: 0, blobMs: 0, downloadHandoffMs: 0, cleanupMs: 0 };
+  return { encoderDrainAndMuxMs: 0, muxMs: 0, blobMs: 0, downloadHandoffMs: 0, cleanupMs: 0 };
 }

@@ -41,11 +41,11 @@ test('presentation canvas remains the production encoder source', () => {
   assert.ok((read('src/app/components/gradient/GradientCanvas.tsx').match(/shouldUsePostProcess\(/g) ?? []).length >= 2);
 });
 
-test('native flush, mux finalization, and MP4 handoff have distinct barriers', () => {
+test('public Mediabunny finalization precedes MP4 handoff', () => {
   const engine = read('src/app/export/mediabunnyExport.ts');
   const exporter = read('src/app/utils/exportUtils.ts');
-  assert.ok(engine.indexOf('await videoSource.closeAndWait()') < engine.indexOf('await output.finalize()'));
-  assert.match(engine, /flushMs/);
+  assert.doesNotMatch(engine, /closeAndWait|_closingPromise/);
+  assert.match(engine, /await output\.finalize\(\)/);
   assert.match(engine, /finalizeMs/);
   const mp4Start = exporter.indexOf('export async function exportMP4FromCanvas');
   const mp4 = exporter.slice(mp4Start);
@@ -61,5 +61,5 @@ test('standalone H264 selects a measured hardware-first or software-realtime pol
   assert.match(engine, /policy: 'software-fallback'/);
   assert.match(engine, /shouldUseMeasuredSoftwareFallback/);
   assert.match(engine, /policy: 'measured-software-fallback'/);
-  assert.match(engine, /encodeMs \/ Math\.max\(1, totalFrames\)/);
+  assert.match(engine, /\(encodeMs \+ finalizeMs\) \/ Math\.max\(1, totalFrames\)/);
 });
