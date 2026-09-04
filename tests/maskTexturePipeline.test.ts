@@ -17,7 +17,7 @@ test('mask canvas textures use a registered Three color space in the Figma WebGL
   const applyEnd = canvasSource.indexOf('const loadBitmapMaskTexture', applyStart);
   const applyBlock = canvasSource.slice(applyStart, applyEnd);
 
-  assert.match(applyBlock, /colorSpace:\s*THREE\.SRGBColorSpace/);
+  assert.match(applyBlock, /colorSpace:\s*THREE\.LinearSRGBColorSpace/);
   assert.doesNotMatch(applyBlock, /colorSpace:\s*THREE\.NoColorSpace/);
 });
 

@@ -1,7 +1,7 @@
 import * as THREE from '../lib/three';
 import { createNoise2D } from 'simplex-noise';
 import { Layer, InteractionState, GradientConfig, TextureConfig, MaskConfig } from '../types/gradient';
-import { hexToRgb } from './colors';
+import { hexToShaderRgb } from './colors';
 import {
   vertexShader,
   linearGradientShader,
@@ -28,7 +28,6 @@ import { plasmaGradientShader } from '../shaders/plasmaShader'; // Flowing inter
 import { marbleGradientShader, concentricGradientShader } from '../shaders/newGradients';
 import { radialWavesGradientShader, mandalaGradientShader, starburstGradientShader, fourCornersGradientShader } from '../shaders/newGradients';
 import { wrapShaderWithMask } from '../shaders/maskShaderWrapper';
-import { withOutputColorSpace } from '../shaders/outputColorSpace';
 import { createMediaMaterial, isMediaLayerActive } from '../media/mediaShader';
 import { deterministicRange } from './deterministicAnimation';
 
@@ -201,7 +200,7 @@ function createGradientMaterial(
   const sortedColors = sortColorStops(gradient.colors);
 
   sortedColors.forEach(c => {
-    const rgb = hexToRgb(c.color);
+    const rgb = hexToShaderRgb(c.color);
     colors.push(new THREE.Vector3(rgb.r, rgb.g, rgb.b));
   });
 
@@ -215,7 +214,7 @@ function createGradientMaterial(
     colors: { value: colors },
     positions: { value: positions },
     colorCount: { value: gradient.colors.length },
-    intensity: { value: gradient.intensity || 1 },
+    intensity: { value: gradient.intensity ?? 1 },
     time: { value: 0 },
     textureTime: { value: 0 }, // Separate time for texture animation
     textureAnimationType: { value: getTextureAnimationTypeValue(texture?.textureAnimationType) }, // Animation type: 0=spin, 1=warp, 2=pingPong, 3=scale, 4=drift, 5=tectonic, 6=breathing, 7=seismic, 8=shear, 9=vortex, 10=fluid
@@ -230,7 +229,7 @@ function createGradientMaterial(
              (texture?.blur !== undefined ? texture.blur : 0.5)
     },
     distortion: { value: texture?.distortion !== undefined ? texture.distortion : 0.5 },
-    angle: { value: gradient.angle || 0 }, // Gradient angle (for linear, stripe, wave, etc.)
+    angle: { value: gradient.angle ?? 0 }, // Gradient angle (for linear, stripe, wave, etc.)
     textureAngle: { value: texture?.angle !== undefined ? texture.angle : 90 }, // Texture angle (for linearGlass, waveSignal, etc.)
     blendMode: { value: texture?.blendMode ? getBlendModeValue(texture.blendMode) : 0.0 },
     // Animation uniforms
@@ -256,8 +255,8 @@ function createGradientMaterial(
     turbulence: { value: texture?.turbulence ?? 20 },
     colorIntensity: { value: texture?.colorIntensity ?? 15 },
     // Gradient animation uniforms (controlled by GradientCanvas)
-    uRotation: { value: gradient.angle || 0.0 }, // Rotation angle from gradient config
-    uScale: { value: gradient.scale || 1.0 }, // Scale multiplier from gradient config
+    uRotation: { value: gradient.angle ?? 0.0 }, // Rotation angle from gradient config
+    uScale: { value: gradient.scale ?? 1.0 }, // Scale multiplier from gradient config
     uAudioGlitch: { value: new THREE.Vector2(0, 0) }, // STAGE 3.0.5b: audio motion glitch (x=shove, y=slice)
     uDriftX: { value: 0.0 }, // Horizontal drift offset
     uDriftY: { value: 0.0 }, // Vertical drift offset
@@ -344,8 +343,8 @@ function createGradientMaterial(
     case 'linear':
       fragmentShader = linearGradientShader;
       additionalUniforms = {
-        angle: { value: (gradient.angle || 0) + (interaction.mouseX * 45) },
-        scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
+        angle: { value: (gradient.angle ?? 0) + (interaction.mouseX * 45) },
+        scale: { value: (gradient.scale ?? 1) * (gradient.scaleBoost ?? 1) },
       };
       break;
 
@@ -353,10 +352,10 @@ function createGradientMaterial(
       fragmentShader = radialGradientShader;
       additionalUniforms = {
         center: { value: new THREE.Vector2(
-          (gradient.centerX || 0.5) + interaction.mouseX * 0.3, // Increased from 0.1 to 0.3 (3x sensitivity)
-          (gradient.centerY || 0.5) + interaction.mouseY * 0.3
+          (gradient.centerX ?? 0.5) + interaction.mouseX * 0.3, // Increased from 0.1 to 0.3 (3x sensitivity)
+          (gradient.centerY ?? 0.5) + interaction.mouseY * 0.3
         )},
-        scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
+        scale: { value: (gradient.scale ?? 1) * (gradient.scaleBoost ?? 1) },
       };
       break;
 
@@ -364,17 +363,17 @@ function createGradientMaterial(
       fragmentShader = conicGradientShader;
       additionalUniforms = {
         center: { value: new THREE.Vector2(
-          (gradient.centerX || 0.5) + interaction.mouseX * 0.3,
-          (gradient.centerY || 0.5) + interaction.mouseY * 0.3
+          (gradient.centerX ?? 0.5) + interaction.mouseX * 0.3,
+          (gradient.centerY ?? 0.5) + interaction.mouseY * 0.3
         )},
-        scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
+        scale: { value: (gradient.scale ?? 1) * (gradient.scaleBoost ?? 1) },
       };
       break;
 
     case 'noise-spiral':
       fragmentShader = noiseGradientShader;
       additionalUniforms = {
-        scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) * (1 + interaction.intensity * 0.2) },
+        scale: { value: (gradient.scale ?? 1) * (gradient.scaleBoost ?? 1) * (1 + interaction.intensity * 0.2) },
         octaves: { value: gradient.octaves || 4 },
         frequency: { value: gradient.frequency || 2 },
       };
@@ -383,7 +382,7 @@ function createGradientMaterial(
     case 'fractal':
       fragmentShader = fractalGradientShader;
       additionalUniforms = {
-        scale: { value: (gradient.scale || 2.5) * (gradient.scaleBoost || 1) * (1 + interaction.intensity * 0.2) },
+        scale: { value: (gradient.scale ?? 2.5) * (gradient.scaleBoost ?? 1) * (1 + interaction.intensity * 0.2) },
         octaves: { value: gradient.octaves || 6 },
         frequency: { value: gradient.frequency || 1 },
       };
@@ -392,7 +391,7 @@ function createGradientMaterial(
     case 'turbulence':
       fragmentShader = turbulenceGradientShader;
       additionalUniforms = {
-        scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) * (1 + interaction.intensity * 0.2) },
+        scale: { value: (gradient.scale ?? 1) * (gradient.scaleBoost ?? 1) * (1 + interaction.intensity * 0.2) },
         octaves: { value: gradient.octaves || 6 },
         frequency: { value: gradient.frequency || 2 },
       };
@@ -401,28 +400,28 @@ function createGradientMaterial(
     case 'stripe':
       fragmentShader = waveGradientShader;
       additionalUniforms = {
-        angle: { value: gradient.angle || 0 },
+        angle: { value: gradient.angle ?? 0 },
         stripeCount: { value: gradient.stripeCount || 5 },
-        waveAmplitude: { value: (gradient.waveAmplitude || 0.2) * (1 + interaction.intensity * 0.3) },
+        waveAmplitude: { value: (gradient.waveAmplitude ?? 0.2) * (1 + interaction.intensity * 0.3) },
       };
       break;
 
     case 'wave':
       fragmentShader = waveGradientShader2;
       additionalUniforms = {
-        angle: { value: gradient.angle || 0 },
+        angle: { value: gradient.angle ?? 0 },
         frequency: { value: gradient.stripeCount || gradient.frequency || 5 },
-        waveAmplitude: { value: (gradient.waveAmplitude || 0.2) * (1 + interaction.intensity * 0.3) },
-        scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
+        waveAmplitude: { value: (gradient.waveAmplitude ?? 0.2) * (1 + interaction.intensity * 0.3) },
+        scale: { value: (gradient.scale ?? 1) * (gradient.scaleBoost ?? 1) },
       };
       break;
 
     case 'wave2':
       fragmentShader = waveGradientShader2;
       additionalUniforms = {
-        angle: { value: gradient.angle || 0 },
+        angle: { value: gradient.angle ?? 0 },
         stripeCount: { value: gradient.stripeCount || 5 },
-        waveAmplitude: { value: (gradient.waveAmplitude || 0.2) * (1 + interaction.intensity * 0.3) },
+        waveAmplitude: { value: (gradient.waveAmplitude ?? 0.2) * (1 + interaction.intensity * 0.3) },
       };
       break;
 
@@ -462,8 +461,8 @@ function createGradientMaterial(
       fragmentShader = spiralGradientShader;
       additionalUniforms = {
         center: { value: new THREE.Vector2(
-          (gradient.centerX || 0.5) + interaction.mouseX * 0.3, // Increased from 0.1 to 0.3
-          (gradient.centerY || 0.5) + interaction.mouseY * 0.3
+          (gradient.centerX ?? 0.5) + interaction.mouseX * 0.3, // Increased from 0.1 to 0.3
+          (gradient.centerY ?? 0.5) + interaction.mouseY * 0.3
         )},
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
       };
@@ -473,8 +472,8 @@ function createGradientMaterial(
       fragmentShader = burstGradientShader;
       additionalUniforms = {
         center: { value: new THREE.Vector2(
-          (gradient.centerX || 0.5) + interaction.mouseX * 0.3,
-          (gradient.centerY || 0.5) + interaction.mouseY * 0.3
+          (gradient.centerX ?? 0.5) + interaction.mouseX * 0.3,
+          (gradient.centerY ?? 0.5) + interaction.mouseY * 0.3
         )},
         stripeCount: { value: gradient.stripeCount || 12 },
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
@@ -485,7 +484,7 @@ function createGradientMaterial(
       fragmentShader = camoGradientShader;
       additionalUniforms = {
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
-        uTwist: { value: gradient.twist || 0 },
+        uTwist: { value: gradient.twist ?? 0 },
       };
       break;
 
@@ -518,9 +517,9 @@ function createGradientMaterial(
     case 'diamond':
       fragmentShader = diamondGradientShader;
       additionalUniforms = {
-        angle: { value: gradient.angle || 45 },
+        angle: { value: gradient.angle ?? 45 },
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
-        twist: { value: gradient.twist || 0 }, // Twist for internal gradients
+        twist: { value: gradient.twist ?? 0 }, // Twist for internal gradients
       };
       break;
 
@@ -528,10 +527,10 @@ function createGradientMaterial(
       fragmentShader = abstractGradientShader;
       additionalUniforms = {
         center: { value: new THREE.Vector2(
-          (gradient.centerX || 0.5) + interaction.mouseX * 0.3,
-          (gradient.centerY || 0.5) + interaction.mouseY * 0.3
+          (gradient.centerX ?? 0.5) + interaction.mouseX * 0.3,
+          (gradient.centerY ?? 0.5) + interaction.mouseY * 0.3
         )},
-        angle: { value: gradient.angle || 0 },
+        angle: { value: gradient.angle ?? 0 },
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
       };
       break;
@@ -541,7 +540,7 @@ function createGradientMaterial(
       additionalUniforms = {
         scale: { value: (gradient.scale || 2) * (gradient.scaleBoost || 1) }, // Default to 2 if not set
         octaves: { value: Math.max(1, gradient.octaves || 4) }, // Ensure at least 1, default 4
-        twist: { value: gradient.twist || 0 }, // Radial twist distortion
+        twist: { value: gradient.twist ?? 0 }, // Radial twist distortion
       };
       break;
 
@@ -550,7 +549,7 @@ function createGradientMaterial(
       additionalUniforms = {
         scale: { value: (gradient.scale || 2) * (gradient.scaleBoost || 1) }, // Default to 2 if not set
         octaves: { value: Math.max(1, gradient.octaves || 4) }, // Ensure at least 1, default 4
-        twist: { value: gradient.twist || 0 }, // Radial twist distortion
+        twist: { value: gradient.twist ?? 0 }, // Radial twist distortion
       };
       break;
 
@@ -558,8 +557,8 @@ function createGradientMaterial(
       fragmentShader = concentricGradientShader;
       additionalUniforms = {
         center: { value: new THREE.Vector2(
-          (gradient.centerX || 0.5) + interaction.mouseX * 0.3,
-          (gradient.centerY || 0.5) + interaction.mouseY * 0.3
+          (gradient.centerX ?? 0.5) + interaction.mouseX * 0.3,
+          (gradient.centerY ?? 0.5) + interaction.mouseY * 0.3
         )},
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
         octaves: { value: Math.max(1, gradient.octaves || 5) },
@@ -569,12 +568,12 @@ function createGradientMaterial(
     case 'radial-waves':
       fragmentShader = radialWavesGradientShader;
       additionalUniforms = {
-        centerX: { value: (gradient.centerX || 0.5) + interaction.mouseX * 0.3 },
-        centerY: { value: (gradient.centerY || 0.5) + interaction.mouseY * 0.3 },
+        centerX: { value: (gradient.centerX ?? 0.5) + interaction.mouseX * 0.3 },
+        centerY: { value: (gradient.centerY ?? 0.5) + interaction.mouseY * 0.3 },
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
         octaves: { value: Math.max(1, gradient.octaves || 3) },
         frequency: { value: gradient.frequency || 2.0 },
-        complexity: { value: gradient.twist || 0 },
+        complexity: { value: gradient.twist ?? 0 },
       };
       break;
 
@@ -582,8 +581,8 @@ function createGradientMaterial(
       fragmentShader = mandalaGradientShader;
       additionalUniforms = {
         center: { value: new THREE.Vector2(
-          (gradient.centerX || 0.5) + interaction.mouseX * 0.3,
-          (gradient.centerY || 0.5) + interaction.mouseY * 0.3
+          (gradient.centerX ?? 0.5) + interaction.mouseX * 0.3,
+          (gradient.centerY ?? 0.5) + interaction.mouseY * 0.3
         )},
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
         octaves: { value: Math.max(1, gradient.octaves || 5) },
@@ -594,8 +593,8 @@ function createGradientMaterial(
       fragmentShader = starburstGradientShader;
       additionalUniforms = {
         center: { value: new THREE.Vector2(
-          (gradient.centerX || 0.5) + interaction.mouseX * 0.3,
-          (gradient.centerY || 0.5) + interaction.mouseY * 0.3
+          (gradient.centerX ?? 0.5) + interaction.mouseX * 0.3,
+          (gradient.centerY ?? 0.5) + interaction.mouseY * 0.3
         )},
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
         // uTwist is overloaded as "ray sharpness" for starburst (0=soft, 1=razor)
@@ -607,7 +606,7 @@ function createGradientMaterial(
     case 'four-corners':
       fragmentShader = fourCornersGradientShader;
       additionalUniforms = {
-        angle: { value: gradient.angle || 0 }, // Base rotation angle
+        angle: { value: gradient.angle ?? 0 }, // Base rotation angle
         scale: { value: (gradient.scale || 1) * (gradient.scaleBoost || 1) },
         complexity: { value: gradient.twist !== undefined ? gradient.twist : 0.5 }, // twist = Corner Spread (0-1)
       };
@@ -619,7 +618,7 @@ function createGradientMaterial(
   }
 
   // Wrap fragment shader with mask support
-  fragmentShader = withOutputColorSpace(wrapShaderWithMask(fragmentShader));
+  fragmentShader = wrapShaderWithMask(fragmentShader);
 
   // CACHE-BUSTING: Add unique comment to force Three.js to recompile shader when texture type changes
   // This prevents Three.js from reusing a cached shader program that might not have the new texture code
@@ -711,16 +710,16 @@ export function generateCSSGradient(gradient: GradientConfig): string {
 
   switch (gradient.type) {
     case 'linear':
-      return `linear-gradient(${gradient.angle || 0}deg, ${colorStops})`;
+      return `linear-gradient(${gradient.angle ?? 0}deg, ${colorStops})`;
     
     case 'radial':
-      const cx = ((gradient.centerX || 0.5) * 100).toFixed(1);
-      const cy = ((gradient.centerY || 0.5) * 100).toFixed(1);
+      const cx = ((gradient.centerX ?? 0.5) * 100).toFixed(1);
+      const cy = ((gradient.centerY ?? 0.5) * 100).toFixed(1);
       return `radial-gradient(circle at ${cx}% ${cy}%, ${colorStops})`;
     
     case 'conic':
-      const ccx = ((gradient.centerX || 0.5) * 100).toFixed(1);
-      const ccy = ((gradient.centerY || 0.5) * 100).toFixed(1);
+      const ccx = ((gradient.centerX ?? 0.5) * 100).toFixed(1);
+      const ccy = ((gradient.centerY ?? 0.5) * 100).toFixed(1);
       return `conic-gradient(from 0deg at ${ccx}% ${ccy}%, ${colorStops})`;
     
     case 'voronoi':

@@ -1,6 +1,5 @@
 import * as THREE from '../lib/three';
 import { EffectsConfig } from '../components/controls/EffectsControls';
-import { withOutputColorSpace } from '../shaders/outputColorSpace';
 
 // Convert shape string to integer for shader
 function shapeToInt(shape: string): number {
@@ -763,7 +762,7 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
       uFlashBlendMode: { value: 0 }, // 0=screen (light), 1=multiply (dark)
     },
     vertexShader,
-    fragmentShader: withOutputColorSpace(fragmentShader),
+    fragmentShader,
     transparent: true, // Enable transparency to respect alpha channel
     depthWrite: false, // Disable depth writing for proper alpha blending
   });

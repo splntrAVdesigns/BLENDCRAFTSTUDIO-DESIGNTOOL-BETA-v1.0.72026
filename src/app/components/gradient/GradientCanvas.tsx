@@ -21,6 +21,7 @@ import { phaseBegin, phaseEnd, installFrameProfile } from '../../utils/frameProf
 import { createEffectsMaterial, hasActiveEffects, shouldUsePostProcess } from '../../utils/effectsRenderer';
 import { InteractiveControls } from '../controls/InteractiveControls';
 import { sortColorStops } from '../../utils/colorStopValidation';
+import { hexToShaderRgb } from '../../utils/colors';
 import { getPatternCanvas, createPatternThreeTexture } from '../../utils/texturePatternCache';
 import { mapTextureAnimationSpeed, mapLayerAnimationSpeed, mapMaskAnimationSpeed, encodeTextureType, encodePatternFlipMode, encodePatternOpacityCurveMode } from './gradientMath';
 import { applyRendererSize, getDrawingBufferSize, resizeRenderTargets } from './canvasSizing';
@@ -1055,15 +1056,15 @@ export const GradientCanvas = memo(function GradientCanvas({
         const playing = isPlayingRef.current;
         layerStatesRef.current.set(layer.id, {
           ...state,
-          baseAngle:      layer.gradient.angle    || 0,
-          baseCenterX:    layer.gradient.centerX  || 0.5,
-          baseCenterY:    layer.gradient.centerY  || 0.5,
-          baseScale:      layer.gradient.scale    || 1,
+          baseAngle:      layer.gradient.angle    ?? 0,
+          baseCenterX:    layer.gradient.centerX  ?? 0.5,
+          baseCenterY:    layer.gradient.centerY  ?? 0.5,
+          baseScale:      layer.gradient.scale    ?? 1,
           // Only update current values when NOT playing — playing uses RAF-computed values
-          currentAngle:   playing ? state.currentAngle   : (layer.gradient.angle    || 0),
-          currentCenterX: playing ? state.currentCenterX : (layer.gradient.centerX  || 0.5),
-          currentCenterY: playing ? state.currentCenterY : (layer.gradient.centerY  || 0.5),
-          currentScale:   playing ? state.currentScale   : (layer.gradient.scale    || 1),
+          currentAngle:   playing ? state.currentAngle   : (layer.gradient.angle    ?? 0),
+          currentCenterX: playing ? state.currentCenterX : (layer.gradient.centerX  ?? 0.5),
+          currentCenterY: playing ? state.currentCenterY : (layer.gradient.centerY  ?? 0.5),
+          currentScale:   playing ? state.currentScale   : (layer.gradient.scale    ?? 1),
         });
       }
     });
@@ -1083,9 +1084,8 @@ export const GradientCanvas = memo(function GradientCanvas({
       }
 
       (texture.userData as any).url = cacheKey;
-      // Keep CanvasTexture uploads on Three's registered sRGB path in the
-      // Figma WebGL1 runtime. Mask coverage is read from alpha, so this does
-      // not alter the mask while avoiding the r183 `primaries` GL fault.
+      // Mask coverage is alpha-only, so keep this texture linear and avoid an
+      // unnecessary RGB transfer while retaining the r183 WebGL1-safe path.
       applyTextureQualityPolicy(texture, {
         colorSpace: THREE.LinearSRGBColorSpace,
         wrapS: THREE.ClampToEdgeWrapping,
@@ -2133,7 +2133,7 @@ export const GradientCanvas = memo(function GradientCanvas({
           // getGradientColor() assumes positions[] is sorted ascending.
           const _swapSorted = sortColorStops(g.colors);
           _swapSorted.forEach((stop, i) => {
-            const c = new THREE.Color(stop.color);
+            const c = hexToShaderRgb(stop.color);
             if (newMat.uniforms.colors.value[i] instanceof THREE.Vector3) {
               newMat.uniforms.colors.value[i].set(c.r, c.g, c.b);
             } else {
@@ -2424,15 +2424,13 @@ export const GradientCanvas = memo(function GradientCanvas({
             // sequence, not position order) makes the shader map colors to completely
             // wrong gradient positions — visible as wrong palette colors on canvas.
             const sortedStops = sortColorStops(gradient.colors);
-            const _tmpColor = new THREE.Color();
-
             sortedStops.forEach((stop, i) => {
               const existing = material.uniforms.colors.value[i];
-              _tmpColor.set(stop.color);
+              const shaderColor = hexToShaderRgb(stop.color);
               if (existing instanceof THREE.Vector3) {
-                existing.set(_tmpColor.r, _tmpColor.g, _tmpColor.b);
+                existing.set(shaderColor.r, shaderColor.g, shaderColor.b);
               } else {
-                material.uniforms.colors.value[i] = new THREE.Vector3(_tmpColor.r, _tmpColor.g, _tmpColor.b);
+                material.uniforms.colors.value[i] = new THREE.Vector3(shaderColor.r, shaderColor.g, shaderColor.b);
               }
               if (material.uniforms.positions?.value[i] !== undefined) {
                 material.uniforms.positions.value[i] = stop.position;
@@ -2457,7 +2455,7 @@ export const GradientCanvas = memo(function GradientCanvas({
           }
 
           // â”€â”€ Gradient intensity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-          if (material.uniforms.intensity) material.uniforms.intensity.value = gradient.intensity || 1;
+          if (material.uniforms.intensity) material.uniforms.intensity.value = gradient.intensity ?? 1;
 
           // â”€â”€ Noise/fractal/structural properties â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
           if (material.uniforms.octaves)       material.uniforms.octaves.value       = gradient.octaves       || 4;
@@ -2465,15 +2463,15 @@ export const GradientCanvas = memo(function GradientCanvas({
           // Stripe Count slider writes to gradient.stripeCount — bridge them here.
           if (material.uniforms.frequency)     material.uniforms.frequency.value     =
             (gradient.type === 'wave'
-              ? (gradient.stripeCount || gradient.frequency || 5)
-              : (gradient.frequency || 2));
+              ? (gradient.stripeCount ?? gradient.frequency ?? 5)
+              : (gradient.frequency ?? 2));
           if (material.uniforms.segments)      material.uniforms.segments.value      = gradient.segments      || 6;
           if (material.uniforms.stripeCount)   material.uniforms.stripeCount.value   = gradient.stripeCount   || 5;
-          if (material.uniforms.waveAmplitude) material.uniforms.waveAmplitude.value = gradient.waveAmplitude || 0.2;
+          if (material.uniforms.waveAmplitude) material.uniforms.waveAmplitude.value = gradient.waveAmplitude ?? 0.2;
           if (material.uniforms.gridRows)      material.uniforms.gridRows.value      = gradient.gridRows      || 2;
           if (material.uniforms.gridCols)      material.uniforms.gridCols.value      = gradient.gridCols      || 2;
           if (material.uniforms.blobCount) {
-            const newCount = Math.min(gradient.blobCount || 3, 5);
+            const newCount = Math.min(gradient.blobCount ?? 3, 5);
             material.uniforms.blobCount.value = newCount;
             // Recompute deterministic blob positions/sizes for the new count so
             // added blobs appear at useful positions rather than the origin (0,0).
@@ -2512,10 +2510,10 @@ export const GradientCanvas = memo(function GradientCanvas({
       const useAnimatedValues = !!layer.animation?.enabled && (isPlayingRef.current || hasFrozenAnimationState);
       
       // Calculate base values and offsets separately
-      const baseAngle = gradient.angle || 0;
-      const baseScale = gradient.scale || 1;
-      const baseCenterX = gradient.centerX || 0.5;
-      const baseCenterY = gradient.centerY || 0.5;
+      const baseAngle = gradient.angle ?? 0;
+      const baseScale = gradient.scale ?? 1;
+      const baseCenterX = gradient.centerX ?? 0.5;
+      const baseCenterY = gradient.centerY ?? 0.5;
       
       // When animating, use current values; otherwise use base values
       const currentAngle = useAnimatedValues && layerState 
@@ -2558,12 +2556,12 @@ export const GradientCanvas = memo(function GradientCanvas({
       // Update gradient scale (radial, noise, etc.)
       // CRITICAL: Apply scaleBoost multiplier for all gradient types
       if (material.uniforms.scale) {
-        material.uniforms.scale.value = currentScale * (gradient.scaleBoost || 1);
+        material.uniforms.scale.value = currentScale * (gradient.scaleBoost ?? 1);
       }
 
       // Update gradient intensity
       if (material.uniforms.intensity) {
-        material.uniforms.intensity.value = gradient.intensity || 1;
+        material.uniforms.intensity.value = gradient.intensity ?? 1;
       }
 
       // Update complexity uniform — type-aware:
@@ -2589,10 +2587,10 @@ export const GradientCanvas = memo(function GradientCanvas({
         material.uniforms.uScale.value = currentScale;
       }
       if (material.uniforms.uTwist) {
-        material.uniforms.uTwist.value = gradient.twist || 0;
+        material.uniforms.uTwist.value = gradient.twist ?? 0;
       }
       if (material.uniforms.uTurbulence) {
-        material.uniforms.uTurbulence.value = gradient.turbulence || 0;
+        material.uniforms.uTurbulence.value = gradient.turbulence ?? 0;
       }
 
       // Preserve shader-driven animation uniforms while paused so the canvas holds
@@ -3466,7 +3464,7 @@ export const GradientCanvas = memo(function GradientCanvas({
           }
           if (material.uniforms.scale) {
             material.uniforms.scale.value =
-              newState.currentScale * (gradient.scaleBoost || 1) * audioDeltas.gradientScaleMul;
+              newState.currentScale * (gradient.scaleBoost ?? 1) * audioDeltas.gradientScaleMul;
           }
           if (material.uniforms.center) {
             material.uniforms.center.value.set(newState.currentCenterX, newState.currentCenterY);
@@ -4899,7 +4897,7 @@ export const GradientCanvas = memo(function GradientCanvas({
           material.uniforms.uScale.value = newState.currentScale * (exAudio ? exAudio.gradientScaleMul : 1);
         }
         if (material.uniforms.scale) {
-          material.uniforms.scale.value = newState.currentScale * (gradient.scaleBoost || 1) * (exAudio ? exAudio.gradientScaleMul : 1);
+          material.uniforms.scale.value = newState.currentScale * (gradient.scaleBoost ?? 1) * (exAudio ? exAudio.gradientScaleMul : 1);
         }
         if (material.uniforms.center) {
           material.uniforms.center.value.set(newState.currentCenterX, newState.currentCenterY);

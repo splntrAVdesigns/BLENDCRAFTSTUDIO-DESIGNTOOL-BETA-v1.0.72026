@@ -65,9 +65,15 @@ export interface MediabunnyEncodeOptions {
   keyFrameIntervalSeconds?: number;
   signal?: AbortSignal;
   onProgress?: (progress: number, message?: string) => void;
-  /** Called once the real encoder config Mediabunny negotiated is known —
-   *  useful for diagnostics (which hardware/software path actually ran). */
-  onEncoderConfig?: (info: { codec: string; hardwareAcceleration?: string }) => void;
+  /** Called once Mediabunny supplies the active encoder config. The browser's
+   *  hardwareAcceleration value remains a preference hint, not proof of the
+   *  underlying implementation; policy decisions use measured throughput. */
+  onEncoderConfig?: (info: {
+    codec: string;
+    hardwareAcceleration?: string;
+    latencyMode: 'quality' | 'realtime';
+    policy: 'iframe-software' | 'hardware-first' | 'software-fallback' | 'measured-software-fallback' | 'realtime-default';
+  }) => void;
 }
 
 export interface MediabunnyEncodeResult {
@@ -80,8 +86,88 @@ export interface MediabunnyEncodeResult {
    *  frames, ms. This is the real encode + backpressure cost — the honest
    *  replacement for the old "queueWaitMs" watermark-drain metric. */
   encodeMs: number;
-  /** Wall-clock time spent inside output.finalize(), ms. */
+  /** Wall-clock time spent closing/flushing the native VideoEncoder, ms. */
+  flushMs: number;
+  /** Wall-clock time spent finalizing the muxer/target after encoder flush, ms. */
   finalizeMs: number;
+}
+
+interface EncoderPolicy {
+  hardwareAcceleration: 'no-preference' | 'prefer-hardware' | 'prefer-software';
+  latencyMode: 'quality' | 'realtime';
+  policy: 'iframe-software' | 'hardware-first' | 'software-fallback' | 'measured-software-fallback' | 'realtime-default';
+}
+
+interface H264PerformanceHistory {
+  hardware?: { msPerFrame: number; sampledAt: number };
+  software?: { msPerFrame: number; sampledAt: number };
+}
+
+const H264_PERFORMANCE_PREFIX = 'blendcraft:h264-encoder-performance:v1';
+const H264_PERFORMANCE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function h264PerformanceKey(width: number, height: number, fps: number, bitrate: number): string {
+  return `${H264_PERFORMANCE_PREFIX}:${width}x${height}:${fps}:${bitrate}`;
+}
+
+function readH264Performance(
+  width: number,
+  height: number,
+  fps: number,
+  bitrate: number,
+): H264PerformanceHistory {
+  try {
+    const raw = localStorage.getItem(h264PerformanceKey(width, height, fps, bitrate));
+    return raw ? JSON.parse(raw) as H264PerformanceHistory : {};
+  } catch {
+    return {};
+  }
+}
+
+function recordH264Performance(
+  width: number,
+  height: number,
+  fps: number,
+  bitrate: number,
+  policy: EncoderPolicy['policy'],
+  msPerFrame: number,
+): void {
+  if (!Number.isFinite(msPerFrame) || msPerFrame <= 0 || policy === 'iframe-software') return;
+  try {
+    const history = readH264Performance(width, height, fps, bitrate);
+    const sample = { msPerFrame, sampledAt: Date.now() };
+    if (policy === 'hardware-first') history.hardware = sample;
+    if (policy === 'software-fallback' || policy === 'measured-software-fallback') history.software = sample;
+    localStorage.setItem(h264PerformanceKey(width, height, fps, bitrate), JSON.stringify(history));
+  } catch {
+    // Storage may be disabled; the explicit capability fallback still applies.
+  }
+}
+
+function shouldUseMeasuredSoftwareFallback(history: H264PerformanceHistory, fps: number): boolean {
+  const hardware = history.hardware;
+  if (!hardware || Date.now() - hardware.sampledAt > H264_PERFORMANCE_TTL_MS) return false;
+  const slowThresholdMs = Math.max(50, (1000 / fps) * 1.5);
+  if (hardware.msPerFrame <= slowThresholdMs) return false;
+
+  const software = history.software;
+  if (!software || Date.now() - software.sampledAt > H264_PERFORMANCE_TTL_MS) return true;
+  return software.msPerFrame < hardware.msPerFrame * 0.9;
+}
+
+/**
+ * Mediabunny's public close() starts an asynchronous native encoder flush but
+ * intentionally returns void. The pinned 1.51.0 source exposes the resulting
+ * promise to subclasses, allowing us to measure flush independently from mux
+ * finalization without changing its backpressure or sample contract.
+ */
+class MeasuredCanvasSource extends CanvasSource {
+  async closeAndWait(): Promise<void> {
+    super.close();
+    const closingPromise = (this as unknown as { _closingPromise: Promise<void> | null })._closingPromise;
+    if (!closingPromise) throw new Error('Mediabunny did not start the CanvasSource close operation.');
+    await closingPromise;
+  }
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -238,6 +324,60 @@ export async function canEncodeContainer(
   }
 }
 
+async function resolveEncoderPolicy(
+  container: MediabunnyContainer,
+  width: number,
+  height: number,
+  fps: number,
+  bitrate: number,
+): Promise<EncoderPolicy> {
+  if (isIframeEnvironment()) {
+    return {
+      hardwareAcceleration: 'prefer-software',
+      latencyMode: 'realtime',
+      policy: 'iframe-software',
+    };
+  }
+
+  if (container === 'mp4') {
+    const performanceHistory = readH264Performance(width, height, fps, bitrate);
+    if (shouldUseMeasuredSoftwareFallback(performanceHistory, fps)) {
+      return {
+        hardwareAcceleration: 'prefer-software',
+        latencyMode: 'realtime',
+        policy: 'measured-software-fallback',
+      };
+    }
+
+    const hardwareSupported = await canEncodeVideo('avc', {
+      width,
+      height,
+      bitrate,
+      hardwareAcceleration: 'prefer-hardware',
+    }).catch(() => false);
+
+    if (hardwareSupported) {
+      return {
+        hardwareAcceleration: 'prefer-hardware',
+        latencyMode: 'quality',
+        policy: 'hardware-first',
+      };
+    }
+
+    return {
+      hardwareAcceleration: 'prefer-software',
+      latencyMode: 'realtime',
+      policy: 'software-fallback',
+    };
+  }
+
+  return {
+    hardwareAcceleration: 'no-preference',
+    latencyMode: 'realtime',
+    policy: 'realtime-default',
+  };
+}
+
 /**
  * Core Mediabunny encode pass. Container-agnostic — MP4 and WebM take the
  * identical code path, differing only in which OutputFormat/codec gets
@@ -286,23 +426,12 @@ export async function encodeVideoWithMediabunny(
     // crashed the GPU process mid-encode in this environment, and Chromium
     // blocklists the encoder for the rest of the session afterward — every
     // later probe then fails too. Prefer software first inside iframes;
-    // standalone tabs keep no-preference first for speed. This is a real,
-    // previously-diagnosed bug — not a defensive guess.
-    const hardwareAcceleration = isIframeEnvironment() ? 'prefer-software' : 'no-preference';
+    // standalone tabs explicitly probe hardware H.264, then use realtime
+    // software only when that hardware configuration is unavailable.
+    const encoderPolicy = await resolveEncoderPolicy(container, width, height, fps, bitrate);
+    const { hardwareAcceleration, latencyMode } = encoderPolicy;
 
-    // 'quality' puts the encoder on its slowest, most exhaustive speed preset —
-    // a real cost worth paying for genuine hardware encode, where it's still
-    // fast, but punishing for software encode, where it can turn a 150-frame
-    // pass into minutes. VP9 (WebM) essentially never has a hardware encoder in
-    // Chrome regardless of the hint above, so it always gets 'realtime'. H.264
-    // gets 'realtime' too whenever software has been explicitly requested
-    // (the iframe case) — otherwise 'quality', since real hardware H.264 is
-    // common and the extra quality is cheap there.
-    const preferredSoftware = hardwareAcceleration === 'prefer-software';
-    const latencyMode: 'quality' | 'realtime' =
-      container === 'webm' || preferredSoftware ? 'realtime' : 'quality';
-
-    const videoSource = new CanvasSource(stagingCanvas, {
+    const videoSource = new MeasuredCanvasSource(stagingCanvas, {
       codec: mediaCodecFor(container),
       bitrate,
       hardwareAcceleration,
@@ -312,6 +441,8 @@ export async function encodeVideoWithMediabunny(
         onEncoderConfig?.({
           codec: (config as { codec?: string }).codec ?? mediaCodecFor(container),
           hardwareAcceleration: (config as { hardwareAcceleration?: string }).hardwareAcceleration,
+          latencyMode,
+          policy: encoderPolicy.policy,
         });
       },
     });
@@ -349,8 +480,25 @@ export async function encodeVideoWithMediabunny(
       },
     });
 
+    if (container === 'mp4') {
+      recordH264Performance(
+        width,
+        height,
+        fps,
+        bitrate,
+        encoderPolicy.policy,
+        encodeMs / Math.max(1, totalFrames),
+      );
+    }
+
     throwIfAborted(signal);
-    onProgress?.(92, `Finalizing ${container.toUpperCase()} container...`);
+    onProgress?.(91, 'Flushing video encoder...');
+    const flushStart = performance.now();
+    await videoSource.closeAndWait();
+    const flushMs = performance.now() - flushStart;
+
+    throwIfAborted(signal);
+    onProgress?.(94, `Finalizing ${container.toUpperCase()} container...`);
     const finalizeStart = performance.now();
     await output.finalize();
     const finalizeMs = performance.now() - finalizeStart;
@@ -367,6 +515,7 @@ export async function encodeVideoWithMediabunny(
       mimeType,
       renderMs,
       encodeMs,
+      flushMs,
       finalizeMs,
     };
   } finally {

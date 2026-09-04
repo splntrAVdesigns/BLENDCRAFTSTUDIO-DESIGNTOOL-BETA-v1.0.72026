@@ -9,6 +9,10 @@ export interface ExportTimingSample {
   muxSec: number;
   blobSec: number;
   downloadHandoffSec: number;
+  durationCheckSec?: number;
+  fidelityCheckSec?: number;
+  cleanupSec?: number;
+  encoderPolicy?: string;
   frames: number;
   msPerFrame: number;
   breakdown?: string;
@@ -88,9 +92,12 @@ export function evaluateExportProductionGate(input: ExportCertificationSample[])
     muxSec: acc.muxSec + timing.muxSec,
     blobSec: acc.blobSec + timing.blobSec,
     downloadHandoffSec: acc.downloadHandoffSec + timing.downloadHandoffSec,
+    durationCheckSec: (acc.durationCheckSec ?? 0) + (timing.durationCheckSec ?? 0),
+    fidelityCheckSec: (acc.fidelityCheckSec ?? 0) + (timing.fidelityCheckSec ?? 0),
+    cleanupSec: (acc.cleanupSec ?? 0) + (timing.cleanupSec ?? 0),
     frames: acc.frames + timing.frames,
     msPerFrame: acc.msPerFrame + timing.msPerFrame,
-  }), { totalSec: 0, renderSec: 0, encodeWaitSec: 0, flushSec: 0, muxSec: 0, blobSec: 0, downloadHandoffSec: 0, frames: 0, msPerFrame: 0 });
+  }), { totalSec: 0, renderSec: 0, encodeWaitSec: 0, flushSec: 0, muxSec: 0, blobSec: 0, downloadHandoffSec: 0, durationCheckSec: 0, fidelityCheckSec: 0, cleanupSec: 0, frames: 0, msPerFrame: 0 });
 
   const blockers: string[] = [];
   if (timings.length < 3) blockers.push('Run at least three successful exports for a meaningful production gate.');

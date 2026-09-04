@@ -31,7 +31,6 @@ import * as THREE from '../lib/three';
 import { vertexShader, SHARED_FUNCTIONS } from '../shaders/gradientShaders';
 import { SHARED_ANIMATION_HELPERS } from '../shaders/animationHelpers';
 import { wrapShaderWithMask } from '../shaders/maskShaderWrapper';
-import { withOutputColorSpace } from '../shaders/outputColorSpace';
 import type { MediaConfig } from './types';
 import { toneToShaderUnits } from './types';
 
@@ -405,7 +404,7 @@ export function createMediaMaterial({ media, canvasAspect }: CreateMediaMaterial
       ...createMaskUniformDefaults(),
     },
     vertexShader,
-    fragmentShader: withOutputColorSpace(wrapShaderWithMask(mediaFragmentShader)),
+    fragmentShader: wrapShaderWithMask(mediaFragmentShader),
     transparent: true,
   });
 

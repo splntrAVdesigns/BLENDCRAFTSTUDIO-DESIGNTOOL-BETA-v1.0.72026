@@ -32,81 +32,81 @@ export const GradientControls = memo(function GradientControls({ gradient, onCha
   const uiConfig = getGradientUIConfig(gradient.type);
 
   // PERFORMANCE FIX: Local state for sliders - commit on release only
-  const [localAngle, setLocalAngle] = useState(gradient.angle || 0);
-  const [localScale, setLocalScale] = useState(gradient.scale || 1);
-  const [localScaleBoost, setLocalScaleBoost] = useState(gradient.scaleBoost || 1);
-  const [localTwist, setLocalTwist] = useState(gradient.twist || 0);
-  const [localSegments, setLocalSegments] = useState(gradient.segments || 6);
-  const [localFrequency, setLocalFrequency] = useState(gradient.frequency || 2.0);
-  const [localCenterX, setLocalCenterX] = useState(gradient.centerX || 0.5);
-  const [localCenterY, setLocalCenterY] = useState(gradient.centerY || 0.5);
-  const [localStripeCount, setLocalStripeCount] = useState(gradient.stripeCount || 5);
-  const [localWaveAmplitude, setLocalWaveAmplitude] = useState(gradient.waveAmplitude || 0.2);
-  const [localBlobCount, setLocalBlobCount] = useState(gradient.blobCount || 3);
-  const [localOctaves, setLocalOctaves] = useState(gradient.octaves || 4);
-  const [localGridRows, setLocalGridRows] = useState(gradient.gridRows || 2);
-  const [localGridCols, setLocalGridCols] = useState(gradient.gridCols || 2);
-  const [localIntensity, setLocalIntensity] = useState(gradient.intensity || 1);
+  const [localAngle, setLocalAngle] = useState(gradient.angle ?? 0);
+  const [localScale, setLocalScale] = useState(gradient.scale ?? 1);
+  const [localScaleBoost, setLocalScaleBoost] = useState(gradient.scaleBoost ?? 1);
+  const [localTwist, setLocalTwist] = useState(gradient.twist ?? 0);
+  const [localSegments, setLocalSegments] = useState(gradient.segments ?? 6);
+  const [localFrequency, setLocalFrequency] = useState(gradient.frequency ?? 2.0);
+  const [localCenterX, setLocalCenterX] = useState(gradient.centerX ?? 0.5);
+  const [localCenterY, setLocalCenterY] = useState(gradient.centerY ?? 0.5);
+  const [localStripeCount, setLocalStripeCount] = useState(gradient.stripeCount ?? 5);
+  const [localWaveAmplitude, setLocalWaveAmplitude] = useState(gradient.waveAmplitude ?? 0.2);
+  const [localBlobCount, setLocalBlobCount] = useState(gradient.blobCount ?? 3);
+  const [localOctaves, setLocalOctaves] = useState(gradient.octaves ?? 4);
+  const [localGridRows, setLocalGridRows] = useState(gradient.gridRows ?? 2);
+  const [localGridCols, setLocalGridCols] = useState(gradient.gridCols ?? 2);
+  const [localIntensity, setLocalIntensity] = useState(gradient.intensity ?? 1);
 
   // Sync local state when gradient props change (e.g., preset loaded)
   useEffect(() => {
-    setLocalAngle(gradient.angle || 0);
+    setLocalAngle(gradient.angle ?? 0);
   }, [gradient.angle]);
 
   useEffect(() => {
-    setLocalScale(gradient.scale || 1);
+    setLocalScale(gradient.scale ?? 1);
   }, [gradient.scale]);
 
   useEffect(() => {
-    setLocalScaleBoost(gradient.scaleBoost || 1);
+    setLocalScaleBoost(gradient.scaleBoost ?? 1);
   }, [gradient.scaleBoost]);
 
   useEffect(() => {
-    setLocalTwist(gradient.twist || 0);
+    setLocalTwist(gradient.twist ?? 0);
   }, [gradient.twist]);
 
   useEffect(() => {
-    setLocalSegments(gradient.segments || 6);
+    setLocalSegments(gradient.segments ?? 6);
   }, [gradient.segments]);
 
   useEffect(() => {
-    setLocalFrequency(gradient.frequency || 2.0);
+    setLocalFrequency(gradient.frequency ?? 2.0);
   }, [gradient.frequency]);
 
   useEffect(() => {
-    setLocalCenterX(gradient.centerX || 0.5);
+    setLocalCenterX(gradient.centerX ?? 0.5);
   }, [gradient.centerX]);
 
   useEffect(() => {
-    setLocalCenterY(gradient.centerY || 0.5);
+    setLocalCenterY(gradient.centerY ?? 0.5);
   }, [gradient.centerY]);
 
   useEffect(() => {
-    setLocalStripeCount(gradient.stripeCount || 5);
+    setLocalStripeCount(gradient.stripeCount ?? 5);
   }, [gradient.stripeCount]);
 
   useEffect(() => {
-    setLocalWaveAmplitude(gradient.waveAmplitude || 0.2);
+    setLocalWaveAmplitude(gradient.waveAmplitude ?? 0.2);
   }, [gradient.waveAmplitude]);
 
   useEffect(() => {
-    setLocalBlobCount(gradient.blobCount || 3);
+    setLocalBlobCount(gradient.blobCount ?? 3);
   }, [gradient.blobCount]);
 
   useEffect(() => {
-    setLocalOctaves(gradient.octaves || 4);
+    setLocalOctaves(gradient.octaves ?? 4);
   }, [gradient.octaves]);
 
   useEffect(() => {
-    setLocalGridRows(gradient.gridRows || 2);
+    setLocalGridRows(gradient.gridRows ?? 2);
   }, [gradient.gridRows]);
 
   useEffect(() => {
-    setLocalGridCols(gradient.gridCols || 2);
+    setLocalGridCols(gradient.gridCols ?? 2);
   }, [gradient.gridCols]);
 
   useEffect(() => {
-    setLocalIntensity(gradient.intensity || 1);
+    setLocalIntensity(gradient.intensity ?? 1);
   }, [gradient.intensity]);
 
   // Save accordion state to localStorage

@@ -196,6 +196,25 @@ export function hexToRgb(hex: string): { r: number; g: number; b: number } {
     : { r: 0, g: 0, b: 0 };
 }
 
+/**
+ * Convert an sRGB UI color into the linear RGB representation historically
+ * used by BLENDCRAFT's live gradient uniforms. Keep every color-stop write on
+ * this one path so material creation, palette updates, and shader swaps cannot
+ * disagree about the same hexadecimal color.
+ */
+export function hexToShaderRgb(hex: string): { r: number; g: number; b: number } {
+  const srgb = hexToRgb(hex);
+  const toLinear = (channel: number) => channel <= 0.04045
+    ? channel / 12.92
+    : Math.pow((channel + 0.055) / 1.055, 2.4);
+
+  return {
+    r: toLinear(srgb.r),
+    g: toLinear(srgb.g),
+    b: toLinear(srgb.b),
+  };
+}
+
 // Convert RGB to hex
 export function rgbToHex(r: number, g: number, b: number): string {
   const toHex = (n: number) => {
