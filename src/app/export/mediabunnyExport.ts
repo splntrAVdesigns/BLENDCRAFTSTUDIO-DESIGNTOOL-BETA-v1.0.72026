@@ -311,6 +311,23 @@ export async function encodeVideoWithMediabunny(
   // encoder work begins, stopped unconditionally in the finally block below
   // (success, thrown error, or abort all need it torn down).
   const stopKeepAlive = startCompositorKeepAlive();
+  const encoderProgress = {
+    phase: 'encoding', submittedFrames: 0, outputPackets: 0,
+    lastPacketTimestamp: null as number | null,
+    finalizationElapsedSec: 0, secondsSinceLastPacket: 0,
+    packets: [] as Array<{ timestamp: number; duration: number }>,
+  };
+  let lastPacketAt = performance.now();
+  let finalizationTimer: ReturnType<typeof setInterval> | undefined;
+  // Public encoded-output evidence, kept separate from frame-submission records.
+  (globalThis as typeof globalThis & { __blendcraftEncoderProgress?: typeof encoderProgress })
+    .__blendcraftEncoderProgress = encoderProgress;
+  const onEncodedPacket = (packet: { timestamp: number; duration: number }) => {
+    encoderProgress.outputPackets++;
+    encoderProgress.lastPacketTimestamp = packet.timestamp;
+    encoderProgress.packets.push({ timestamp: packet.timestamp, duration: packet.duration });
+    lastPacketAt = performance.now();
+  };
   const wakeLock = await acquireExportWakeLock();
 
   try {
@@ -338,11 +355,13 @@ export async function encodeVideoWithMediabunny(
       ? new CanvasSource(stagingCanvas, {
           codec: 'avc',
           bitrate,
+          onEncodedPacket,
           onEncoderConfig: (config) => reportEncoderConfig('browser-default', config),
         })
       : new CanvasSource(stagingCanvas, {
           codec: 'vp9',
           bitrate,
+          onEncodedPacket,
           keyFrameInterval: options.keyFrameIntervalSeconds ?? 2,
           latencyMode: 'realtime',
           onEncoderConfig: (config) => reportEncoderConfig('webm-realtime', config),
@@ -374,13 +393,15 @@ export async function encodeVideoWithMediabunny(
         // is the encoder/writer backpressure barrier for every frame.
         await videoSource.add(t, frameDurationSeconds);
 
+        encoderProgress.submittedFrames = i + 1;
         timelineFrames.push({
           frameIndex: i,
           requestedTimestamp: t,
-          renderedDeterministicTime: rendered?.renderedDeterministicTime ?? t,
+          renderedDeterministicTime: rendered?.renderedDeterministicTime ?? Number.NaN,
           encodedTimestamp: t,
           encodedDuration: frameDurationSeconds,
           layers: rendered?.layers ?? [],
+          motion: rendered?.motion ?? [],
         });
 
         encodeMs += performance.now() - encodeStart;
@@ -398,8 +419,22 @@ export async function encodeVideoWithMediabunny(
     // Mediabunny promises.
     onProgress?.(91, `Draining encoder and finalizing ${container.toUpperCase()}...`);
     const finalizeStart = performance.now();
+    encoderProgress.phase = 'finalizing';
+    const reportFinalization = () => {
+      const now = performance.now();
+      encoderProgress.finalizationElapsedSec = (now - finalizeStart) / 1000;
+      encoderProgress.secondsSinceLastPacket = (now - lastPacketAt) / 1000;
+      onProgress?.(91,
+        `Finalizing ${container.toUpperCase()} · ${Math.floor(encoderProgress.finalizationElapsedSec)}s elapsed`);
+    };
+    finalizationTimer = setInterval(reportFinalization, 1000);
     await output.finalize();
     const finalizeMs = performance.now() - finalizeStart;
+    clearInterval(finalizationTimer);
+    finalizationTimer = undefined;
+    encoderProgress.finalizationElapsedSec = finalizeMs / 1000;
+    encoderProgress.phase = 'completed';
+    console.info('[BLENDCRAFT encoder output]', encoderProgress);
 
     const timelineCertification = certifyExportTimeline(timelineFrames, fps, totalFrames);
     if (!timelineCertification.passed) {
@@ -422,6 +457,8 @@ export async function encodeVideoWithMediabunny(
       timelineCertification,
     };
   } finally {
+    if (finalizationTimer !== undefined) clearInterval(finalizationTimer);
+    if (encoderProgress.phase !== 'completed') encoderProgress.phase = signal?.aborted ? 'cancelled' : 'failed';
     stopKeepAlive();
     wakeLock.release();
   }

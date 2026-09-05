@@ -13,9 +13,24 @@ export interface RenderedTimelineLayerState {
   renderedPhase: number;
 }
 
+export interface RenderedMotionState {
+  layerId: string;
+  maskRotation: number | null;
+  maskScale: number | null;
+  maskOpacity: number | null;
+  maskOffset: [number, number] | null;
+  textureTime: number | null;
+  mediaTime: number | null;
+  configuredLayerSpeed: number | null;
+  configuredMaskSpeed: number | null;
+  configuredTextureSpeed: number | null;
+  configuredMediaSpeed: number | null;
+}
+
 export interface RenderedTimelineFrameState {
   renderedDeterministicTime: number;
   layers: RenderedTimelineLayerState[];
+  motion?: RenderedMotionState[];
 }
 
 export interface ExportTimelineFrameCertification {
@@ -25,6 +40,7 @@ export interface ExportTimelineFrameCertification {
   encodedTimestamp: number;
   encodedDuration: number;
   layers: RenderedTimelineLayerState[];
+  motion?: RenderedMotionState[];
 }
 
 export interface ExportTimelineCertificationResult {
@@ -60,6 +76,22 @@ export function certifyExportTimeline(
 
   frames.forEach((frame, index) => {
     const expectedTimestamp = index / safeFps;
+    if (![frame.requestedTimestamp, frame.renderedDeterministicTime,
+      frame.encodedTimestamp, frame.encodedDuration].every(Number.isFinite)) {
+      failures.push(`Frame ${index} is missing finite render/submission timing.`);
+    }
+    frame.layers.forEach(layer => {
+      if (![layer.capturedPhase, layer.effectiveSpeed, layer.renderedPhase].every(Number.isFinite)) {
+        failures.push(`Frame ${index}, layer ${layer.layerId}: invalid animation state.`);
+      }
+    });
+    frame.motion?.forEach(motion => {
+      const values = [motion.maskRotation, motion.maskScale, motion.maskOpacity,
+        motion.textureTime, motion.mediaTime, ...(motion.maskOffset ?? [])];
+      if (values.some(value => value !== null && !Number.isFinite(value))) {
+        failures.push(`Frame ${index}, layer ${motion.layerId}: invalid mask/texture/media state.`);
+      }
+    });
     const timestampError = Math.max(
       Math.abs(frame.requestedTimestamp - expectedTimestamp),
       Math.abs(frame.renderedDeterministicTime - expectedTimestamp),

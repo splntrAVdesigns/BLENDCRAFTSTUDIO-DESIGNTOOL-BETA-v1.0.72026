@@ -23,7 +23,8 @@ import { InteractiveControls } from '../controls/InteractiveControls';
 import { sortColorStops } from '../../utils/colorStopValidation';
 import { hexToShaderRgb } from '../../utils/colors';
 import { getPatternCanvas, createPatternThreeTexture } from '../../utils/texturePatternCache';
-import { mapTextureAnimationSpeed, mapLayerAnimationSpeed, mapMaskAnimationSpeed, smoothLayerAnimationSpeed, advanceExportLayerTimeline, encodeTextureType, encodePatternFlipMode, encodePatternOpacityCurveMode } from './gradientMath';
+import { mapTextureAnimationSpeed, mapLayerAnimationSpeed, advanceExportLayerTimeline, encodeTextureType, encodePatternFlipMode, encodePatternOpacityCurveMode } from './gradientMath';
+import { applyMaskAnimation } from './maskAnimation';
 import { applyRendererSize, getDrawingBufferSize, resizeRenderTargets } from './canvasSizing';
 import { disposeMesh, disposeTextureMap, disposeGeometryMap, disposeRenderTargetRef } from './textureDisposal';
 import { markRenderNeededNextFrame, cancelFrame } from './renderInvalidation';
@@ -3155,6 +3156,12 @@ export const GradientCanvas = memo(function GradientCanvas({
       }
 
       const now = performance.now();
+      // Export owns all animation clocks. Hidden preview time is intentionally paused.
+      if (isExportingRef.current || document.hidden) {
+        lastFrameTimeRef.current = now;
+        animationFrameRef.current = requestAnimationFrame(animate);
+        return;
+      }
 
       // STAGE 3.0.1: pull one audio analysis frame from THIS loop rather than
       // letting the engine run its own RAF. Two independent RAF loops in one
@@ -3185,40 +3192,9 @@ export const GradientCanvas = memo(function GradientCanvas({
       // Note: previewLastFrameTimeRef is used as a wall-clock anchor for the master
       // animation clock start.  We update it here at the top of every real tick.
 
-      // â”€â”€ Frame delta with EMA smoothing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-      // rawDelta: actual wall-clock frame time (ms â†’ s)
-      // EMA: exponential moving average damps vsync jitter (16.6 â†” 17.3ms)
-      //      without adding perceptible latency. alpha=0.25 â†’ ~3-frame window.
-      // Spike cap at 100ms prevents tab-switch/GPU-stall from jumping the clock.
-      // ── STAGE 2.8.3: THE PREVIEW CLOCK WAS FRAME-RATE DEPENDENT ──
-      //
-      // ROOT CAUSE of "the exported animation runs faster than the canvas".
-      // This capped per-frame delta at 1/24s. In the Figma Make iframe RAF is
-      // ~24fps, so on a light scene the cap is a no-op and everything looks
-      // right. But on a HEAVY scene — 1080p video layer + effects + animation,
-      // i.e. exactly the sessions being exported — the real frame time exceeds
-      // 41.67ms and the cap silently throttles the clock:
-      //
-      //   actual 12fps → clock advances 12 × (1/24) = 0.5× real time
-      //   actual  8fps → clock advances  8 × (1/24) = 0.33× real time
-      //
-      // So the user tunes animation speed against a preview running in SLOW
-      // MOTION, while export advances at true real time (exportSignedTime =
-      // capturedPhase + time × speed). The export was never "too fast" — the
-      // PREVIEW was too slow, and by a factor that changed with scene load.
-      // That's why it showed up on two unrelated animation types (LFO Pulse,
-      // Vortex): it was never per-animation, it was the clock.
-      //
-      // The cap now only guards PATHOLOGICAL stalls (tab switch, GPU hitch) at
-      // 100ms — the standard spike-guard the original comment already
-      // described. Real-time correctness is restored, so what you tune is what
-      // you export.
-      //
-      // TRADE-OFF, stated plainly: on a heavy scene the preview is now choppier
-      // instead of slow-motion-smooth. That is the honest signal — choppiness
-      // says "this scene is expensive", where slow motion silently lied about
-      // the speed you were setting.
-      const rawDelta = Math.min(0.1, Math.max(0, (now - lastFrameTimeRef.current) / 1000));
+      // Foreground elapsed time is not truncated: slow rendering must not
+      // silently slow animation, masks, or textures relative to export.
+      const rawDelta = Math.max(0, (now - lastFrameTimeRef.current) / 1000);
       lastFrameTimeRef.current = now;
 
       // STAGE 3.0.3: advance signal conditioning + every mapping's
@@ -3270,7 +3246,7 @@ export const GradientCanvas = memo(function GradientCanvas({
       // Gating on isPlaying means Play button controls texture animation movement
       // — consistent with gradient animation behavior.
       if (shouldAnimateTextures && isPlayingRef.current) {
-        textureOnlyTimeRef.current += clockDelta > 0 ? clockDelta : (1 / 24);
+        textureOnlyTimeRef.current += clockDelta;
         if (textureOnlyTimeRef.current > 3600) textureOnlyTimeRef.current -= 3600;
       }
 
@@ -3393,22 +3369,17 @@ export const GradientCanvas = memo(function GradientCanvas({
           // One shared, time-based smoother drives preview and deterministic
           // export. At 60 fps this is identical to the established 0.15 EMA;
           // at other frame rates it retains the same real-time response.
-          const newSmoothedSpeed = smoothLayerAnimationSpeed(
-            prevSmoothed,
+          const continued = advanceExportLayerTimeline({
+            previous: { phase: layerState.signedPhase ?? 0, smoothedSpeed: prevSmoothed },
+            capturedPhase: layerState.signedPhase ?? 0,
+            capturedSpeed: prevSmoothed,
             targetSpeed,
-            clockDelta,
-          );
+            deltaSeconds: clockDelta,
+            speedMultiplier: audioDeltas.speedMul,
+          });
+          const newSmoothedSpeed = continued.smoothedSpeed;
+          const newSignedPhase = continued.phase;
           layerState.smoothedSpeed = newSmoothedSpeed;
-
-          // Accumulate signed phase using smoothed speed (wraps at ±300s for float safety).
-          // audioDeltas.speedMul is 1 at rest and surges above 1 on a Speed mapping
-          // hit — the animation visibly lurches faster for the beat-decay duration then
-          // returns to normal. Multiplicative so the user's speed slider is preserved
-          // (a 0.5× speed still gets boosted proportionally, not overridden).
-          const prevPhase = layerState.signedPhase ?? 0;
-          let newSignedPhase = prevPhase + clockDelta * newSmoothedSpeed * audioDeltas.speedMul;
-          if (newSignedPhase > 300) newSignedPhase -= 300;
-          if (newSignedPhase < -300) newSignedPhase += 300;
           layerState.signedPhase = newSignedPhase;
 
           // Drive animation from signedPhase (already encodes smooth speed).
@@ -3563,146 +3534,7 @@ export const GradientCanvas = memo(function GradientCanvas({
           const material = mesh.material as THREE.ShaderMaterial;
           if (!material.uniforms) return;
 
-          if (!mask?.animation?.enabled) {
-            // Animation disabled: restore ALL mask uniforms to their base/slider values.
-            // This ensures disabling animation (or resetting) snaps the mask back cleanly.
-            const baseOpacity = mask?.opacity || 1.0;
-            const baseScale   = Math.min(3.0, Math.max(0.1, mask?.maskScale || 1.0));
-            const baseRot     = ((mask?.rotation || 0) * Math.PI) / 180.0;
-            if (material.uniforms.uMaskOpacity)            material.uniforms.uMaskOpacity.value = baseOpacity;
-            if (material.uniforms.uMaskScale)              material.uniforms.uMaskScale.value   = baseScale;
-            if (material.uniforms.uMaskRotation)           material.uniforms.uMaskRotation.value = baseRot;
-            if (material.uniforms.uMaskOffset?.value?.set) material.uniforms.uMaskOffset.value.set(mask?.positionX || 0, mask?.positionY || 0);
-            return;
-          }
-
-          // Reset ALL mask uniforms to base values each frame BEFORE applying animation.
-          // Without this, switching types (e.g. fadeâ†’rotate) leaves uMaskOpacity at the last
-          // fade value, and the new animation type doesn't write to it â†’ stuck/broken state.
-          {
-            const mat = material;
-            const baseOpacity = mask.opacity || 1.0;
-            const baseScale   = Math.min(3.0, Math.max(0.1, mask.maskScale || 1.0));
-            const baseRot     = ((mask.rotation || 0) * Math.PI) / 180.0;
-            const baseX       = mask.positionX || 0;
-            const baseY       = mask.positionY || 0;
-            if (mat.uniforms.uMaskOpacity)             mat.uniforms.uMaskOpacity.value = baseOpacity;
-            if (mat.uniforms.uMaskScale)               mat.uniforms.uMaskScale.value   = baseScale;
-            if (mat.uniforms.uMaskRotation)            mat.uniforms.uMaskRotation.value = baseRot;
-            if (mat.uniforms.uMaskOffset?.value?.set)  mat.uniforms.uMaskOffset.value.set(baseX, baseY);
-          }
-
-          const maskTypeMap: Record<string, string> = {
-            'rotate': 'rotation',
-            'scale':  'scale',
-            'pulse':  'pulse',
-            'drift':  'drift',
-            'swing':  'morph',
-            'fade':   'pulse',
-            'bounce': 'pulse',
-            'spin':   'rotation',
-            'wobble': 'ripple',
-            'zoom':   'scale',
-            'breathe': 'pulse',
-            'scanReveal': 'drift',
-            'radialExpand': 'scale',
-            'sliceWipe': 'drift',
-            'glitchMask': 'glitch',
-            'orbitDrift': 'drift',
-          };
-          const mappedMaskType = (maskTypeMap[mask.animation.type] || mask.animation.type) as import('../../types/gradient').AnimationType;
-
-          // v2.2.6: shared speed curve for live/export mask motion.
-          const normalizedMaskSpeed = mapMaskAnimationSpeed(mask.animation.speed);
-
-          // Normalize intensity (0-100 slider) â†’ 0-1.
-          // Without this, intensity=5 causes pulse to produce negative opacity â†’ black canvas.
-          const normalizedMaskIntensity = (mask.animation.intensity ?? 50) / 100;
-
-          const offset = calculateAnimationOffset(
-            mappedMaskType, animationTime,
-            normalizedMaskSpeed, normalizedMaskIntensity,
-            (mask.animation.easing || 'linear') as import('../../types/gradient').EasingType,
-            mask.animation.direction || 'forward',
-            mask.animation.loop !== false
-          );
-
-          // Apply animation to mask uniforms
-          if ((mask.animation.type === 'rotate' || mask.animation.type === 'spin') && material.uniforms.uMaskRotation) {
-            const baseRotation = ((mask.rotation || 0) * Math.PI) / 180.0;
-            // offset.angleOffset is in degrees — convert to radians (matches gradient rotation logic).
-            // The original code omitted this conversion, making the mask spin ~5 rev/s (looked frozen).
-            material.uniforms.uMaskRotation.value = baseRotation + (offset.angleOffset * Math.PI / 180.0);
-          } else if (mask.animation.type === 'breathe') {
-            const t = offset.signedTime * Math.PI * 2;
-            const breath = (1 + Math.sin(t)) * 0.5;
-            const baseScale = Math.min(3.0, Math.max(0.1, mask.maskScale || 1.0));
-            if (material.uniforms.uMaskScale) material.uniforms.uMaskScale.value = Math.max(0.05, baseScale * (1 + (breath - 0.5) * 0.34 * normalizedMaskIntensity));
-            if (material.uniforms.uMaskOpacity) material.uniforms.uMaskOpacity.value = Math.max(0.04, (mask.opacity || 1.0) * (0.9 + breath * 0.18 * normalizedMaskIntensity));
-          } else if (mask.animation.type === 'radialExpand') {
-            const p = offset.phase01;
-            const expand = Math.pow(p, 0.72);
-            const baseScale = Math.min(3.0, Math.max(0.1, mask.maskScale || 1.0));
-            if (material.uniforms.uMaskScale) material.uniforms.uMaskScale.value = Math.max(0.05, baseScale * (0.32 + expand * (0.68 + 0.42 * normalizedMaskIntensity)));
-            if (material.uniforms.uMaskOpacity) material.uniforms.uMaskOpacity.value = Math.max(0.04, (mask.opacity || 1.0) * (0.35 + expand * 0.65));
-          } else if (mask.animation.type === 'scanReveal' && material.uniforms.uMaskOffset?.value?.set) {
-            const baseX = mask.positionX || 0;
-            const baseY = mask.positionY || 0;
-            const sweep = (offset.phase01 - 0.5) * 1.35 * normalizedMaskIntensity;
-            material.uniforms.uMaskOffset.value.set(baseX + sweep, baseY);
-            if (material.uniforms.uMaskOpacity) material.uniforms.uMaskOpacity.value = Math.max(0.08, (mask.opacity || 1.0) * (0.65 + 0.35 * Math.sin(offset.phase01 * Math.PI)));
-          } else if (mask.animation.type === 'sliceWipe' && material.uniforms.uMaskOffset?.value?.set) {
-            const baseX = mask.positionX || 0;
-            const baseY = mask.positionY || 0;
-            const dir = mask.animation.direction === 'reverse' ? -1 : 1;
-            const sweep = (offset.phase01 - 0.5) * 1.7 * normalizedMaskIntensity * dir;
-            material.uniforms.uMaskOffset.value.set(baseX + sweep, baseY + Math.sin(offset.phase01 * Math.PI * 2) * 0.015 * normalizedMaskIntensity);
-          } else if (mask.animation.type === 'glitchMask') {
-            const t = offset.signedTime;
-            const step = Math.floor(t * 18);
-            const jx = Math.sin(step * 12.9898) * 43758.5453;
-            const jy = Math.sin(step * 78.233) * 24634.6345;
-            const rx = (jx - Math.floor(jx) - 0.5) * 0.12 * normalizedMaskIntensity;
-            const ry = (jy - Math.floor(jy) - 0.5) * 0.08 * normalizedMaskIntensity;
-            if (material.uniforms.uMaskOffset?.value?.set) material.uniforms.uMaskOffset.value.set((mask.positionX || 0) + rx, (mask.positionY || 0) + ry);
-            if (material.uniforms.uMaskRotation) material.uniforms.uMaskRotation.value = ((mask.rotation || 0) * Math.PI) / 180.0 + rx * 0.65;
-          } else if (mask.animation.type === 'orbitDrift') {
-            const t = offset.signedTime * Math.PI * 2;
-            if (material.uniforms.uMaskOffset?.value?.set) material.uniforms.uMaskOffset.value.set(
-              (mask.positionX || 0) + Math.cos(t) * 0.09 * normalizedMaskIntensity,
-              (mask.positionY || 0) + Math.sin(t) * 0.09 * normalizedMaskIntensity
-            );
-            if (material.uniforms.uMaskRotation) material.uniforms.uMaskRotation.value = ((mask.rotation || 0) * Math.PI) / 180.0 + Math.sin(t * 0.5) * 0.55 * normalizedMaskIntensity;
-          } else if ((mask.animation.type === 'scale' || mask.animation.type === 'zoom') && material.uniforms.uMaskScale) {
-            const baseScale = Math.min(3.0, Math.max(0.1, mask.maskScale || 1.0));
-            material.uniforms.uMaskScale.value = Math.max(0.05, baseScale * (1 + offset.scaleOffset));
-          } else if (mask.animation.type === 'pulse' && material.uniforms.uMaskOpacity) {
-            material.uniforms.uMaskOpacity.value = (mask.opacity || 1.0) * offset.intensityMultiplier;
-          } else if ((mask.animation.type === 'drift' || mask.animation.type === 'swing' || mask.animation.type === 'wobble') && material.uniforms.uMaskOffset?.value?.set) {
-            const baseX = mask.positionX || 0;
-            const baseY = mask.positionY || 0;
-            material.uniforms.uMaskOffset.value.set(
-              baseX + offset.xOffset,
-              baseY + offset.yOffset
-            );
-          } else if (mask.animation.type === 'bounce' && material.uniforms.uMaskOffset?.value?.set) {
-            // Bounce: vertical sinusoidal offset using intensityMultiplier as bounce amplitude
-            const baseX = mask.positionX || 0;
-            const baseY = mask.positionY || 0;
-            const bounceY = Math.sin(offset.signedTime * Math.PI * 2) * normalizedMaskIntensity * 0.15;
-            material.uniforms.uMaskOffset.value.set(baseX, baseY + bounceY);
-          } else if (mask.animation.type === 'spin' && material.uniforms.uMaskRotation) {
-            const base = ((mask.rotation || 0) * Math.PI) / 180.0;
-            material.uniforms.uMaskRotation.value = base + (offset.angleOffset * Math.PI / 180.0);
-          } else if (mask.animation.type === 'fade' && material.uniforms.uMaskOpacity) {
-            // Fade: smooth opacity oscillation.
-            // Clamp minimum to 0.02 â€” the mask shader skips the clip block when opacity < 0.01,
-            // which exposes the full unmasked canvas. At 0.02 the shape is ~98% transparent
-            // (alpha * 0.02 â‰ˆ invisible) while keeping the clip active.
-            const fadeVal = (1 + Math.sin(offset.signedTime * Math.PI * 2)) / 2; // 0-1
-            const baseOpacity = mask.opacity || 1.0;
-            material.uniforms.uMaskOpacity.value = Math.max(0.02, fadeVal * baseOpacity);
-          }
+          applyMaskAnimation(material, mask, animationTime);
         });
       }
 
@@ -3725,9 +3557,6 @@ export const GradientCanvas = memo(function GradientCanvas({
         //    would compute a dtMaster equal to the entire idle period and snap
         //    the texture forward by potentially minutes of accumulated time.
         //
-        // 2. STALL CAP â€” clamp dtMaster to 100 ms.  If a heavy frame stalls
-        //    (e.g. mask texture finishing async load mid-playback), the texture
-        //    pattern won't jump forward visibly on the next tick.
         //
         // 3. SKIP UNIFORM WRITE when not animating â€” avoids unnecessary
         //    CPUâ†’GPU traffic each RAF tick for layers with static textures.
@@ -3744,16 +3573,13 @@ export const GradientCanvas = memo(function GradientCanvas({
           accumulated: material.uniforms.textureTime.value || 0,
         };
 
-        // P2 FIX: cap at 100 ms to absorb stall-frame time spikes
-        const dtMaster = Math.min(0.1, Math.max(0, textureMasterTimeRef.current - existing.lastMasterTime));
+        // Account for the full foreground interval, including skipped render ticks.
+        const dtMaster = Math.max(0, textureMasterTimeRef.current - existing.lastMasterTime);
         existing.lastMasterTime = textureMasterTimeRef.current; // always sync, even when idle
 
         if (isActiveAnimation) {
           const animationSpeed = mapTextureAnimationSpeed(texture?.animationSpeed);
           existing.accumulated += dtMaster * animationSpeed;
-          // Wrap texture accumulated time for float precision (same as master clock).
-          // Since shaders use sin/cos(textureTime), the wrap is seamless.
-          if (existing.accumulated > 3600) existing.accumulated -= 3600;
           textureTransportRef.current.set(layer.id, existing);
           material.uniforms.textureTime.value = existing.accumulated;
         } else {
@@ -4771,7 +4597,7 @@ export const GradientCanvas = memo(function GradientCanvas({
     const configuredFrameDuration = exportTimelineRef.current?.frameDurationSeconds ?? (1 / 30);
     const exportDt = lastExportTimeRef.current < 0
       ? configuredFrameDuration
-      : Math.max(1 / 240, Math.min(0.1, deterministicTime - lastExportTimeRef.current));
+      : Math.max(0, deterministicTime - lastExportTimeRef.current);
     lastExportTimeRef.current = deterministicTime;
     const exportAudioActive = tickAudioExportFrame(exportMasterTime, exportDt);
     const exportGlobal = getGlobalAudioDeltas();
@@ -4844,11 +4670,11 @@ export const GradientCanvas = memo(function GradientCanvas({
         const accum = exportPhaseAccumRef.current;
         const previous = accum.get(layer.id);
         const continued = advanceExportLayerTimeline({
-          previous,
+          previous: exAudio ? previous : { phase: capturedPhase, smoothedSpeed: capturedSpeed },
           capturedPhase,
           capturedSpeed,
           targetSpeed: capturedTargetSpeed,
-          deltaSeconds: exportDt,
+          deltaSeconds: exAudio ? exportDt : deterministicTime,
           speedMultiplier: exSpeedMul,
         });
         const effectiveSpeed = continued.smoothedSpeed;
@@ -5039,101 +4865,9 @@ export const GradientCanvas = memo(function GradientCanvas({
     // Mirrors the mask animation block in the live animate() loop exactly.
     const exportMaskTime = exportMasterTime;
     exportCache.entries.forEach(({ mesh, layer, uniforms }) => {
-      const mask = layer?.mask;
-      if (!mask?.animation?.enabled) return;
       const mat = mesh.material as THREE.ShaderMaterial;
-      mat.uniforms = uniforms as any;
-      if (!mat.uniforms) return;
-
-      const maskTypeMap: Record<string, string> = {
-        'rotate': 'rotation',
-        'scale':  'scale',
-        'pulse':  'pulse',
-        'drift':  'drift',
-        'swing':  'morph',
-        'fade':   'pulse',
-        'bounce': 'pulse',
-        'spin':   'rotation',
-        'wobble': 'ripple',
-        'zoom':   'scale',
-      };
-      const mappedMaskType = (maskTypeMap[mask.animation.type] || mask.animation.type) as import('../../types/gradient').AnimationType;
-
-      // Reset ALL mask uniforms to base before applying (same as live loop).
-      {
-        if (mat.uniforms.uMaskOpacity)            mat.uniforms.uMaskOpacity.value = mask.opacity || 1.0;
-        if (mat.uniforms.uMaskScale)              mat.uniforms.uMaskScale.value   = Math.min(3.0, Math.max(0.1, mask.maskScale || 1.0));
-        if (mat.uniforms.uMaskRotation)           mat.uniforms.uMaskRotation.value = ((mask.rotation || 0) * Math.PI) / 180.0;
-        if (mat.uniforms.uMaskOffset?.value?.set) mat.uniforms.uMaskOffset.value.set(mask.positionX || 0, mask.positionY || 0);
-      }
-
-      // Normalize speed 0-100 â†’ 0.05-2.0, intensity 0-100 â†’ 0-1 (same as live loop)
-      const normMs = mapMaskAnimationSpeed(mask.animation.speed);
-      const normMi = (mask.animation.intensity ?? 50) / 100;
-
-      const mOff = calculateAnimationOffset(
-        mappedMaskType, exportMaskTime,
-        normMs, normMi,
-        (mask.animation.easing || 'linear') as import('../../types/gradient').EasingType,
-        mask.animation.direction || 'forward',
-        mask.animation.loop !== false
-      );
-
-      if (mask.animation.type === 'rotate' && mat.uniforms.uMaskRotation) {
-        mat.uniforms.uMaskRotation.value = ((mask.rotation || 0) * Math.PI / 180.0) + mOff.angleOffset;
-      } else if (mask.animation.type === 'breathe') {
-        const t = mOff.signedTime * Math.PI * 2;
-        const breath = (1 + Math.sin(t)) * 0.5;
-        const baseS = Math.min(3.0, Math.max(0.1, mask.maskScale || 1.0));
-        if (mat.uniforms.uMaskScale) mat.uniforms.uMaskScale.value = Math.max(0.05, baseS * (1 + (breath - 0.5) * 0.34 * normMi));
-        if (mat.uniforms.uMaskOpacity) mat.uniforms.uMaskOpacity.value = Math.max(0.04, (mask.opacity || 1.0) * (0.9 + breath * 0.18 * normMi));
-      } else if (mask.animation.type === 'radialExpand') {
-        const expand = Math.pow(mOff.phase01, 0.72);
-        const baseS = Math.min(3.0, Math.max(0.1, mask.maskScale || 1.0));
-        if (mat.uniforms.uMaskScale) mat.uniforms.uMaskScale.value = Math.max(0.05, baseS * (0.32 + expand * (0.68 + 0.42 * normMi)));
-        if (mat.uniforms.uMaskOpacity) mat.uniforms.uMaskOpacity.value = Math.max(0.04, (mask.opacity || 1.0) * (0.35 + expand * 0.65));
-      } else if (mask.animation.type === 'scanReveal' && mat.uniforms.uMaskOffset?.value?.set) {
-        const sweep = (mOff.phase01 - 0.5) * 1.35 * normMi;
-        mat.uniforms.uMaskOffset.value.set((mask.positionX || 0) + sweep, mask.positionY || 0);
-        if (mat.uniforms.uMaskOpacity) mat.uniforms.uMaskOpacity.value = Math.max(0.08, (mask.opacity || 1.0) * (0.65 + 0.35 * Math.sin(mOff.phase01 * Math.PI)));
-      } else if (mask.animation.type === 'sliceWipe' && mat.uniforms.uMaskOffset?.value?.set) {
-        const dir = mask.animation.direction === 'reverse' ? -1 : 1;
-        const sweep = (mOff.phase01 - 0.5) * 1.7 * normMi * dir;
-        mat.uniforms.uMaskOffset.value.set((mask.positionX || 0) + sweep, (mask.positionY || 0) + Math.sin(mOff.phase01 * Math.PI * 2) * 0.015 * normMi);
-      } else if (mask.animation.type === 'glitchMask') {
-        const step = Math.floor(mOff.signedTime * 18);
-        const jx = Math.sin(step * 12.9898) * 43758.5453;
-        const jy = Math.sin(step * 78.233) * 24634.6345;
-        const rx = (jx - Math.floor(jx) - 0.5) * 0.12 * normMi;
-        const ry = (jy - Math.floor(jy) - 0.5) * 0.08 * normMi;
-        if (mat.uniforms.uMaskOffset?.value?.set) mat.uniforms.uMaskOffset.value.set((mask.positionX || 0) + rx, (mask.positionY || 0) + ry);
-        if (mat.uniforms.uMaskRotation) mat.uniforms.uMaskRotation.value = ((mask.rotation || 0) * Math.PI / 180.0) + rx * 0.65;
-      } else if (mask.animation.type === 'orbitDrift') {
-        const t = mOff.signedTime * Math.PI * 2;
-        if (mat.uniforms.uMaskOffset?.value?.set) mat.uniforms.uMaskOffset.value.set(
-          (mask.positionX || 0) + Math.cos(t) * 0.09 * normMi,
-          (mask.positionY || 0) + Math.sin(t) * 0.09 * normMi
-        );
-        if (mat.uniforms.uMaskRotation) mat.uniforms.uMaskRotation.value = ((mask.rotation || 0) * Math.PI / 180.0) + Math.sin(t * 0.5) * 0.55 * normMi;
-      } else if ((mask.animation.type === 'scale' || mask.animation.type === 'zoom') && mat.uniforms.uMaskScale) {
-        const baseS = Math.min(3.0, Math.max(0.1, mask.maskScale || 1.0));
-        mat.uniforms.uMaskScale.value = Math.max(0.05, baseS * (1 + mOff.scaleOffset));
-      } else if (mask.animation.type === 'pulse' && mat.uniforms.uMaskOpacity) {
-        mat.uniforms.uMaskOpacity.value = (mask.opacity || 1.0) * mOff.intensityMultiplier;
-      } else if ((mask.animation.type === 'drift' || mask.animation.type === 'swing' || mask.animation.type === 'wobble') && mat.uniforms.uMaskOffset?.value?.set) {
-        mat.uniforms.uMaskOffset.value.set(
-          (mask.positionX || 0) + mOff.xOffset,
-          (mask.positionY || 0) + mOff.yOffset
-        );
-      } else if (mask.animation.type === 'bounce' && mat.uniforms.uMaskOffset?.value?.set) {
-        const bounceY = Math.sin(mOff.signedTime * Math.PI * 2) * normMi * 0.15;
-        mat.uniforms.uMaskOffset.value.set(mask.positionX || 0, (mask.positionY || 0) + bounceY);
-      } else if (mask.animation.type === 'spin' && mat.uniforms.uMaskRotation) {
-        mat.uniforms.uMaskRotation.value = ((mask.rotation || 0) * Math.PI / 180.0) + mOff.angleOffset;
-      } else if (mask.animation.type === 'fade' && mat.uniforms.uMaskOpacity) {
-        const fadeV = (1 + Math.sin(mOff.signedTime * Math.PI * 2)) / 2;
-        mat.uniforms.uMaskOpacity.value = Math.max(0.02, fadeV * (mask.opacity || 1.0));
-      }
+      mat.uniforms = uniforms as typeof mat.uniforms;
+      applyMaskAnimation(mat, layer?.mask, exportMaskTime);
     });
 
     // â”€â”€ EXPORT RENDER â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -5231,6 +4965,20 @@ export const GradientCanvas = memo(function GradientCanvas({
     const timelineState: RenderedTimelineFrameState = {
       renderedDeterministicTime: deterministicTime,
       layers: timelineLayerStates,
+      motion: exportCache.entries.map(({ layer, uniforms }) => ({
+        layerId: layer.id,
+        maskRotation: uniforms.uMaskRotation?.value ?? null,
+        maskScale: uniforms.uMaskScale?.value ?? null,
+        maskOpacity: uniforms.uMaskOpacity?.value ?? null,
+        maskOffset: uniforms.uMaskOffset?.value
+          ? [uniforms.uMaskOffset.value.x, uniforms.uMaskOffset.value.y] as [number, number] : null,
+        textureTime: uniforms.textureTime?.value ?? null,
+        mediaTime: mediaVideoManagerRef.current?.getExportTime(layer.id) ?? null,
+        configuredLayerSpeed: layer.animation?.speed ?? null,
+        configuredMaskSpeed: layer.mask?.animation?.speed ?? null,
+        configuredTextureSpeed: layer.texture?.animationSpeed ?? null,
+        configuredMediaSpeed: layer.media?.playbackRate ?? null,
+      })),
     };
     return timelineState;
   }, [canvasSettings.height, canvasSettings.width, effects, waitForMaskTextures, rebindManagerTextures]);
@@ -5348,13 +5096,11 @@ export const GradientCanvas = memo(function GradientCanvas({
     isExportingRef.current = true;
     // Stage 2E: suspend live video playback — the export seek protocol owns
     // video currentTime for the duration of the export.
-    mediaVideoManagerRef.current?.beginExport();
+    mediaVideoManagerRef.current?.beginExport(options?.resetExportPhase ?? false);
     previewLastFrameTimeRef.current = performance.now();
     if (isPlayingRef.current && animationPlayStartRef.current != null) {
-      const now = performance.now();
-      animationAccumulatedTimeRef.current += Math.max(0, (now - animationPlayStartRef.current) / 1000);
-      animationMasterTimeRef.current = animationAccumulatedTimeRef.current;
-      textureMasterTimeRef.current = animationMasterTimeRef.current;
+      // The RAF loop has already accumulated this interval. Capture the last
+      // visible phase, without adding the playback interval a second time.
       animationPlayStartRef.current = null;
     }
     // FIX ping-pong: snapshot each layer's current signedPhase so renderAtTime

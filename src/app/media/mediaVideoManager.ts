@@ -28,7 +28,7 @@
  *             own its revocation.
  *  NO NEW RAF LOOPS — frames set the texture dirty + ping onFrame; the master
  *             RAF consumes it.
- *  EXPORT SEEK PROTOCOL — unchanged: seekAll(t) seeks each video to t%duration
+ *  EXPORT SEEK PROTOCOL — seekAll(t) applies the captured playhead, rate, trim, and freeze settings
  *             and resolves once decoded.
  */
 
@@ -130,6 +130,9 @@ type SupportsRvfc = HTMLVideoElement & {
 
 export class MediaVideoManager {
   private entries = new Map<string, ManagedVideo>();
+  private exportPlayback = new Map<string, {
+    startTime: number; restoreTime: number; options: PlaybackOptions;
+  }>();
   private playing = false;
   private exporting = false;
   private onFrame: (() => void) | null = null;
@@ -635,9 +638,18 @@ export class MediaVideoManager {
     return this.entries.size > 0;
   }
 
-  beginExport(): void {
+  beginExport(resetPhase = false): void {
+    if (this.exporting) return;
     this.exporting = true;
-    this.entries.forEach(({ video }) => video.pause());
+    this.exportPlayback.clear();
+    this.entries.forEach(({ video, layerId, options }) => {
+      this.exportPlayback.set(layerId, {
+        startTime: resetPhase ? (options.trimStart ?? 0) : video.currentTime,
+        restoreTime: video.currentTime,
+        options: { ...options },
+      });
+      video.pause();
+    });
     // STAGE 2.7.9 (B): lift the preview downscale cap and re-upload at FULL
     // source resolution before the first exported frame is rendered. Export
     // quality is never traded for preview performance.
@@ -647,12 +659,23 @@ export class MediaVideoManager {
 
   endExport(): void {
     this.exporting = false;
+    this.entries.forEach(({ video, layerId }) => {
+      const snapshot = this.exportPlayback.get(layerId);
+      if (snapshot) video.currentTime = snapshot.restoreTime;
+    });
+    this.exportPlayback.clear();
     // Return to the preview-sized upload path.
     this.invalidateAllFrames();
     if (this.playing) {
-      this.entries.forEach(({ video }) => { void video.play().catch(() => {}); });
+      this.entries.forEach(({ video, options }) => {
+        if (!options.freeze) void video.play().catch(() => {});
+      });
     }
     this.publishDebug();
+  }
+
+  getExportTime(layerId: string): number | null {
+    return this.entries.get(layerId)?.video.currentTime ?? null;
   }
 
   async seekAll(tSec: number): Promise<void> {
@@ -662,7 +685,20 @@ export class MediaVideoManager {
       const { video } = entry;
       const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
       if (!duration) return;
-      const target = tSec % duration;
+      const snapshot = this.exportPlayback.get(entry.layerId);
+      const options = snapshot?.options ?? entry.options;
+      const start = Math.min(duration, Math.max(0, options.trimStart ?? 0));
+      const end = Math.max(start, Math.min(duration, options.trimEnd ?? duration));
+      const span = end - start;
+      const rate = Math.max(0.25, Math.min(2, options.playbackRate ?? 1));
+      const origin = Math.max(start, Math.min(end, snapshot?.startTime ?? start));
+      const elapsed = Math.max(0, tSec) * rate;
+      // Preview currently implements pingpong as a restart loop; match it here.
+      const target = options.freeze
+        ? Math.min(duration, Math.max(0, options.freezeTime ?? 0))
+        : span <= 0 ? start
+        : options.loopMode === 'once' ? Math.min(end, origin + elapsed)
+        : start + ((origin - start + elapsed) % span);
 
       // ── STAGE 2.8.1: SOURCE-FRAME-AWARE SEEK SKIP ──
       //
@@ -718,6 +754,7 @@ export class MediaVideoManager {
   }
 
   dispose(layerId: string): void {
+    this.exportPlayback.delete(layerId);
     const entry = this.entries.get(layerId);
     if (!entry) return;
     this.entries.delete(layerId);

@@ -49,7 +49,7 @@ export function smoothLayerAnimationSpeed(
   deltaSeconds: number,
 ): number {
   if (Math.abs(current - target) < 0.001) return target;
-  const safeDelta = Math.max(0, Math.min(0.1, Number.isFinite(deltaSeconds) ? deltaSeconds : 0));
+  const safeDelta = Math.max(0, Number.isFinite(deltaSeconds) ? deltaSeconds : 0);
   if (safeDelta === 0) return current;
   const alphaAt60Fps = 0.15;
   const alpha = 1 - Math.pow(1 - alphaAt60Fps, safeDelta * 60);
@@ -73,15 +73,16 @@ export function advanceExportLayerTimeline(params: {
   if (!params.previous) {
     return { phase: params.capturedPhase, smoothedSpeed: params.capturedSpeed };
   }
-  const smoothedSpeed = smoothLayerAnimationSpeed(
-    params.previous.smoothedSpeed,
-    params.targetSpeed,
-    params.deltaSeconds,
-  );
+  const dt = Math.max(0, Number.isFinite(params.deltaSeconds) ? params.deltaSeconds : 0);
+  const decayRate = -60 * Math.log(0.85);
+  const difference = params.previous.smoothedSpeed - params.targetSpeed;
+  const decay = Math.exp(-decayRate * dt);
+  // Integrate the same exponential speed transition analytically. Rendering
+  // cadence must not change the distance travelled during that transition.
+  const distance = params.targetSpeed * dt + difference * (1 - decay) / decayRate;
   return {
-    phase: params.previous.phase
-      + params.deltaSeconds * smoothedSpeed * (params.speedMultiplier ?? 1),
-    smoothedSpeed,
+    phase: params.previous.phase + distance * (params.speedMultiplier ?? 1),
+    smoothedSpeed: params.targetSpeed + difference * decay,
   };
 }
 
