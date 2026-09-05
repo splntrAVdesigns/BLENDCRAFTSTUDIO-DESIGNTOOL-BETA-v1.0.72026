@@ -39,7 +39,12 @@ import {
   canEncodeVideo,
   type VideoCodec,
 } from 'mediabunny';
-import { isIframeEnvironment } from '../utils/environment';
+import {
+  certifyExportTimeline,
+  type ExportTimelineCertificationResult,
+  type ExportTimelineFrameCertification,
+  type RenderedTimelineFrameState,
+} from '../utils/exportTimelineCertification';
 
 export type MediabunnyContainer = 'mp4' | 'webm';
 
@@ -60,21 +65,19 @@ export interface MediabunnyEncodeOptions {
    * scene and draw the result onto `stagingCanvas` (synchronously or via
    * the returned promise) before resolving.
    */
-  drawFrame: (frameIndex: number, timeSeconds: number) => Promise<void> | void;
+  drawFrame: (frameIndex: number, timeSeconds: number) => Promise<RenderedTimelineFrameState | void> | RenderedTimelineFrameState | void;
   /** Maximum seconds between keyframes. Mediabunny defaults to 2s if omitted. */
   keyFrameIntervalSeconds?: number;
   signal?: AbortSignal;
   onProgress?: (progress: number, message?: string) => void;
-  /** Called once Mediabunny supplies the active encoder config. The browser's
-   *  hardwareAcceleration value remains a preference hint, not proof of the
-   *  underlying implementation; policy decisions use measured throughput. */
+  /** Called once Mediabunny supplies the active browser encoder config. */
   onEncoderConfig?: (info: {
     codec: string;
     hardwareAcceleration?: string;
     width: number;
     height: number;
-    latencyMode: 'quality' | 'realtime';
-    policy: 'iframe-software' | 'hardware-first' | 'software-fallback' | 'measured-software-fallback' | 'realtime-default';
+    latencyMode?: 'quality' | 'realtime';
+    policy: 'browser-default' | 'webm-realtime';
   }) => void;
 }
 
@@ -91,69 +94,26 @@ export interface MediabunnyEncodeResult {
   /** Public Mediabunny completion boundary: encoder drain + mux/target finalize.
    *  These cannot be safely split without depending on private internals. */
   finalizeMs: number;
+  /** Frame-by-frame proof that render and CanvasSource consumed one timeline. */
+  timelineCertification: ExportTimelineCertificationResult;
 }
 
-interface EncoderPolicy {
-  hardwareAcceleration: 'no-preference' | 'prefer-hardware' | 'prefer-software';
-  latencyMode: 'quality' | 'realtime';
-  policy: 'iframe-software' | 'hardware-first' | 'software-fallback' | 'measured-software-fallback' | 'realtime-default';
-}
+const OBSOLETE_H264_PERFORMANCE_PREFIX = 'blendcraft:h264-encoder-performance:v2';
+let obsoleteH264HistoryCleared = false;
 
-interface H264PerformanceHistory {
-  hardware?: { totalEncoderMsPerFrame: number; sampledAt: number };
-  software?: { totalEncoderMsPerFrame: number; sampledAt: number };
-}
-
-const H264_PERFORMANCE_PREFIX = 'blendcraft:h264-encoder-performance:v2';
-const H264_PERFORMANCE_TTL_MS = 24 * 60 * 60 * 1000;
-
-function h264PerformanceKey(width: number, height: number, fps: number, bitrate: number): string {
-  return `${H264_PERFORMANCE_PREFIX}:${width}x${height}:${fps}:${bitrate}`;
-}
-
-function readH264Performance(
-  width: number,
-  height: number,
-  fps: number,
-  bitrate: number,
-): H264PerformanceHistory {
+/** Remove Phase 7.3F.5's preference-driving history once, without touching any
+ * other saved project or application state. Encoder timings remain reported in
+ * __exportTiming but never choose a production encoder configuration. */
+export function clearObsoleteH264PerformanceHistory(): void {
+  if (obsoleteH264HistoryCleared) return;
+  obsoleteH264HistoryCleared = true;
   try {
-    const raw = localStorage.getItem(h264PerformanceKey(width, height, fps, bitrate));
-    return raw ? JSON.parse(raw) as H264PerformanceHistory : {};
+    Object.keys(localStorage)
+      .filter((key) => key.startsWith(OBSOLETE_H264_PERFORMANCE_PREFIX))
+      .forEach((key) => localStorage.removeItem(key));
   } catch {
-    return {};
+    // Storage can be disabled. Encoder construction must remain available.
   }
-}
-
-function recordH264Performance(
-  width: number,
-  height: number,
-  fps: number,
-  bitrate: number,
-  policy: EncoderPolicy['policy'],
-  totalEncoderMsPerFrame: number,
-): void {
-  if (!Number.isFinite(totalEncoderMsPerFrame) || totalEncoderMsPerFrame <= 0 || policy === 'iframe-software') return;
-  try {
-    const history = readH264Performance(width, height, fps, bitrate);
-    const sample = { totalEncoderMsPerFrame, sampledAt: Date.now() };
-    if (policy === 'hardware-first') history.hardware = sample;
-    if (policy === 'software-fallback' || policy === 'measured-software-fallback') history.software = sample;
-    localStorage.setItem(h264PerformanceKey(width, height, fps, bitrate), JSON.stringify(history));
-  } catch {
-    // Storage may be disabled; the explicit capability fallback still applies.
-  }
-}
-
-function shouldUseMeasuredSoftwareFallback(history: H264PerformanceHistory, fps: number): boolean {
-  const hardware = history.hardware;
-  if (!hardware || Date.now() - hardware.sampledAt > H264_PERFORMANCE_TTL_MS) return false;
-  const slowThresholdMs = Math.max(50, (1000 / fps) * 1.5);
-  if (hardware.totalEncoderMsPerFrame <= slowThresholdMs) return false;
-
-  const software = history.software;
-  if (!software || Date.now() - software.sampledAt > H264_PERFORMANCE_TTL_MS) return true;
-  return software.totalEncoderMsPerFrame < hardware.totalEncoderMsPerFrame * 0.9;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -310,62 +270,6 @@ export async function canEncodeContainer(
   }
 }
 
-async function resolveEncoderPolicy(
-  container: MediabunnyContainer,
-  width: number,
-  height: number,
-  fps: number,
-  bitrate: number,
-): Promise<EncoderPolicy> {
-  if (isIframeEnvironment()) {
-    return {
-      hardwareAcceleration: 'prefer-software',
-      latencyMode: 'realtime',
-      policy: 'iframe-software',
-    };
-  }
-
-  if (container === 'mp4') {
-    const performanceHistory = readH264Performance(width, height, fps, bitrate);
-    if (shouldUseMeasuredSoftwareFallback(performanceHistory, fps)) {
-      return {
-        hardwareAcceleration: 'prefer-software',
-        latencyMode: 'realtime',
-        policy: 'measured-software-fallback',
-      };
-    }
-
-    const hardwareSupported = await canEncodeVideo('avc', {
-      width,
-      height,
-      bitrate,
-      hardwareAcceleration: 'prefer-hardware',
-    }).catch(() => false);
-
-    if (hardwareSupported) {
-      return {
-        hardwareAcceleration: 'prefer-hardware',
-        // Realtime bounds internal frame reordering and avoids a large native
-        // queue being deferred until finalize. Bitrate remains quality-owned.
-        latencyMode: 'realtime',
-        policy: 'hardware-first',
-      };
-    }
-
-    return {
-      hardwareAcceleration: 'prefer-software',
-      latencyMode: 'realtime',
-      policy: 'software-fallback',
-    };
-  }
-
-  return {
-    hardwareAcceleration: 'no-preference',
-    latencyMode: 'realtime',
-    policy: 'realtime-default',
-  };
-}
-
 /**
  * Core Mediabunny encode pass. Container-agnostic — MP4 and WebM take the
  * identical code path, differing only in which OutputFormat/codec gets
@@ -410,38 +314,46 @@ export async function encodeVideoWithMediabunny(
   const wakeLock = await acquireExportWakeLock();
 
   try {
-    // Iframe hardware-encoder instability (Figma Make host): hardware H.264 has
-    // crashed the GPU process mid-encode in this environment, and Chromium
-    // blocklists the encoder for the rest of the session afterward — every
-    // later probe then fails too. Prefer software first inside iframes;
-    // standalone tabs explicitly probe hardware H.264, then use realtime
-    // software only when that hardware configuration is unavailable.
-    const encoderPolicy = await resolveEncoderPolicy(container, width, height, fps, bitrate);
-    const { hardwareAcceleration, latencyMode } = encoderPolicy;
+    if (container === 'mp4') clearObsoleteH264PerformanceHistory();
 
-    const videoSource = new CanvasSource(stagingCanvas, {
-      codec: mediaCodecFor(container),
-      bitrate,
-      hardwareAcceleration,
-      keyFrameInterval: options.keyFrameIntervalSeconds ?? 2,
-      latencyMode,
-      onEncoderConfig: (config) => {
-        onEncoderConfig?.({
-          codec: (config as { codec?: string }).codec ?? mediaCodecFor(container),
-          hardwareAcceleration: (config as { hardwareAcceleration?: string }).hardwareAcceleration,
-          width: (config as { width?: number }).width ?? stagingCanvas.width,
-          height: (config as { height?: number }).height ?? stagingCanvas.height,
-          latencyMode,
-          policy: encoderPolicy.policy,
+    const reportEncoderConfig = (
+      policy: 'browser-default' | 'webm-realtime',
+      config: { codec?: string; hardwareAcceleration?: string; width?: number; height?: number; latencyMode?: 'quality' | 'realtime' },
+    ) => {
+      onEncoderConfig?.({
+        codec: config.codec ?? mediaCodecFor(container),
+        hardwareAcceleration: config.hardwareAcceleration,
+        width: config.width ?? stagingCanvas.width,
+        height: config.height ?? stagingCanvas.height,
+        latencyMode: config.latencyMode,
+        policy,
+      });
+    };
+
+    // MP4 mirrors Visual Mood Labs' known-good construction exactly: codec and
+    // bitrate are the only encoder-policy inputs. No hardwareAcceleration or
+    // latencyMode preference is supplied, so the browser selects its stable
+    // quality implementation. WebM retains its established realtime policy.
+    const videoSource = container === 'mp4'
+      ? new CanvasSource(stagingCanvas, {
+          codec: 'avc',
+          bitrate,
+          onEncoderConfig: (config) => reportEncoderConfig('browser-default', config),
+        })
+      : new CanvasSource(stagingCanvas, {
+          codec: 'vp9',
+          bitrate,
+          keyFrameInterval: options.keyFrameIntervalSeconds ?? 2,
+          latencyMode: 'realtime',
+          onEncoderConfig: (config) => reportEncoderConfig('webm-realtime', config),
         });
-      },
-    });
     output.addVideoTrack(videoSource, { frameRate: fps });
     await output.start();
 
     const frameDurationSeconds = 1 / fps;
     let renderMs = 0;
     let encodeMs = 0;
+    const timelineFrames: ExportTimelineFrameCertification[] = [];
 
     const progressStep = Math.max(1, Math.floor(totalFrames / 20));
 
@@ -451,7 +363,7 @@ export async function encodeVideoWithMediabunny(
       signal,
       onFrame: async (i, t) => {
         const renderStart = performance.now();
-        await drawFrame(i, t);
+        const rendered = await drawFrame(i, t);
         renderMs += performance.now() - renderStart;
 
         throwIfAborted(signal);
@@ -461,6 +373,15 @@ export async function encodeVideoWithMediabunny(
         // the same CanvasSource contract as Visual Mood Labs. Awaiting add()
         // is the encoder/writer backpressure barrier for every frame.
         await videoSource.add(t, frameDurationSeconds);
+
+        timelineFrames.push({
+          frameIndex: i,
+          requestedTimestamp: t,
+          renderedDeterministicTime: rendered?.renderedDeterministicTime ?? t,
+          encodedTimestamp: t,
+          encodedDuration: frameDurationSeconds,
+          layers: rendered?.layers ?? [],
+        });
 
         encodeMs += performance.now() - encodeStart;
 
@@ -480,15 +401,9 @@ export async function encodeVideoWithMediabunny(
     await output.finalize();
     const finalizeMs = performance.now() - finalizeStart;
 
-    if (container === 'mp4') {
-      recordH264Performance(
-        width,
-        height,
-        fps,
-        bitrate,
-        encoderPolicy.policy,
-        (encodeMs + finalizeMs) / Math.max(1, totalFrames),
-      );
+    const timelineCertification = certifyExportTimeline(timelineFrames, fps, totalFrames);
+    if (!timelineCertification.passed) {
+      console.error('[BLENDCRAFT export] Timeline certification failed:', timelineCertification);
     }
 
     const buffer = target.buffer;
@@ -504,6 +419,7 @@ export async function encodeVideoWithMediabunny(
       renderMs,
       encodeMs,
       finalizeMs,
+      timelineCertification,
     };
   } finally {
     stopKeepAlive();

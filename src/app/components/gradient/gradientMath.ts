@@ -35,6 +35,56 @@ export function mapLayerAnimationSpeed(raw: number | undefined): number {
   return 0.02 + Math.pow(t, 1.45) * 2.98;
 }
 
+/**
+ * Advance the layer-speed smoother by elapsed wall/timeline time.
+ *
+ * The old fixed 0.15-per-rendered-frame EMA changed its real-time response
+ * with preview FPS and could not be continued faithfully by a fixed-FPS
+ * export. This is algebraically identical at 60 fps, while remaining stable
+ * at any preview/export cadence.
+ */
+export function smoothLayerAnimationSpeed(
+  current: number,
+  target: number,
+  deltaSeconds: number,
+): number {
+  if (Math.abs(current - target) < 0.001) return target;
+  const safeDelta = Math.max(0, Math.min(0.1, Number.isFinite(deltaSeconds) ? deltaSeconds : 0));
+  if (safeDelta === 0) return current;
+  const alphaAt60Fps = 0.15;
+  const alpha = 1 - Math.pow(1 - alphaAt60Fps, safeDelta * 60);
+  return current * (1 - alpha) + target * alpha;
+}
+
+export interface ExportLayerTimelineState {
+  phase: number;
+  smoothedSpeed: number;
+}
+
+/** Continue one layer from its exact captured preview phase/speed. */
+export function advanceExportLayerTimeline(params: {
+  previous?: ExportLayerTimelineState;
+  capturedPhase: number;
+  capturedSpeed: number;
+  targetSpeed: number;
+  deltaSeconds: number;
+  speedMultiplier?: number;
+}): ExportLayerTimelineState {
+  if (!params.previous) {
+    return { phase: params.capturedPhase, smoothedSpeed: params.capturedSpeed };
+  }
+  const smoothedSpeed = smoothLayerAnimationSpeed(
+    params.previous.smoothedSpeed,
+    params.targetSpeed,
+    params.deltaSeconds,
+  );
+  return {
+    phase: params.previous.phase
+      + params.deltaSeconds * smoothedSpeed * (params.speedMultiplier ?? 1),
+    smoothedSpeed,
+  };
+}
+
 export function mapMaskAnimationSpeed(raw: number | undefined): number {
   const sliderValue = Math.max(0, Math.min(100, raw ?? 50));
   if (sliderValue <= 0) return 0;

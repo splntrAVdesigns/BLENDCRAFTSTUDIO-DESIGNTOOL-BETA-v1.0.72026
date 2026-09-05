@@ -53,13 +53,12 @@ test('public Mediabunny finalization precedes MP4 handoff', () => {
   assert.ok(mp4.indexOf('await handoffExportDownload') < mp4.indexOf('verifyExportedFrameFidelity'));
 });
 
-test('standalone H264 selects a measured hardware-first or software-realtime policy', () => {
+test('H264 completion telemetry remains while encoder selection is browser-owned', () => {
   const engine = read('src/app/export/mediabunnyExport.ts');
-  assert.match(engine, /hardwareAcceleration: 'prefer-hardware'/);
-  assert.match(engine, /policy: 'hardware-first'/);
-  assert.match(engine, /hardwareAcceleration: 'prefer-software'/);
-  assert.match(engine, /policy: 'software-fallback'/);
-  assert.match(engine, /shouldUseMeasuredSoftwareFallback/);
-  assert.match(engine, /policy: 'measured-software-fallback'/);
-  assert.match(engine, /\(encodeMs \+ finalizeMs\) \/ Math\.max\(1, totalFrames\)/);
+  assert.match(engine, /policy: 'browser-default'/);
+  assert.match(engine, /renderMs/);
+  assert.match(engine, /encodeMs/);
+  assert.match(engine, /finalizeMs/);
+  assert.doesNotMatch(engine, /policy: 'hardware-first'/);
+  assert.doesNotMatch(engine, /policy: 'measured-software-fallback'/);
 });

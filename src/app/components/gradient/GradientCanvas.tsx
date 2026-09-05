@@ -23,7 +23,7 @@ import { InteractiveControls } from '../controls/InteractiveControls';
 import { sortColorStops } from '../../utils/colorStopValidation';
 import { hexToShaderRgb } from '../../utils/colors';
 import { getPatternCanvas, createPatternThreeTexture } from '../../utils/texturePatternCache';
-import { mapTextureAnimationSpeed, mapLayerAnimationSpeed, mapMaskAnimationSpeed, encodeTextureType, encodePatternFlipMode, encodePatternOpacityCurveMode } from './gradientMath';
+import { mapTextureAnimationSpeed, mapLayerAnimationSpeed, mapMaskAnimationSpeed, smoothLayerAnimationSpeed, advanceExportLayerTimeline, encodeTextureType, encodePatternFlipMode, encodePatternOpacityCurveMode } from './gradientMath';
 import { applyRendererSize, getDrawingBufferSize, resizeRenderTargets } from './canvasSizing';
 import { disposeMesh, disposeTextureMap, disposeGeometryMap, disposeRenderTargetRef } from './textureDisposal';
 import { markRenderNeededNextFrame, cancelFrame } from './renderInvalidation';
@@ -43,6 +43,7 @@ import { createExportRenderCache, invalidateExportRenderCache, resizeExportRende
 import { runExportCleanup } from '../../utils/exportCleanup';
 import { applyTextureQualityPolicy } from '../../utils/exportRenderQuality';
 import { attachLatestExportCleanup } from '../../utils/exportStressCertification';
+import type { RenderedTimelineFrameState, RenderedTimelineLayerState } from '../../utils/exportTimelineCertification';
 
 function flashHexToRgb01(hex: string): [number, number, number] {
   const h = hex.replace('#', '');
@@ -503,11 +504,10 @@ export const GradientCanvas = memo(function GradientCanvas({
   // STAGE 3.1: previous export frame time, for deterministic per-frame dt in the
   // baked-audio tick. Reset to -1 at export start so frame 0 gets a sane dt.
   const lastExportTimeRef = useRef(-1);
-  // STAGE 3.1 FIX: per-layer accumulated export phase, so audio speedMul is
-  // integrated frame-by-frame (like the live signedPhase) rather than
-  // multiplied against total elapsed time — the latter made phase lurch
-  // backward/forward on speed spikes, which showed as stutter.
-  const exportPhaseAccumRef = useRef<Map<string, number>>(new Map());
+  // Per-layer deterministic continuation state. Both phase and the preview's
+  // in-flight speed smoother cross the export boundary, so frame 0 is the
+  // visible frame and later frames follow the same speed transition as preview.
+  const exportPhaseAccumRef = useRef<Map<string, { phase: number; smoothedSpeed: number }>>(new Map());
   const exportSnapshotRef = useRef<{
     masterTime: number;
     textureTime: number;
@@ -3388,13 +3388,16 @@ export const GradientCanvas = memo(function GradientCanvas({
           // signedPhase grows at exactly the right rate regardless of when speed
           // changes â€” no multiplication by the large accumulated clock value.
           // The EMA (alpha=0.15 â‰ˆ 6 frames â‰ˆ 100ms) ensures a smooth ramp.
-          const SPEED_EMA_ALPHA = 0.15;
           const targetSpeed = mapLayerAnimationSpeed(layer.animation.speed);
           const prevSmoothed = layerState.smoothedSpeed ?? targetSpeed;
-          // Snap immediately if near target (avoids perpetual micro-drift)
-          const newSmoothedSpeed = Math.abs(prevSmoothed - targetSpeed) < 0.001
-            ? targetSpeed
-            : prevSmoothed * (1 - SPEED_EMA_ALPHA) + targetSpeed * SPEED_EMA_ALPHA;
+          // One shared, time-based smoother drives preview and deterministic
+          // export. At 60 fps this is identical to the established 0.15 EMA;
+          // at other frame rates it retains the same real-time response.
+          const newSmoothedSpeed = smoothLayerAnimationSpeed(
+            prevSmoothed,
+            targetSpeed,
+            clockDelta,
+          );
           layerState.smoothedSpeed = newSmoothedSpeed;
 
           // Accumulate signed phase using smoothed speed (wraps at ±300s for float safety).
@@ -4772,6 +4775,7 @@ export const GradientCanvas = memo(function GradientCanvas({
     lastExportTimeRef.current = deterministicTime;
     const exportAudioActive = tickAudioExportFrame(exportMasterTime, exportDt);
     const exportGlobal = getGlobalAudioDeltas();
+    const timelineLayerStates: RenderedTimelineLayerState[] = [];
 
     // Flash FX must be written BEFORE the frame is rendered. Previously the export
     // callback updated flash uniforms while staging the already-rendered frame,
@@ -4829,29 +4833,33 @@ export const GradientCanvas = memo(function GradientCanvas({
         //   Frame 0 renders exactly what the canvas showed at pause time.
         //   Subsequent frames advance forward from that phase â†’ seamless continuation.
         const capturedPhase = layerState.capturedPhase ?? layerState.signedPhase ?? 0;
-        const capturedSpeed = layerState.capturedSpeed ?? layerState.smoothedSpeed ?? mapLayerAnimationSpeed(layer.animation.speed) ?? 1;
-        // STAGE 3.1 FIX: integrate speedMul per frame, not against total time.
-        // Multiplying the whole elapsed `time` by a per-frame-fluctuating
-        // speedMul made phase jump around on every beat (stutter). Instead
-        // accumulate: each frame advances phase by exportDt*speed*speedMul.
-        // When no Speed mapping is active speedMul is 1, so this reduces to the
-        // previous smooth `capturedPhase + time*speed` behaviour exactly.
+        const capturedSpeed = layerState.capturedSpeed ?? layerState.smoothedSpeed ?? mapLayerAnimationSpeed(layer.animation.speed);
+        const capturedTargetSpeed = layerState.capturedTargetSpeed ?? mapLayerAnimationSpeed(layer.animation.speed);
+        // Continue both phase and the actual preview speed smoother from the
+        // pause boundary. Frame 0 is byte-for-byte the captured preview phase;
+        // each later fixed-FPS frame advances using the same time-based smoother
+        // as the live RAF path. Audio speed modulation remains integrated per
+        // frame, never multiplied against total elapsed time.
         const exSpeedMul = exAudio ? exAudio.speedMul : 1;
         const accum = exportPhaseAccumRef.current;
-        const prevAccum = accum.get(layer.id);
-        // Exact time-based phase — bit-identical to pre-3.1 when no Speed mapping.
-        const exactPhase = capturedPhase + deterministicTime * capturedSpeed;
-        let exportSignedTime: number;
-        if (exSpeedMul === 1 && prevAccum === undefined) {
-          // Common case (no Speed mapping): exact, no accumulation drift.
-          exportSignedTime = exactPhase;
-        } else {
-          // A Speed mapping is (or was) active: integrate per frame so the
-          // speed surge advances phase smoothly instead of scaling total time.
-          const base = prevAccum ?? exactPhase;
-          exportSignedTime = base + exportDt * capturedSpeed * exSpeedMul;
-          accum.set(layer.id, exportSignedTime);
-        }
+        const previous = accum.get(layer.id);
+        const continued = advanceExportLayerTimeline({
+          previous,
+          capturedPhase,
+          capturedSpeed,
+          targetSpeed: capturedTargetSpeed,
+          deltaSeconds: exportDt,
+          speedMultiplier: exSpeedMul,
+        });
+        const effectiveSpeed = continued.smoothedSpeed;
+        const exportSignedTime = continued.phase;
+        accum.set(layer.id, continued);
+        timelineLayerStates.push({
+          layerId: layer.id,
+          capturedPhase,
+          effectiveSpeed,
+          renderedPhase: exportSignedTime,
+        });
         const offset = calculateAnimationOffset(
           layer.animation.type,
           exportSignedTime,
@@ -5219,6 +5227,12 @@ export const GradientCanvas = memo(function GradientCanvas({
     if (exportRenderTarget && exportRTCacheRef.current?.rt !== exportRenderTarget) {
       exportRenderTarget.dispose();
     }
+
+    const timelineState: RenderedTimelineFrameState = {
+      renderedDeterministicTime: deterministicTime,
+      layers: timelineLayerStates,
+    };
+    return timelineState;
   }, [canvasSettings.height, canvasSettings.width, effects, waitForMaskTextures, rebindManagerTextures]);
 
   // ============================================================
@@ -5351,11 +5365,12 @@ export const GradientCanvas = memo(function GradientCanvas({
     layerStatesRef.current.forEach((state, layerId) => {
       const layer = layerById.get(layerId);
       state.capturedPhase = options?.resetExportPhase ? 0 : (state.signedPhase ?? 0);
-      // Export should use the committed user speed as the authority, not a stale
-      // EMA value left over from preview playback. This prevents WebM exports from
-      // racing ahead when the live smoother had not settled or was reset after a
-      // previous export.
-      state.capturedSpeed = mapLayerAnimationSpeed(layer?.animation?.speed) ?? 1;
+      // Preserve the speed the visible preview is actually using at this exact
+      // boundary. The committed slider value is a target, not the current
+      // rendered speed while smoothing is in flight.
+      const targetSpeed = mapLayerAnimationSpeed(layer?.animation?.speed);
+      state.capturedSpeed = state.smoothedSpeed ?? targetSpeed;
+      state.capturedTargetSpeed = targetSpeed;
     });
 
     exportTextureSnapshotRef.current.clear();
@@ -5415,14 +5430,14 @@ export const GradientCanvas = memo(function GradientCanvas({
     }
     layerStatesRef.current.forEach((state, layerId) => {
       const layer = layersRef.current.find(l => l.id === layerId);
+      const capturedSpeed = state.capturedSpeed;
       state.signedPhase = state.capturedPhase ?? state.signedPhase ?? 0;
       state.capturedPhase = undefined;
       state.capturedSpeed = undefined;
-      // Restore the preview smoother to the current committed speed instead of
-      // undefined. Leaving it undefined made the next live RAF reinitialize from
-      // whatever stale/default value it inferred, which caused post-export lag and
-      // speed mismatch on some animation types.
-      state.smoothedSpeed = mapLayerAnimationSpeed(layer?.animation?.speed);
+      state.capturedTargetSpeed = undefined;
+      // Resume from the exact pre-export smoother value. The normal live path
+      // continues toward the committed target without a visible post-export snap.
+      state.smoothedSpeed = capturedSpeed ?? mapLayerAnimationSpeed(layer?.animation?.speed);
     });
     exportSnapshotRef.current = null;
     exportTextureSnapshotRef.current.clear();

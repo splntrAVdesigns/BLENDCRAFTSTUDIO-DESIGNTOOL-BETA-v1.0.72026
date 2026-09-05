@@ -34,6 +34,12 @@ import {
 } from './exportFinalization';
 import { EXPORT_COLOR_CONTRACT } from './exportRenderQuality';
 import { attachLatestExportMemoryRecovery, recordExportFailure, recordExportTiming } from './exportStressCertification';
+import type { RenderedTimelineFrameState } from './exportTimelineCertification';
+
+type DeterministicVideoFrameRenderer = (
+  time: number,
+  exportRenderer?: THREE.WebGLRenderer,
+) => Promise<RenderedTimelineFrameState | void>;
 
 function getGIFConstructor(): any {
   const moduleAny = GIFLib as any;
@@ -788,7 +794,7 @@ function applyCodecSafetyResolve(
 
 async function exportWebMWithMediaRecorderFallback(options: {
   canvas: HTMLCanvasElement;
-  renderFrameAtTime: (time: number, exportRenderer?: THREE.WebGLRenderer) => Promise<void>;
+  renderFrameAtTime: DeterministicVideoFrameRenderer;
   fps: number;
   durationMs: number;
   filename: string;
@@ -882,7 +888,7 @@ async function exportWebMWithMediaRecorderFallback(options: {
 
 async function exportMP4WithMediaRecorderFallback(options: {
   canvas: HTMLCanvasElement;
-  renderFrameAtTime: (time: number, exportRenderer?: THREE.WebGLRenderer) => Promise<void>;
+  renderFrameAtTime: DeterministicVideoFrameRenderer;
   fps: number;
   durationMs: number;
   filename: string;
@@ -914,7 +920,7 @@ async function exportMP4WithMediaRecorderFallback(options: {
  */
 export async function exportWebMFromCanvas(options: {
   canvas: HTMLCanvasElement;
-  renderFrameAtTime: (time: number, exportRenderer?: THREE.WebGLRenderer) => Promise<void>;
+  renderFrameAtTime: DeterministicVideoFrameRenderer;
   fps: number;
   durationMs: number;
   filename: string;
@@ -1003,7 +1009,7 @@ export async function exportWebMFromCanvas(options: {
     hardwareAcceleration?: string;
     width: number;
     height: number;
-    latencyMode: 'quality' | 'realtime';
+    latencyMode?: 'quality' | 'realtime';
     policy: string;
   } | null = null;
 
@@ -1041,7 +1047,7 @@ export async function exportWebMFromCanvas(options: {
       onProgress,
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
       drawFrame: async (i, t) => {
-        await renderFrameAtTime(t, undefined);
+        const renderedTimeline = await renderFrameAtTime(t, undefined);
         const liveCanvas = options.getLiveCanvas?.() ?? null;
         const presentationReference = i === 0 && liveCanvas
           ? captureExportFrameSample(liveCanvas)
@@ -1073,6 +1079,7 @@ export async function exportWebMFromCanvas(options: {
             }
           }
         }
+        return renderedTimeline;
       },
     });
 
@@ -1170,9 +1177,11 @@ export async function exportWebMFromCanvas(options: {
       finalization: { ...finalizationTimers },
       artifactDuration: durationCheck,
       frameFidelity,
+      timelineCertification: result.timelineCertification,
     };
     console.info('[Export] Timing:', timing);
     try { (window as unknown as Record<string, unknown>).__exportTiming = timing; } catch { /* diag */ }
+    try { (window as unknown as Record<string, unknown>).__blendcraftLastTimelineCertification = result.timelineCertification; } catch { /* diagnostics only */ }
     recordExportTiming(timing);
   } catch (error) {
     if (!fallbackUsed) {
@@ -1819,7 +1828,7 @@ export async function exportAsWebM(
  */
 export async function exportMP4FromCanvas(options: {
   canvas: HTMLCanvasElement;
-  renderFrameAtTime: (time: number, exportRenderer?: THREE.WebGLRenderer) => Promise<void>;
+  renderFrameAtTime: DeterministicVideoFrameRenderer;
   fps: number;
   durationMs: number;
   filename: string;
@@ -1897,7 +1906,7 @@ export async function exportMP4FromCanvas(options: {
     hardwareAcceleration?: string;
     width: number;
     height: number;
-    latencyMode: 'quality' | 'realtime';
+    latencyMode?: 'quality' | 'realtime';
     policy: string;
   } | null = null;
 
@@ -1914,7 +1923,7 @@ export async function exportMP4FromCanvas(options: {
       onProgress,
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
       drawFrame: async (i, t) => {
-        await renderFrameAtTime(t, undefined);
+        const renderedTimeline = await renderFrameAtTime(t, undefined);
         const presentationReference = i === 0 && liveCanvas
           ? captureExportFrameSample(liveCanvas)
           : null;
@@ -1937,6 +1946,7 @@ export async function exportMP4FromCanvas(options: {
             }
           }
         }
+        return renderedTimeline;
       },
     });
 
@@ -2005,9 +2015,11 @@ export async function exportMP4FromCanvas(options: {
         encoderConfig: encoderConfigInfo,
         artifactDuration: durationCheck,
         frameFidelity,
+        timelineCertification: result.timelineCertification,
       };
       console.info('[Export] MP4 timing:', timing);
       try { (window as unknown as Record<string, unknown>).__exportTiming = timing; } catch { /* diagnostics only */ }
+      try { (window as unknown as Record<string, unknown>).__blendcraftLastTimelineCertification = result.timelineCertification; } catch { /* diagnostics only */ }
       recordExportTiming(timing);
     })().catch((error) => {
       console.warn('[Export] Non-blocking MP4 verification failed:', error);

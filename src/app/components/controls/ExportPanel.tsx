@@ -493,7 +493,7 @@ ${colorInterpExpanded}
       // exportPNGAtSize now calls setExportSize internally (before render) and
       // restoreSize immediately after pixel capture (before toBlob) — FIX 4 canvas jump.
       await exportPNGAtSize(
-        (t) => api.renderAtTime(t, undefined, { seekMedia: false }),
+        async (t) => { await api.renderAtTime(t, undefined, { seekMedia: false }); },
         width,
         height,
         filename,

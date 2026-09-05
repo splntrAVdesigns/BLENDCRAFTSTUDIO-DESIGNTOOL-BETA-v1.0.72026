@@ -12,15 +12,15 @@ test('CanvasSource uses only the public Visual Mood Labs finalization contract',
   assert.doesNotMatch(engine, /videoSource\.close\(|closeAndWait|_closingPromise/);
 });
 
-test('hardware-first H264 uses realtime latency and full completion cost', () => {
+test('superseded encoder preferences cannot influence the MP4 CanvasSource', () => {
   const engine = read('src/app/export/mediabunnyExport.ts');
-  const hardwarePolicy = engine.slice(
-    engine.indexOf("policy: 'hardware-first'", engine.indexOf('if (hardwareSupported)')) - 220,
-    engine.indexOf("policy: 'hardware-first'", engine.indexOf('if (hardwareSupported)')) + 80,
+  const mp4Source = engine.slice(
+    engine.indexOf("? new CanvasSource(stagingCanvas"),
+    engine.indexOf(": new CanvasSource(stagingCanvas"),
   );
-  assert.match(hardwarePolicy, /latencyMode: 'realtime'/);
-  assert.match(engine, /\(encodeMs \+ finalizeMs\) \/ Math\.max\(1, totalFrames\)/);
-  assert.match(engine, /h264-encoder-performance:v2/);
+  assert.doesNotMatch(mp4Source, /latencyMode/);
+  assert.doesNotMatch(mp4Source, /hardwareAcceleration/);
+  assert.match(engine, /clearObsoleteH264PerformanceHistory/);
 });
 
 test('finalization telemetry reports one honest public boundary', () => {
@@ -36,8 +36,8 @@ test('active encoder and decoded artifact resolutions are checked', () => {
   const engine = read('src/app/export/mediabunnyExport.ts');
   const exporter = read('src/app/utils/exportUtils.ts');
   const certification = read('src/app/utils/exportCertification.ts');
-  assert.match(engine, /width: \(config as \{ width\?: number \}\)\.width/);
-  assert.match(engine, /height: \(config as \{ height\?: number \}\)\.height/);
+  assert.match(engine, /width: config\.width \?\? stagingCanvas\.width/);
+  assert.match(engine, /height: config\.height \?\? stagingCanvas\.height/);
   assert.ok((exporter.match(/assertEncoderResolution\(encoderConfigInfo, targetWidth, targetHeight/g) ?? []).length >= 2);
   assert.match(certification, /video\.videoWidth/);
   assert.match(certification, /video\.videoHeight/);

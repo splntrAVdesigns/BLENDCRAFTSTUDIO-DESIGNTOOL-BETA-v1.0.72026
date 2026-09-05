@@ -283,7 +283,8 @@ export interface LayerTransformState {
   // Export phase snapshot — set by pauseAnimation() so renderAtTime() continues
   // from the exact phase the live canvas was at (prevents ping-pong snap on frame 0)
   capturedPhase?: number;
-  capturedSpeed?: number; // Export speed snapshot so deterministic renders match live smoothed speed
+  capturedSpeed?: number; // Actual preview smoother value at the export boundary
+  capturedTargetSpeed?: number; // Committed slider target continued deterministically during export
 }
 
 // Interactive Warp/Displacement configuration
@@ -450,7 +451,7 @@ export interface RenderApi {
     time: number,
     exportRenderer?: any,
     opts?: { seekMedia?: boolean },
-  ) => Promise<void>;
+  ) => Promise<import('../utils/exportTimelineCertification').RenderedTimelineFrameState | void>;
   /** Return the live WebGL canvas element for pixel capture and canvas sizing. */
   getCanvas: () => HTMLCanvasElement | null;
   /** Return the current animation master clock time in seconds. */
