@@ -672,6 +672,10 @@ async function encodeVideoWithMediabunnyViaWorker(
     throw error;
   });
 
+  // Always logged — confirms the worker path is genuinely engaged *before*
+  // the point where a stall could occur, not just on successful completion.
+  console.info('[BLENDCRAFT export:mediabunny] Worker encode path active (init succeeded, frames starting).');
+
   // Past this point, frames may be submitted — any failure propagates as a
   // genuine encode failure rather than triggering a silent restart.
   const stopKeepAlive = startCompositorKeepAlive();
@@ -825,9 +829,14 @@ export async function encodeVideoWithMediabunny(
       return await encodeVideoWithMediabunnyViaWorker(options);
     } catch (error) {
       if (error instanceof WorkerEncodeInitError) {
-        if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
-          console.warn('[BLENDCRAFT export:mediabunny] Worker encode path unavailable, falling back to main thread:', error);
-        }
+        // Always logged, not DEV-gated — this is exactly the signal needed
+        // to tell whether a "nothing changed" field report means the worker
+        // path silently fell back (this line will show why) or genuinely
+        // ran and the stall persisted anyway (see 'encoder output:worker'
+        // log instead). Previously this was DEV-only, which combined with
+        // the drop_console build bug (see vite.config.ts) meant it could
+        // never appear in production regardless.
+        console.warn('[BLENDCRAFT export:mediabunny] Worker encode path unavailable, falling back to main thread:', error);
         // fall through to main-thread path below
       } else {
         throw error;
