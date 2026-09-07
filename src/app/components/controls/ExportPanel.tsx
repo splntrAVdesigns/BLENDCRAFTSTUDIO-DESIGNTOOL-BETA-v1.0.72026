@@ -125,7 +125,14 @@ export function ExportPanel({
   const [pngCustomHeight, setPngCustomHeight] = useState(1080);
   
   // WebM settings
-  const [webmPreset, setWebmPreset] = useState<string>('1080p');
+  // SPRINT (export-quality-sync): default export resolution now starts as
+  // "Custom" matching the live canvas's own working resolution, instead of
+  // a hardcoded 1920x1080 divorced from whatever the user actually set up
+  // in Canvas Settings. Previously webmCustomWidth/Height always
+  // initialized to 1920x1080 regardless of canvasSettings, so a 4K or
+  // vertical/social canvas would silently export at 1080p unless the user
+  // happened to re-enter the resolution here too.
+  const [webmPreset, setWebmPreset] = useState<string>('Custom');
   const [webmFps, setWebmFps] = useState(30);
   const [webmQuality, setWebmQuality] = useState<VideoQuality>('high');
   // STAGE 3.2: render scale — the highest-leverage speed control. Every
@@ -167,10 +174,24 @@ export function ExportPanel({
     });
     return () => { alive = false; };
   }, []);
-  // Custom resolution state — synced from preset dropdown, editable when preset = 'Custom'
-  const [webmCustomWidth, setWebmCustomWidth] = useState(1920);
-  const [webmCustomHeight, setWebmCustomHeight] = useState(1080);
+  // Custom resolution state — synced from preset dropdown, editable when preset = 'Custom'.
+  // Lazy-initialized from canvasSettings (not hardcoded) so export resolution
+  // matches the live canvas by default. See webmPreset comment above.
+  const [webmCustomWidth, setWebmCustomWidth] = useState(() => canvasSettings.width || 1920);
+  const [webmCustomHeight, setWebmCustomHeight] = useState(() => canvasSettings.height || 1080);
   const [webmAspectLocked, setWebmAspectLocked] = useState(true);
+
+  // One-tap resync if the user changes Canvas Settings after opening the
+  // Export panel, or wants to snap back after picking a named preset —
+  // mirrors the existing "Match source" affordance for uploaded media below.
+  const handleMatchCanvasResolution = () => {
+    const w = Math.max(2, Math.min(7680, Math.round(canvasSettings.width / 2) * 2));
+    const h = Math.max(2, Math.min(4320, Math.round(canvasSettings.height / 2) * 2));
+    setWebmCustomWidth(w);
+    setWebmCustomHeight(h);
+    setWebmPreset('Custom');
+    toast.success(`Export resolution matched to canvas: ${w}×${h}`);
+  };
 
   
   // Code settings
@@ -925,7 +946,16 @@ ${colorInterpExpanded}
 
             {/* Resolution preset */}
             <div className="space-y-2">
-              <Label>Resolution</Label>
+              <div className="flex items-center justify-between">
+                <Label>Resolution</Label>
+                <button
+                  onClick={handleMatchCanvasResolution}
+                  className="text-[10px] text-[#51a2ff] hover:text-[#7cb8ff] transition-colors"
+                  title={`Match export resolution to canvas (${canvasSettings.width}×${canvasSettings.height})`}
+                >
+                  Match canvas ({canvasSettings.width}×{canvasSettings.height})
+                </button>
+              </div>
               <SelectWrapper
                 value={webmPreset}
                 onValueChange={handleWebmPresetChange}
