@@ -85,12 +85,19 @@ export default defineConfig({
     minify: 'terser',
     terserOptions: {
       compress: {
-        drop_console: true, // Remove verbose console logs in production
-        // PATCHED HIGH-06: console.warn intentionally kept — silencing it suppresses
-        // WebGL context errors, Three.js deprecation notices, and shader compile
-        // warnings that are critical for debugging production issues.
-        // Only drop the truly verbose logging calls.
-        pure_funcs: ['console.debug', 'console.log', 'console.info'],
+        // BUG FIX: `drop_console: true` strips every console.* call
+        // unconditionally, regardless of what's listed in pure_funcs below.
+        // The previous config here had a comment claiming "console.warn
+        // intentionally kept" via pure_funcs, but pure_funcs doesn't grant
+        // that protection — drop_console overrides it. Verified empirically:
+        // every [BLENDCRAFT ...] diagnostic (bitrate mismatches, worker
+        // encode fallback reasons, encoder output) was silently absent from
+        // the actual built bundle. That made every field test blind — no
+        // console evidence was ever reaching production regardless of what
+        // got logged. Only the genuinely verbose calls are dropped now;
+        // warn/error/info survive.
+        drop_console: false,
+        pure_funcs: ['console.debug', 'console.log'],
       },
     },
     // Increase chunk size warning limit for complex app
