@@ -40,6 +40,19 @@ export interface CanvasSourceConfigInput {
   container: MediabunnyContainer;
   bitrate: number;
   keyFrameIntervalSeconds?: number;
+  /**
+   * WebM/VP9 only. Defaults to 'realtime' (unchanged behavior for standard
+   * tiers). Should be 'quality' for any tier that also forces a short/full
+   * -intra keyFrameIntervalSeconds — 'realtime' mode's simpler, faster rate
+   * control fighting a forced all-keyframe pattern at very high bitrate is
+   * the likely cause of a real, reproduced failure: WebM + Sharp Max got
+   * stuck rendering 8/150 frames for 2+ minutes, never recovered even after
+   * a window-switch (ruling out the page-visibility stall this project has
+   * otherwise been chasing — this is genuinely slow/stuck encoder work, not
+   * a throttling symptom). 'quality' mode is the WebCodecs default and is
+   * what "Sharp Max — master / slow" already promises by name.
+   */
+  latencyMode?: 'quality' | 'realtime';
   onEncodedPacket: (packet: { timestamp: number; duration: number }) => void;
   onEncoderConfig: (config: {
     codec?: string;
@@ -80,7 +93,7 @@ export function buildCanvasSourceConfig(input: CanvasSourceConfigInput) {
     codec: 'vp9' as const,
     bitrate: input.bitrate,
     keyFrameInterval,
-    latencyMode: 'realtime' as const,
+    latencyMode: input.latencyMode ?? 'realtime',
     onEncodedPacket: input.onEncodedPacket,
     onEncoderConfig: (config: Parameters<CanvasSourceConfigInput['onEncoderConfig']>[0]) =>
       input.onEncoderConfig(config),
