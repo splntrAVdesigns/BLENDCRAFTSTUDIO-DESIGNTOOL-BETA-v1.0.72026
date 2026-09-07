@@ -74,6 +74,8 @@ export interface MediabunnyEncodeOptions {
    *  DEFAULT_KEYFRAME_INTERVAL_SECONDS (mediabunnyEncodeShared.ts) if omitted,
    *  applied identically for MP4 and WebM by both encode paths. */
   keyFrameIntervalSeconds?: number;
+  /** WebM/VP9 only — see buildCanvasSourceConfig's doc comment. */
+  latencyMode?: 'quality' | 'realtime';
   signal?: AbortSignal;
   onProgress?: (progress: number, message?: string) => void;
   /** Called once Mediabunny supplies the active browser encoder config. */
@@ -537,6 +539,7 @@ export async function encodeVideoWithMediabunnyMainThread(
       container,
       bitrate,
       keyFrameIntervalSeconds: options.keyFrameIntervalSeconds,
+      latencyMode: options.latencyMode,
       onEncodedPacket,
       onEncoderConfig: (config) =>
         reportEncoderConfig(container === 'mp4' ? 'browser-default' : 'webm-realtime', config),
@@ -671,7 +674,7 @@ async function encodeVideoWithMediabunnyViaWorker(
 ): Promise<MediabunnyEncodeResult> {
   const {
     stagingCanvas, width, height, fps, totalFrames, bitrate, container,
-    drawFrame, signal, onProgress, onEncoderConfig, keyFrameIntervalSeconds,
+    drawFrame, signal, onProgress, onEncoderConfig, keyFrameIntervalSeconds, latencyMode,
   } = options;
 
   throwIfAborted(signal);
@@ -714,7 +717,7 @@ async function encodeVideoWithMediabunnyViaWorker(
       worker.removeEventListener('message', onMessage);
       reject(new WorkerEncodeInitError(`Worker failed to start: ${event.message || 'unknown error'}`));
     }, { once: true });
-    worker.postMessage({ type: 'init', container, width, height, fps, bitrate, keyFrameIntervalSeconds });
+    worker.postMessage({ type: 'init', container, width, height, fps, bitrate, keyFrameIntervalSeconds, latencyMode });
   }).catch((error) => {
     teardown();
     throw error;
