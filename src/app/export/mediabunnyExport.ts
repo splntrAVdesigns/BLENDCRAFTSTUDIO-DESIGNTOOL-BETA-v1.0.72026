@@ -37,7 +37,6 @@ import {
   BufferTarget,
   CanvasSource,
   canEncodeVideo,
-  type VideoCodec,
 } from 'mediabunny';
 import {
   certifyExportTimeline,
@@ -45,8 +44,13 @@ import {
   type ExportTimelineFrameCertification,
   type RenderedTimelineFrameState,
 } from '../utils/exportTimelineCertification';
+import {
+  buildCanvasSourceConfig,
+  mediaCodecFor,
+  type MediabunnyContainer,
+} from './mediabunnyEncodeShared';
 
-export type MediabunnyContainer = 'mp4' | 'webm';
+export type { MediabunnyContainer };
 
 export interface MediabunnyEncodeOptions {
   /** Canvas Mediabunny reads pixels from on each add() call. Caller is
@@ -66,7 +70,9 @@ export interface MediabunnyEncodeOptions {
    * the returned promise) before resolving.
    */
   drawFrame: (frameIndex: number, timeSeconds: number) => Promise<RenderedTimelineFrameState | void> | RenderedTimelineFrameState | void;
-  /** Maximum seconds between keyframes. Mediabunny defaults to 2s if omitted. */
+  /** Maximum seconds between keyframes. Defaults to
+   *  DEFAULT_KEYFRAME_INTERVAL_SECONDS (mediabunnyEncodeShared.ts) if omitted,
+   *  applied identically for MP4 and WebM by both encode paths. */
   keyFrameIntervalSeconds?: number;
   signal?: AbortSignal;
   onProgress?: (progress: number, message?: string) => void;
@@ -118,6 +124,57 @@ export function clearObsoleteH264PerformanceHistory(): void {
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException('Export cancelled.', 'AbortError');
+}
+
+/**
+ * Thrown only when the worker-based encode path fails during its own setup,
+ * before any frame has been submitted to it. The public dispatcher
+ * (`encodeVideoWithMediabunny`) treats this specific error as safe to fall
+ * back from — nothing has happened yet that a retry on the main thread
+ * would duplicate or conflict with. Any other error from the worker path
+ * (i.e. anything after `handleInit` succeeds) propagates as a real failure,
+ * exactly like a main-thread encode error would — silently restarting an
+ * export that's already partway through would waste the user's time and
+ * could double-submit work.
+ */
+class WorkerEncodeInitError extends Error {}
+
+/** Diagnostic only — see the call sites in both encode paths. Shared so the
+ *  threshold and message can't drift between the two paths. */
+function verifyEncodedBitrate(params: {
+  buffer: ArrayBuffer;
+  requestedBitrate: number;
+  totalFrames: number;
+  fps: number;
+  width: number;
+  height: number;
+  container: MediabunnyContainer;
+}): void {
+  const { buffer, requestedBitrate, totalFrames, fps, width, height, container } = params;
+  const actualDurationSeconds = totalFrames / fps;
+  const actualBitrate = actualDurationSeconds > 0
+    ? Math.round((buffer.byteLength * 8) / actualDurationSeconds)
+    : 0;
+  if (actualBitrate > 0 && actualBitrate < requestedBitrate * 0.85) {
+    console.warn(
+      `[BLENDCRAFT export] Encoded bitrate (${(actualBitrate / 1_000_000).toFixed(1)} Mbps) is ` +
+      `notably below the requested quality bitrate (${(requestedBitrate / 1_000_000).toFixed(1)} Mbps) for ` +
+      `this ${container.toUpperCase()} export. This can be a legitimately simple scene compressing ` +
+      `well, or the browser's hardware encoder silently capping throughput below what was requested.`,
+      { requestedBitrate, actualBitrate, width, height, container },
+    );
+  }
+}
+
+/** Feature detection for the worker-based encode path. All three of these
+ *  ship together in every browser that supports WebCodecs via Mediabunny in
+ *  the first place, so this is expected to be true almost everywhere the
+ *  app already works — this is a defensive check, not an expected fallback
+ *  trigger in practice. */
+export function isWorkerEncodeSupported(): boolean {
+  return typeof Worker !== 'undefined'
+    && typeof OffscreenCanvas !== 'undefined'
+    && typeof createImageBitmap === 'function';
 }
 
 /**
@@ -310,10 +367,6 @@ async function acquireExportWakeLock(): Promise<{ release: () => void }> {
   }
 }
 
-function mediaCodecFor(container: MediabunnyContainer): VideoCodec {
-  return container === 'mp4' ? 'avc' : 'vp9';
-}
-
 /**
  * Capability probe: can this browser actually encode the given
  * container/codec/resolution/framerate combination right now? Replaces the
@@ -339,13 +392,21 @@ export async function canEncodeContainer(
 }
 
 /**
- * Core Mediabunny encode pass. Container-agnostic — MP4 and WebM take the
- * identical code path, differing only in which OutputFormat/codec gets
- * selected. This symmetry is itself a simplification: the previous code had
- * two largely-parallel ~250-line implementations (exportMP4FromCanvas,
- * exportWebMFromCanvas) that had independently drifted in behavior.
+ * Core Mediabunny encode pass, running entirely on the main thread.
+ * Container-agnostic — MP4 and WebM take the identical code path, differing
+ * only in which OutputFormat/codec gets selected. This symmetry is itself a
+ * simplification: the previous code had two largely-parallel ~250-line
+ * implementations (exportMP4FromCanvas, exportWebMFromCanvas) that had
+ * independently drifted in behavior.
+ *
+ * This is the original, proven implementation — kept as-is and used as the
+ * automatic fallback when the worker-based path (see
+ * `encodeVideoWithMediabunnyViaWorker` below) isn't available, or fails
+ * during its own setup before any frames were submitted. It is also still
+ * the path actually used for encode/finalize when the worker path is
+ * unsupported, so it must keep working on its own.
  */
-export async function encodeVideoWithMediabunny(
+export async function encodeVideoWithMediabunnyMainThread(
   options: MediabunnyEncodeOptions,
 ): Promise<MediabunnyEncodeResult> {
   const {
@@ -422,25 +483,19 @@ export async function encodeVideoWithMediabunny(
       });
     };
 
-    // MP4 mirrors Visual Mood Labs' known-good construction exactly: codec and
-    // bitrate are the only encoder-policy inputs. No hardwareAcceleration or
-    // latencyMode preference is supplied, so the browser selects its stable
-    // quality implementation. WebM retains its established realtime policy.
-    const videoSource = container === 'mp4'
-      ? new CanvasSource(stagingCanvas, {
-          codec: 'avc',
-          bitrate,
-          onEncodedPacket,
-          onEncoderConfig: (config) => reportEncoderConfig('browser-default', config),
-        })
-      : new CanvasSource(stagingCanvas, {
-          codec: 'vp9',
-          bitrate,
-          onEncodedPacket,
-          keyFrameInterval: options.keyFrameIntervalSeconds ?? 2,
-          latencyMode: 'realtime',
-          onEncoderConfig: (config) => reportEncoderConfig('webm-realtime', config),
-        });
+    // Shared with the worker-based path (mediabunnyEncodeShared.ts) so the
+    // two encode paths cannot drift. This also fixes a real bug: the MP4
+    // branch here previously never applied `options.keyFrameIntervalSeconds`
+    // at all (only WebM read it), always silently falling back to
+    // Mediabunny's internal 2s default regardless of what was requested.
+    const videoSource = new CanvasSource(stagingCanvas, buildCanvasSourceConfig({
+      container,
+      bitrate,
+      keyFrameIntervalSeconds: options.keyFrameIntervalSeconds,
+      onEncodedPacket,
+      onEncoderConfig: (config) =>
+        reportEncoderConfig(container === 'mp4' ? 'browser-default' : 'webm-realtime', config),
+    }));
     output.addVideoTrack(videoSource, { frameRate: fps });
     await output.start();
 
@@ -527,19 +582,7 @@ export async function encodeVideoWithMediabunny(
     // file) but quietly undershoot the "Quality" setting the user picked.
     // Logged, not enforced: a legitimate reason for undershoot is that a
     // simple/flat scene compresses far below its bitrate ceiling.
-    const actualDurationSeconds = totalFrames / fps;
-    const actualBitrate = actualDurationSeconds > 0
-      ? Math.round((buffer.byteLength * 8) / actualDurationSeconds)
-      : 0;
-    if (actualBitrate > 0 && actualBitrate < bitrate * 0.85) {
-      console.warn(
-        `[BLENDCRAFT export] Encoded bitrate (${(actualBitrate / 1_000_000).toFixed(1)} Mbps) is ` +
-        `notably below the requested quality bitrate (${(bitrate / 1_000_000).toFixed(1)} Mbps) for ` +
-        `this ${container.toUpperCase()} export. This can be a legitimately simple scene compressing ` +
-        `well, or the browser's hardware encoder silently capping throughput below what was requested.`,
-        { requestedBitrate: bitrate, actualBitrate, width, height, container },
-      );
-    }
+    verifyEncodedBitrate({ buffer, requestedBitrate: bitrate, totalFrames, fps, width, height, container });
 
     const mimeType = container === 'mp4' ? 'video/mp4' : 'video/webm';
     return {
@@ -558,4 +601,238 @@ export async function encodeVideoWithMediabunny(
     audibleKeepAlive.release();
     wakeLock.release();
   }
+}
+
+/**
+ * Same render+encode contract as the main-thread path above, except the
+ * `CanvasSource`/`VideoEncoder`/`Output.finalize()` machinery runs inside a
+ * dedicated Worker (`mediabunnyEncodeWorker.ts`) instead of on the main
+ * thread. See that file's header comment for the full rationale — in short,
+ * this is the fix for the stall that survived both the rAF→setInterval swap
+ * and the audible-tab keep-alive: those mitigations kept the main thread's
+ * own timers alive, but `output.finalize()` itself still runs on the main
+ * thread in that path, and the stall persisted through window-switch tests
+ * even with both mitigations active. Moving finalize into a Worker removes
+ * it from the main document's page-visibility-gated execution entirely.
+ *
+ * WebGL rendering is untouched — `drawFrame` still runs on the main thread
+ * exactly as before, paced by the same `runFrameLoopViaRAF`. Only the
+ * already-rendered pixels are handed off, once per frame, as a transferred
+ * `ImageBitmap`.
+ */
+async function encodeVideoWithMediabunnyViaWorker(
+  options: MediabunnyEncodeOptions,
+): Promise<MediabunnyEncodeResult> {
+  const {
+    stagingCanvas, width, height, fps, totalFrames, bitrate, container,
+    drawFrame, signal, onProgress, onEncoderConfig, keyFrameIntervalSeconds,
+  } = options;
+
+  throwIfAborted(signal);
+  if (totalFrames <= 0) throw new Error(`totalFrames must be positive (got ${totalFrames}).`);
+  if (stagingCanvas.width !== width || stagingCanvas.height !== height) {
+    throw new Error(
+      `stagingCanvas is ${stagingCanvas.width}\u00d7${stagingCanvas.height} but encode was requested at ${width}\u00d7${height} — caller must size the canvas before calling.`
+    );
+  }
+  if (container === 'mp4') clearObsoleteH264PerformanceHistory();
+
+  const worker = new Worker(new URL('./mediabunnyEncodeWorker.ts', import.meta.url), { type: 'module' });
+  const wakeLock = await acquireExportWakeLock();
+  const audibleKeepAlive = await acquireExportAudibleKeepAlive();
+
+  const teardown = () => {
+    worker.terminate();
+    wakeLock.release();
+    audibleKeepAlive.release();
+  };
+
+  // Init handshake happens before any frame is rendered or sent. A failure
+  // here throws WorkerEncodeInitError, which the public dispatcher below
+  // treats as safe to fall back from onto the main-thread path.
+  await new Promise<void>((resolve, reject) => {
+    const onMessage = (event: MessageEvent<{ type: string; message?: string; stage?: string }>) => {
+      const msg = event.data;
+      if (msg.type === 'ready') {
+        worker.removeEventListener('message', onMessage);
+        resolve();
+      } else if (msg.type === 'error') {
+        worker.removeEventListener('message', onMessage);
+        reject(new WorkerEncodeInitError(`Worker init failed at stage "${msg.stage}": ${msg.message}`));
+      }
+    };
+    worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', (event) => {
+      worker.removeEventListener('message', onMessage);
+      reject(new WorkerEncodeInitError(`Worker failed to start: ${event.message || 'unknown error'}`));
+    }, { once: true });
+    worker.postMessage({ type: 'init', container, width, height, fps, bitrate, keyFrameIntervalSeconds });
+  }).catch((error) => {
+    teardown();
+    throw error;
+  });
+
+  // Past this point, frames may be submitted — any failure propagates as a
+  // genuine encode failure rather than triggering a silent restart.
+  const stopKeepAlive = startCompositorKeepAlive();
+  let renderMs = 0;
+  let encodeMs = 0;
+  const timelineFrames: ExportTimelineFrameCertification[] = [];
+  const frameDurationSeconds = 1 / fps;
+  const progressStep = Math.max(1, Math.floor(totalFrames / 20));
+
+  const pendingAcks = new Map<number, { resolve: () => void; reject: (error: unknown) => void }>();
+
+  const persistentHandler = (event: MessageEvent<{
+    type: string; frameIndex?: number; message?: string; stage?: string;
+    config?: { codec?: string; hardwareAcceleration?: string; width?: number; height?: number; latencyMode?: 'quality' | 'realtime' };
+  }>) => {
+    const msg = event.data;
+    if (msg.type === 'frame-ack' && msg.frameIndex !== undefined) {
+      const pending = pendingAcks.get(msg.frameIndex);
+      if (pending) { pendingAcks.delete(msg.frameIndex); pending.resolve(); }
+    } else if (msg.type === 'encoder-config' && msg.config) {
+      onEncoderConfig?.({
+        codec: msg.config.codec ?? mediaCodecFor(container),
+        hardwareAcceleration: msg.config.hardwareAcceleration,
+        width: msg.config.width ?? width,
+        height: msg.config.height ?? height,
+        latencyMode: msg.config.latencyMode,
+        policy: container === 'mp4' ? 'browser-default' : 'webm-realtime',
+      });
+    } else if (msg.type === 'error') {
+      const error = new Error(`Worker encode failed at stage "${msg.stage}": ${msg.message}`);
+      // Reject whatever frame is currently in flight, if any — frames are
+      // submitted and acked strictly one at a time (genuine backpressure),
+      // so there is at most one pending entry to fail here.
+      for (const [, pending] of pendingAcks) pending.reject(error);
+      pendingAcks.clear();
+    }
+  };
+  worker.addEventListener('message', persistentHandler);
+
+  try {
+    await runFrameLoopViaRAF({
+      totalFrames,
+      fps,
+      signal,
+      onFrame: async (i, t) => {
+        const renderStart = performance.now();
+        const rendered = await drawFrame(i, t);
+        renderMs += performance.now() - renderStart;
+
+        throwIfAborted(signal);
+        const encodeStart = performance.now();
+
+        // colorSpaceConversion: 'none' is required here — see the color
+        // contract note in mediabunnyEncodeWorker.ts's file header. This
+        // must match the worker's OffscreenCanvas 2D context colorSpace.
+        const bitmap = await createImageBitmap(stagingCanvas, { colorSpaceConversion: 'none' });
+        await new Promise<void>((resolve, reject) => {
+          pendingAcks.set(i, { resolve, reject });
+          worker.postMessage(
+            { type: 'frame', frameIndex: i, timestamp: t, duration: frameDurationSeconds, bitmap },
+            [bitmap],
+          );
+        });
+
+        timelineFrames.push({
+          frameIndex: i,
+          requestedTimestamp: t,
+          renderedDeterministicTime: rendered?.renderedDeterministicTime ?? Number.NaN,
+          encodedTimestamp: t,
+          encodedDuration: frameDurationSeconds,
+          layers: rendered?.layers ?? [],
+          motion: rendered?.motion ?? [],
+        });
+
+        encodeMs += performance.now() - encodeStart;
+
+        if (i % progressStep === 0 || i === totalFrames - 1) {
+          onProgress?.(5 + ((i + 1) / totalFrames) * 85, `Frame ${i + 1}/${totalFrames}`);
+        }
+      },
+    });
+
+    throwIfAborted(signal);
+    onProgress?.(91, `Draining encoder and finalizing ${container.toUpperCase()}...`);
+    const finalizeStart = performance.now();
+    const finalizeTimer = setInterval(() => {
+      const elapsed = (performance.now() - finalizeStart) / 1000;
+      onProgress?.(91, `Finalizing ${container.toUpperCase()} · ${Math.floor(elapsed)}s elapsed`);
+    }, 1000);
+
+    const { buffer, outputPackets } = await new Promise<{ buffer: ArrayBuffer; outputPackets: number }>((resolve, reject) => {
+      const onResult = (event: MessageEvent<{ type: string; buffer?: ArrayBuffer; outputPackets?: number; message?: string }>) => {
+        const msg = event.data;
+        if (msg.type === 'result' && msg.buffer) {
+          worker.removeEventListener('message', onResult);
+          resolve({ buffer: msg.buffer, outputPackets: msg.outputPackets ?? 0 });
+        } else if (msg.type === 'error') {
+          worker.removeEventListener('message', onResult);
+          reject(new Error(`Worker finalize failed: ${msg.message}`));
+        }
+      };
+      worker.addEventListener('message', onResult);
+      worker.postMessage({ type: 'finalize' });
+    });
+    clearInterval(finalizeTimer);
+    const finalizeMs = performance.now() - finalizeStart;
+
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) {
+      throw new Error(`Worker finalized without producing an output buffer (${container}).`);
+    }
+
+    const timelineCertification = certifyExportTimeline(timelineFrames, fps, totalFrames);
+    if (!timelineCertification.passed) {
+      console.error('[BLENDCRAFT export] Timeline certification failed:', timelineCertification);
+    }
+
+    verifyEncodedBitrate({ buffer, requestedBitrate: bitrate, totalFrames, fps, width, height, container });
+    console.info('[BLENDCRAFT encoder output:worker]', { outputPackets, container, finalizeMs });
+
+    const mimeType = container === 'mp4' ? 'video/mp4' : 'video/webm';
+    return {
+      blob: new Blob([buffer], { type: mimeType }),
+      container,
+      mimeType,
+      renderMs,
+      encodeMs,
+      finalizeMs,
+      timelineCertification,
+    };
+  } finally {
+    worker.removeEventListener('message', persistentHandler);
+    stopKeepAlive();
+    teardown();
+  }
+}
+
+/**
+ * Public entry point. Tries the worker-based encode path first (immune to
+ * the main document's page-visibility throttling that was causing the
+ * "must switch windows to unstick" stall); falls back automatically to the
+ * original main-thread path if the worker path isn't supported in this
+ * browser, or fails during its own setup before any frame was submitted.
+ * A failure *after* frames have been submitted propagates as a real error
+ * instead of silently retrying — see WorkerEncodeInitError's doc comment.
+ */
+export async function encodeVideoWithMediabunny(
+  options: MediabunnyEncodeOptions,
+): Promise<MediabunnyEncodeResult> {
+  if (isWorkerEncodeSupported()) {
+    try {
+      return await encodeVideoWithMediabunnyViaWorker(options);
+    } catch (error) {
+      if (error instanceof WorkerEncodeInitError) {
+        if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
+          console.warn('[BLENDCRAFT export:mediabunny] Worker encode path unavailable, falling back to main thread:', error);
+        }
+        // fall through to main-thread path below
+      } else {
+        throw error;
+      }
+    }
+  }
+  return encodeVideoWithMediabunnyMainThread(options);
 }
