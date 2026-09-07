@@ -368,6 +368,50 @@ async function acquireExportWakeLock(): Promise<{ release: () => void }> {
 }
 
 /**
+ * Holds a Web Lock for the duration of encode + finalize.
+ *
+ * Confirmed directly in Chromium's own source (components/performance_manager
+ * /freezing/cannot_freeze_reason.cc): `kHoldingWebLock` and
+ * `kHoldingIndexedDBLock` are explicit, first-class exemptions from page
+ * freezing — the same list `kAudible` (see acquireExportAudibleKeepAlive
+ * above) belongs to. Also directly relevant: Chromium's own freezing intent
+ * doc states plainly that "PostMessage may not be delivered right away
+ * anymore" once a page's task queues are frozen — which is exactly the
+ * mechanism that would explain the worker completing successfully (it does
+ * — see the worker's own diagnostics) while the main thread still doesn't
+ * act on the result until the tab regains visibility. This is a second,
+ * independent, low-cost exemption stacked alongside the audio one rather
+ * than a replacement for it — the two together are more likely to satisfy
+ * whichever heuristic gate is actually stalling the hand-off than either
+ * alone, and neither one being confirmed sufficient on its own doesn't
+ * mean neither is doing anything.
+ */
+async function acquireExportWebLockKeepAlive(): Promise<{ release: () => void }> {
+  const locks = (navigator as Navigator & {
+    locks?: { request(name: string, callback: () => Promise<void>): Promise<void> };
+  }).locks;
+  if (!locks) return { release: () => {} };
+  try {
+    let releaseLock: () => void = () => {};
+    const held = new Promise<void>((resolve) => { releaseLock = resolve; });
+    // Intentionally not awaited — this promise resolves only once the lock
+    // is released below; awaiting it here would deadlock the export.
+    const lockPromise = locks.request('blendcraft-export-keepalive', () => held);
+    return {
+      release: () => {
+        releaseLock();
+        lockPromise.catch(() => {});
+      },
+    };
+  } catch (error) {
+    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
+      console.warn('[BLENDCRAFT export:mediabunny] Web Lock keep-alive unavailable:', error);
+    }
+    return { release: () => {} };
+  }
+}
+
+/**
  * Capability probe: can this browser actually encode the given
  * container/codec/resolution/framerate combination right now? Replaces the
  * hand-rolled AVC level-table walk and the WebM VP9/VP8 candidate probing —
@@ -465,6 +509,7 @@ export async function encodeVideoWithMediabunnyMainThread(
   // Lock still earns its keep for the (still visible, unattended) long-idle
   // case by preventing the OS from dimming/sleeping the display.
   const audibleKeepAlive = await acquireExportAudibleKeepAlive();
+  const webLockKeepAlive = await acquireExportWebLockKeepAlive();
 
   try {
     if (container === 'mp4') clearObsoleteH264PerformanceHistory();
@@ -599,6 +644,7 @@ export async function encodeVideoWithMediabunnyMainThread(
     if (encoderProgress.phase !== 'completed') encoderProgress.phase = signal?.aborted ? 'cancelled' : 'failed';
     stopKeepAlive();
     audibleKeepAlive.release();
+    webLockKeepAlive.release();
     wakeLock.release();
   }
 }
@@ -640,11 +686,13 @@ async function encodeVideoWithMediabunnyViaWorker(
   const worker = new Worker(new URL('./mediabunnyEncodeWorker.ts', import.meta.url), { type: 'module' });
   const wakeLock = await acquireExportWakeLock();
   const audibleKeepAlive = await acquireExportAudibleKeepAlive();
+  const webLockKeepAlive = await acquireExportWebLockKeepAlive();
 
   const teardown = () => {
     worker.terminate();
     wakeLock.release();
     audibleKeepAlive.release();
+    webLockKeepAlive.release();
   };
 
   // Init handshake happens before any frame is rendered or sent. A failure
