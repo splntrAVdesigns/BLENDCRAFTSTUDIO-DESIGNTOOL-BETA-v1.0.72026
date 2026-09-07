@@ -29,30 +29,28 @@
  * pipeline and leaves the just-stabilized color-accurate render path
  * completely untouched.
  *
- * COLOR CONTRACT
+ * COLOR CONTRACT — UPDATE: FIX DID NOT TAKE, ROOT CAUSE NOW UNDERSTOOD
  * ----------------
- * CONFIRMED BUG, FOUND AND FIXED: the first version of this file drew each
- * frame onto a plain 2D `OffscreenCanvas` (`ctx.drawImage(bitmap, 0, 0)`)
- * and let Mediabunny's `CanvasSource` sample that canvas directly. Verified
- * with `ffprobe` on a real export: the resulting file was tagged
- * `color_primaries=smpte170m` while `color_transfer` stayed `bt709` — an
- * inconsistent pairing, and a real color shift versus the main-thread path's
- * output, which is consistently tagged `bt709`/`bt709`/`bt709`. Root cause:
- * `CanvasSource.add()` internally does `new VideoSample(canvas, {...})`
- * with no explicit color space, so the browser has to infer one. A 2D
- * canvas apparently doesn't carry strong enough "this is sRGB/Rec709
- * content" signal for that inference, unlike whatever canvas the
- * main-thread path was already sampling from — so it silently fell back to
- * a default.
+ * The explicit `colorSpace: bt709` passed into `VideoSample` below was
+ * intended to fix a smpte170m/bt709 tagging bug (see prior investigation).
+ * Verified via the app's own `verifyExportedFrameFidelity()` check reading
+ * the actual decoded file: it did NOT change the container's tagged color
+ * space, which is still `{primaries: 'smpte170m', matrix: 'smpte170m'}`.
  *
- * Fixed by not going through a 2D canvas at all: each received `ImageBitmap`
- * is wrapped directly in a `VideoSample` with an explicit
- * `colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709',
- * fullRange: false }` (matching the main-thread path's actual output,
- * confirmed via `ffprobe`), then handed to a `VideoSampleSource` instead of
- * a `CanvasSource`. Per the WebCodecs spec, an explicit `colorSpace` in a
- * `VideoFrame`'s init always wins over inference — this removes the
- * ambiguity instead of trying to work around it.
+ * Root cause, checked against Mediabunny's actual type surface: there is no
+ * `colorSpace` field anywhere on `VideoEncodingConfig` or
+ * `VideoEncodingAdditionalOptions` — the encoder-level config Mediabunny
+ * passes to the browser's native `VideoEncoder`. A per-sample `colorSpace`
+ * on an input `VideoFrame`/`VideoSample` affects color *management* during
+ * encoding, not the VUI color-description fields the H.264 encoder itself
+ * writes into the output bitstream — those come from the browser's own
+ * encoder implementation, which isn't configurable through this API surface
+ * at all. This looks like a real gap in Chromium's H.264 VideoEncoder
+ * implementation, not something fixable from application code.
+ *
+ * This is being left as-is (not reverted) because it's harmless and, per
+ * direct instruction, no longer the active priority — the remaining
+ * complaint is specifically sharpness, not color.
  */
 
 import {
@@ -105,6 +103,7 @@ export type OutboundMessage =
       buffer: ArrayBuffer;
       outputPackets: number;
       lastPacketTimestamp: number | null;
+      workerFinalizeMs: number;
     }
   | { type: 'error'; message: string; stage: string };
 
@@ -183,13 +182,25 @@ async function handleFrame(msg: FrameMessage): Promise<void> {
 
 async function handleFinalize(): Promise<void> {
   if (!output || !target) throw new Error('Worker received finalize before init completed.');
+  // Measured entirely inside the worker, independent of anything the main
+  // thread observes. This is the one piece of evidence still missing: does
+  // output.finalize() itself take a long time *inside the worker* (meaning
+  // the worker's own execution is being throttled too, not just message
+  // delivery back to the main thread), or does it resolve quickly here and
+  // the delay is entirely in the main thread receiving/acting on the result
+  // message? Compare this to the main thread's own finalizeMs next time —
+  // if they're close, the worker itself is being throttled despite being a
+  // worker; if this is small and the main-thread-observed time is large,
+  // it's specifically postMessage delivery being held up.
+  const workerFinalizeStart = performance.now();
   await output.finalize();
+  const workerFinalizeMs = performance.now() - workerFinalizeStart;
   const buffer = target.buffer;
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) {
     throw new Error('Worker finalized without producing an output buffer.');
   }
   post(
-    { type: 'result', buffer, outputPackets, lastPacketTimestamp },
+    { type: 'result', buffer, outputPackets, lastPacketTimestamp, workerFinalizeMs },
     [buffer],
   );
 }
