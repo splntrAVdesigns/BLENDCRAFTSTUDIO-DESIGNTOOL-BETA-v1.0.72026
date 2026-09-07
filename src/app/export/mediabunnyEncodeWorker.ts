@@ -71,6 +71,7 @@ type InitMessage = {
   fps: number;
   bitrate: number;
   keyFrameIntervalSeconds?: number;
+  latencyMode?: 'quality' | 'realtime';
 };
 
 type FrameMessage = {
@@ -131,6 +132,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
     container: msg.container,
     bitrate: msg.bitrate,
     keyFrameIntervalSeconds: msg.keyFrameIntervalSeconds,
+    latencyMode: msg.latencyMode,
     onEncodedPacket: (packet) => {
       outputPackets++;
       lastPacketTimestamp = packet.timestamp;
