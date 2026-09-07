@@ -186,24 +186,92 @@ function runFrameLoopViaRAF(params: {
 }
 
 /**
- * Keeps a minimal, no-op requestAnimationFrame loop alive during
- * `output.finalize()` specifically — the one phase of the export that has
- * no per-frame work of its own to ride on. The frame production loop above
- * is now genuinely rAF-paced end to end, so this is only needed for the
- * single-await finalize tail where nothing else is ticking the compositor.
+ * Keeps a minimal, no-op tick alive during `output.finalize()` specifically
+ * — the one phase of the export that has no per-frame work of its own to
+ * ride on. The frame production loop above is genuinely rAF-paced end to
+ * end, so this is only needed for the single-await finalize tail where
+ * nothing else is ticking.
+ *
+ * Uses setInterval, not requestAnimationFrame. Confirmed against Chromium's
+ * own background-tab documentation: rAF callbacks are not invoked at all
+ * while a page is hidden — not throttled, simply never fired. A rAF-based
+ * keep-alive here does nothing during exactly the scenario ("user switched
+ * windows while finalize() was pending") it exists to cover. setInterval
+ * continues to fire even in a hidden tab (clamped to ~1/sec after
+ * prolonged backgrounding, per Chromium's budget-based timer throttling),
+ * which is what actually keeps this tail phase making progress.
  */
 function startCompositorKeepAlive(): () => void {
-  let handle: number | null = null;
   let stopped = false;
-  const tick = () => {
-    if (stopped) return;
-    handle = requestAnimationFrame(tick);
-  };
-  handle = requestAnimationFrame(tick);
+  const intervalId = setInterval(() => {
+    if (stopped) clearInterval(intervalId);
+  }, 200);
   return () => {
     stopped = true;
-    if (handle !== null) cancelAnimationFrame(handle);
+    clearInterval(intervalId);
   };
+}
+
+/**
+ * Plays one genuinely audible (not silent, not muted) low-level tone for the
+ * duration of encode + finalize. This is the actual Chromium mechanism that
+ * exempts a tab from background timer/rAF throttling — confirmed via
+ * Chromium's own background-tab throttling documentation: "Applications
+ * playing audio are considered foreground and aren't throttled," and
+ * explicitly, "Silent audio streams do not grant exemptions." Screen Wake
+ * Lock (see acquireExportWakeLock below) does not cover this: Wake Lock is
+ * released automatically the moment the tab is hidden, which is exactly the
+ * scenario this needs to survive.
+ *
+ * Gain is set just above Chromium's "IsAudible" detection floor and the
+ * frequency is set low (near the bottom of human hearing) specifically to
+ * minimize how noticeable this is, while still being a real non-zero signal
+ * the browser's audio pipeline classifies as active playback. Started from
+ * the same call stack as the user's Export click (via encodeVideoWithMediabunny),
+ * satisfying the autoplay-gesture requirement for AudioContext.
+ */
+async function acquireExportAudibleKeepAlive(): Promise<{ release: () => void }> {
+  try {
+    const AudioContextCtor = (window as unknown as {
+      AudioContext?: typeof AudioContext;
+      webkitAudioContext?: typeof AudioContext;
+    }).AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) return { release: () => {} };
+
+    const ctx = new AudioContextCtor();
+    if (ctx.state === 'suspended') {
+      await ctx.resume().catch(() => {});
+    }
+
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    gain.gain.value = 0.008; // ~-42dBFS: well above Chromium's audibility floor, quiet in practice
+    oscillator.frequency.value = 20; // bottom edge of human hearing
+    oscillator.connect(gain);
+    gain.connect(ctx.destination);
+    oscillator.start();
+
+    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
+      console.info('[BLENDCRAFT export:mediabunny] Audible keep-alive active (background-tab throttling exemption).');
+    }
+
+    return {
+      release: () => {
+        try { oscillator.stop(); } catch { /* already stopped */ }
+        try { oscillator.disconnect(); } catch { /* already disconnected */ }
+        try { gain.disconnect(); } catch { /* already disconnected */ }
+        ctx.close().catch(() => {});
+      },
+    };
+  } catch (error) {
+    // Autoplay policy can still refuse this in some contexts (e.g. no user
+    // activation reachable, permissions policy). Export must proceed
+    // regardless — this is a mitigation, not a requirement.
+    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
+      console.warn('[BLENDCRAFT export:mediabunny] Audible keep-alive unavailable:', error);
+    }
+    return { release: () => {} };
+  }
 }
 
 /**
@@ -329,6 +397,13 @@ export async function encodeVideoWithMediabunny(
     lastPacketAt = performance.now();
   };
   const wakeLock = await acquireExportWakeLock();
+  // See acquireExportAudibleKeepAlive() doc comment: this is the mitigation
+  // that actually survives the user switching windows/tabs mid-export,
+  // which Wake Lock does not (Wake Lock auto-releases the instant the page
+  // is hidden). Kept alongside Wake Lock rather than replacing it — Wake
+  // Lock still earns its keep for the (still visible, unattended) long-idle
+  // case by preventing the OS from dimming/sleeping the display.
+  const audibleKeepAlive = await acquireExportAudibleKeepAlive();
 
   try {
     if (container === 'mp4') clearObsoleteH264PerformanceHistory();
@@ -446,6 +521,26 @@ export async function encodeVideoWithMediabunny(
       throw new Error(`Mediabunny finalized without producing an output buffer (${container}).`);
     }
 
+    // Diagnostic only — some Chromium hardware H.264 encoders silently cap
+    // actual throughput well below a requested bitrate rather than erroring,
+    // which would look identical to a correct export (no thrown error, valid
+    // file) but quietly undershoot the "Quality" setting the user picked.
+    // Logged, not enforced: a legitimate reason for undershoot is that a
+    // simple/flat scene compresses far below its bitrate ceiling.
+    const actualDurationSeconds = totalFrames / fps;
+    const actualBitrate = actualDurationSeconds > 0
+      ? Math.round((buffer.byteLength * 8) / actualDurationSeconds)
+      : 0;
+    if (actualBitrate > 0 && actualBitrate < bitrate * 0.85) {
+      console.warn(
+        `[BLENDCRAFT export] Encoded bitrate (${(actualBitrate / 1_000_000).toFixed(1)} Mbps) is ` +
+        `notably below the requested quality bitrate (${(bitrate / 1_000_000).toFixed(1)} Mbps) for ` +
+        `this ${container.toUpperCase()} export. This can be a legitimately simple scene compressing ` +
+        `well, or the browser's hardware encoder silently capping throughput below what was requested.`,
+        { requestedBitrate: bitrate, actualBitrate, width, height, container },
+      );
+    }
+
     const mimeType = container === 'mp4' ? 'video/mp4' : 'video/webm';
     return {
       blob: new Blob([buffer], { type: mimeType }),
@@ -460,6 +555,7 @@ export async function encodeVideoWithMediabunny(
     if (finalizationTimer !== undefined) clearInterval(finalizationTimer);
     if (encoderProgress.phase !== 'completed') encoderProgress.phase = signal?.aborted ? 'cancelled' : 'failed';
     stopKeepAlive();
+    audibleKeepAlive.release();
     wakeLock.release();
   }
 }
