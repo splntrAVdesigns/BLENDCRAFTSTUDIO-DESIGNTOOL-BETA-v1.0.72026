@@ -814,12 +814,16 @@ async function encodeVideoWithMediabunnyViaWorker(
       onProgress?.(91, `Finalizing ${container.toUpperCase()} · ${Math.floor(elapsed)}s elapsed`);
     }, 1000);
 
-    const { buffer, outputPackets } = await new Promise<{ buffer: ArrayBuffer; outputPackets: number }>((resolve, reject) => {
-      const onResult = (event: MessageEvent<{ type: string; buffer?: ArrayBuffer; outputPackets?: number; message?: string }>) => {
+    const { buffer, outputPackets, workerFinalizeMs } = await new Promise<{
+      buffer: ArrayBuffer; outputPackets: number; workerFinalizeMs: number;
+    }>((resolve, reject) => {
+      const onResult = (event: MessageEvent<{
+        type: string; buffer?: ArrayBuffer; outputPackets?: number; workerFinalizeMs?: number; message?: string;
+      }>) => {
         const msg = event.data;
         if (msg.type === 'result' && msg.buffer) {
           worker.removeEventListener('message', onResult);
-          resolve({ buffer: msg.buffer, outputPackets: msg.outputPackets ?? 0 });
+          resolve({ buffer: msg.buffer, outputPackets: msg.outputPackets ?? 0, workerFinalizeMs: msg.workerFinalizeMs ?? -1 });
         } else if (msg.type === 'error') {
           worker.removeEventListener('message', onResult);
           reject(new Error(`Worker finalize failed: ${msg.message}`));
@@ -841,7 +845,16 @@ async function encodeVideoWithMediabunnyViaWorker(
     }
 
     verifyEncodedBitrate({ buffer, requestedBitrate: bitrate, totalFrames, fps, width, height, container });
-    console.info('[BLENDCRAFT encoder output:worker]', { outputPackets, container, finalizeMs });
+    // Always logged, not DEV-gated — this is the specific comparison that
+    // resolves whether the stall lives inside output.finalize() itself
+    // (workerFinalizeMs close to finalizeMs) or in postMessage delivery back
+    // to a throttled/frozen main thread (workerFinalizeMs << finalizeMs).
+    console.info('[BLENDCRAFT encoder output:worker]', {
+      outputPackets, container,
+      finalizeMs_mainThreadObserved: finalizeMs,
+      finalizeMs_workerInternal: workerFinalizeMs,
+      postMessageDeliveryGapMs: finalizeMs - workerFinalizeMs,
+    });
 
     const mimeType = container === 'mp4' ? 'video/mp4' : 'video/webm';
     return {
