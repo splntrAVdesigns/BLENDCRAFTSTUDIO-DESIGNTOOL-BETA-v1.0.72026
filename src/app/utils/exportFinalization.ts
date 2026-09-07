@@ -35,15 +35,42 @@ export function getExportFinalizationProgress(stage: ExportFinalizationStage): E
   return EXPORT_FINALIZATION_PROGRESS[stage];
 }
 
-function nextAnimationFrame(): Promise<void> {
-  if (typeof requestAnimationFrame !== 'function') {
-    return new Promise((resolve) => setTimeout(resolve, 0));
-  }
-  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
-}
-
 function nextMacrotask(delayMs = 0): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+/**
+ * Yields to the browser, preferring a real paint (requestAnimationFrame)
+ * but never depending on one resolving.
+ *
+ * Root cause of the "export won't bounce a file on its own" stall: this
+ * function previously awaited requestAnimationFrame() only. Per Chromium's
+ * own background-tab documentation, rAF callbacks are not throttled while a
+ * page is hidden/backgrounded — they are never invoked at all. If the user
+ * switched away from the tab at any point while this promise was pending
+ * (which gates the actual startDownload() call below), the download would
+ * hang indefinitely until the tab became visible again — exactly the
+ * "switch windows and back" workaround that was being used manually.
+ *
+ * This still uses rAF when available (paint-synced, best behavior while
+ * visible) but races it against a plain setTimeout backstop, which Chromium
+ * *does* continue to fire (clamped, but never fully suspended) even when
+ * the page is hidden. Whichever resolves first wins — visible tabs get the
+ * fast rAF-paced path unchanged, hidden tabs get a guaranteed timeout.
+ */
+function yieldToBrowser(timeoutMs = 50): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => finish());
+    }
+    setTimeout(finish, timeoutMs);
+  });
 }
 
 /**
@@ -54,14 +81,14 @@ function nextMacrotask(delayMs = 0): Promise<void> {
 export async function handoffExportDownload(startDownload: () => void): Promise<number> {
   const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
-  await nextAnimationFrame();
+  await yieldToBrowser();
   await nextMacrotask(0);
   startDownload();
 
   // FileSaver queues an anchor click / browser download. Let that task leave
   // JavaScript before cleanup starts competing for the main thread.
   await nextMacrotask(32);
-  await nextAnimationFrame();
+  await yieldToBrowser();
 
   const endedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
   return endedAt - startedAt;
