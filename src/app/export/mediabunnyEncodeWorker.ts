@@ -31,13 +31,28 @@
  *
  * COLOR CONTRACT
  * ----------------
- * `createImageBitmap()` on the caller side MUST be called with
- * `colorSpaceConversion: 'none'` (see mediabunnyExport.ts) and this worker's
- * OffscreenCanvas 2D context is created with `colorSpace: 'srgb'` to match.
- * Any mismatch here would silently reintroduce the color drift that was
- * already fixed once in the main-thread path — this is the single highest
- * -risk part of this change and should be visually re-verified against the
- * canvas (not just trusted from this comment).
+ * CONFIRMED BUG, FOUND AND FIXED: the first version of this file drew each
+ * frame onto a plain 2D `OffscreenCanvas` (`ctx.drawImage(bitmap, 0, 0)`)
+ * and let Mediabunny's `CanvasSource` sample that canvas directly. Verified
+ * with `ffprobe` on a real export: the resulting file was tagged
+ * `color_primaries=smpte170m` while `color_transfer` stayed `bt709` — an
+ * inconsistent pairing, and a real color shift versus the main-thread path's
+ * output, which is consistently tagged `bt709`/`bt709`/`bt709`. Root cause:
+ * `CanvasSource.add()` internally does `new VideoSample(canvas, {...})`
+ * with no explicit color space, so the browser has to infer one. A 2D
+ * canvas apparently doesn't carry strong enough "this is sRGB/Rec709
+ * content" signal for that inference, unlike whatever canvas the
+ * main-thread path was already sampling from — so it silently fell back to
+ * a default.
+ *
+ * Fixed by not going through a 2D canvas at all: each received `ImageBitmap`
+ * is wrapped directly in a `VideoSample` with an explicit
+ * `colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709',
+ * fullRange: false }` (matching the main-thread path's actual output,
+ * confirmed via `ffprobe`), then handed to a `VideoSampleSource` instead of
+ * a `CanvasSource`. Per the WebCodecs spec, an explicit `colorSpace` in a
+ * `VideoFrame`'s init always wins over inference — this removes the
+ * ambiguity instead of trying to work around it.
  */
 
 import {
@@ -45,7 +60,8 @@ import {
   Mp4OutputFormat,
   WebMOutputFormat,
   BufferTarget,
-  CanvasSource,
+  VideoSampleSource,
+  VideoSample,
 } from 'mediabunny';
 import { buildCanvasSourceConfig, type MediabunnyContainer } from './mediabunnyEncodeShared';
 
@@ -94,9 +110,7 @@ export type OutboundMessage =
 
 let output: Output | null = null;
 let target: BufferTarget | null = null;
-let videoSource: CanvasSource | null = null;
-let offscreen: OffscreenCanvas | null = null;
-let ctx: OffscreenCanvasRenderingContext2D | null = null;
+let videoSource: VideoSampleSource | null = null;
 let outputPackets = 0;
 let lastPacketTimestamp: number | null = null;
 let aborted = false;
@@ -110,12 +124,6 @@ function post(message: OutboundMessage, transfer?: ArrayBuffer[]): void {
 }
 
 async function handleInit(msg: InitMessage): Promise<void> {
-  offscreen = new OffscreenCanvas(msg.width, msg.height);
-  // colorSpace: 'srgb' must match the colorSpaceConversion: 'none' used when
-  // the main thread creates each frame's ImageBitmap — see file header.
-  ctx = offscreen.getContext('2d', { alpha: true, colorSpace: 'srgb' }) as OffscreenCanvasRenderingContext2D | null;
-  if (!ctx) throw new Error('Worker could not acquire a 2D context on its OffscreenCanvas.');
-
   const format = msg.container === 'mp4' ? new Mp4OutputFormat() : new WebMOutputFormat();
   target = new BufferTarget();
   output = new Output({ format, target });
@@ -142,20 +150,34 @@ async function handleInit(msg: InitMessage): Promise<void> {
     },
   });
 
-  videoSource = new CanvasSource(offscreen, config);
+  // buildCanvasSourceConfig() returns a plain VideoEncodingConfig — valid
+  // for VideoSampleSource just as it was for CanvasSource; only the class
+  // that consumes it (and therefore how frames get supplied) differs.
+  videoSource = new VideoSampleSource(config);
   output.addVideoTrack(videoSource, { frameRate: msg.fps });
   await output.start();
   post({ type: 'ready' });
 }
 
 async function handleFrame(msg: FrameMessage): Promise<void> {
-  if (!ctx || !videoSource) throw new Error('Worker received a frame before init completed.');
+  if (!videoSource) throw new Error('Worker received a frame before init completed.');
   if (aborted) { msg.bitmap.close(); return; }
 
-  ctx.drawImage(msg.bitmap, 0, 0);
+  // See file header — explicit colorSpace here is the fix for the
+  // smpte170m/bt709 tagging bug. Values matched to the main-thread path's
+  // actual output via ffprobe, not assumed.
+  const sample = new VideoSample(msg.bitmap, {
+    timestamp: msg.timestamp,
+    duration: msg.duration,
+    colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false },
+  });
   msg.bitmap.close();
-  // The real backpressure barrier — same contract as the main-thread path.
-  await videoSource.add(msg.timestamp, msg.duration);
+  try {
+    // The real backpressure barrier — same contract as the main-thread path.
+    await videoSource.add(sample);
+  } finally {
+    sample.close();
+  }
   post({ type: 'frame-ack', frameIndex: msg.frameIndex });
 }
 
