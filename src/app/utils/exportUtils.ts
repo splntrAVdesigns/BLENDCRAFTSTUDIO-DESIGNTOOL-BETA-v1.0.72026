@@ -152,6 +152,28 @@ export function keyFrameIntervalSecondsForQuality(quality: VideoQuality, fps: nu
   }
 }
 
+/**
+ * WebM/VP9 only (see buildCanvasSourceConfig's doc comment for the full
+ * rationale). 'realtime' stays the default for standard/high — unchanged,
+ * fast-preview behavior. Any tier that also pushes keyFrameIntervalSeconds
+ * down toward full-intra needs 'quality' mode instead: forcing a
+ * simple/fast rate-control mode into an all-keyframe pattern at a very
+ * high bitrate is the likely cause of a real, reproduced failure (WebM +
+ * Sharp Max stuck at 8/150 rendered frames for 2+ minutes, never
+ * recovered — not the page-visibility stall pattern seen elsewhere, this
+ * was genuinely stuck/slow encoder work).
+ */
+export function latencyModeForQuality(quality: VideoQuality): 'quality' | 'realtime' {
+  switch (quality) {
+    case 'ultra':
+    case 'max':
+    case 'sharpMax':
+      return 'quality';
+    default:
+      return 'realtime';
+  }
+}
+
 export interface VideoQualityConfig {
   label: string;
   bitrate: (width: number, height: number) => number;
@@ -1070,6 +1092,7 @@ export async function exportWebMFromCanvas(options: {
       bitrate,
       container: 'webm',
       keyFrameIntervalSeconds: keyFrameIntervalSecondsForQuality(quality, clampedFps),
+      latencyMode: latencyModeForQuality(quality),
       signal: options.signal,
       onProgress,
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
@@ -1947,6 +1970,7 @@ export async function exportMP4FromCanvas(options: {
       bitrate,
       container: 'mp4',
       keyFrameIntervalSeconds: keyFrameIntervalSecondsForQuality(quality, clampedFps),
+      latencyMode: latencyModeForQuality(quality),
       signal: options.signal,
       onProgress,
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
