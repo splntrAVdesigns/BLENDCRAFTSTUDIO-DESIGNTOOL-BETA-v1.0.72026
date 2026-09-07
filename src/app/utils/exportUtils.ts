@@ -126,6 +126,32 @@ export const WEBM_PRESETS: ExportPreset[] = [
 
 export type VideoQuality = 'standard' | 'high' | 'ultra' | 'max' | 'sharpMax';
 
+/**
+ * Maps quality tier to keyframe interval. Two rounds of shortening the
+ * default (2s -> 1s, see mediabunnyEncodeShared.ts) measurably reduced but
+ * did not eliminate P-frame softening on dense, high-frequency,
+ * continuously-warping content — confirmed via the app's own
+ * verifyExportedFrameFidelity() check (maximumChannelError well above a
+ * clean-compression baseline on real exports). "High" (the default tier,
+ * and what's been tested) keeps the 1s interval. Higher tiers now actually
+ * buy meaningfully different encode behavior instead of just a bitrate bump
+ * — "Sharp Max" goes fully intra (a keyframe every single frame), which
+ * removes inter-frame prediction error entirely at the cost of a much
+ * larger file. This is the direct, available-today lever for content this
+ * demanding, ahead of any further architecture work.
+ */
+export function keyFrameIntervalSecondsForQuality(quality: VideoQuality, fps: number): number {
+  const safeFps = Math.max(1, fps);
+  switch (quality) {
+    case 'standard': return 1.5;
+    case 'high': return 1;
+    case 'ultra': return 0.5;
+    case 'max': return 3 / safeFps;
+    case 'sharpMax': return 1 / safeFps; // every frame is a keyframe
+    default: return 1;
+  }
+}
+
 export interface VideoQualityConfig {
   label: string;
   bitrate: (width: number, height: number) => number;
@@ -1043,6 +1069,7 @@ export async function exportWebMFromCanvas(options: {
       totalFrames,
       bitrate,
       container: 'webm',
+      keyFrameIntervalSeconds: keyFrameIntervalSecondsForQuality(quality, clampedFps),
       signal: options.signal,
       onProgress,
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
@@ -1919,6 +1946,7 @@ export async function exportMP4FromCanvas(options: {
       totalFrames,
       bitrate,
       container: 'mp4',
+      keyFrameIntervalSeconds: keyFrameIntervalSecondsForQuality(quality, clampedFps),
       signal: options.signal,
       onProgress,
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
