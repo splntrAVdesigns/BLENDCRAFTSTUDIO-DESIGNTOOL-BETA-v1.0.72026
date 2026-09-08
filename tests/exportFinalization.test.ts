@@ -22,3 +22,15 @@ test('finalization timings start at zero for each export', () => {
     cleanupMs: 0,
   });
 });
+
+test('download begins without requesting a paint', async () => {
+  const { handoffExportDownload } = await import('../src/app/utils/exportFinalization.ts');
+  const previous = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => { throw new Error('must not await paint'); };
+  try {
+    let started = false;
+    const completion = handoffExportDownload(() => { started = true; });
+    assert.equal(started, true);
+    assert.ok(await completion >= 0);
+  } finally { globalThis.requestAnimationFrame = previous; }
+});
