@@ -1,5 +1,24 @@
 import * as THREE from '../lib/three';
-import { EffectsConfig } from '../components/controls/EffectsControls';
+import { EffectsConfig, SpatialStageId, DEFAULT_SPATIAL_CHAIN_ORDER } from '../components/controls/EffectsControls';
+
+// Sprint 1.1: spatial chain stage id -> shader int, mirrors the order the
+// GLSL main() switch below understands. Keep in sync with the GLSL
+// comment above u_chainOrder's declaration.
+const SPATIAL_STAGE_INT: Record<SpatialStageId, number> = {
+  mirror: 0, displace: 1, slice: 2, chroma: 3, blur: 4, pixelate: 5, shapeOverlay: 6,
+};
+
+// Converts the user's configured chain order into the fixed-length int
+// array the shader loop consumes. Falls back to the default order if the
+// stored order is missing/malformed (e.g. an older saved project, or a
+// corrupted entry) rather than letting a bad value break the shader loop.
+export function spatialChainOrderToShaderInts(order: SpatialStageId[] | undefined): number[] {
+  const isValid = Array.isArray(order) && order.length === 7 &&
+    new Set(order).size === 7 &&
+    order.every((s) => s in SPATIAL_STAGE_INT);
+  const safeOrder = isValid ? order! : DEFAULT_SPATIAL_CHAIN_ORDER;
+  return safeOrder.map((s) => SPATIAL_STAGE_INT[s]);
+}
 
 // Convert shape string to integer for shader
 function shapeToInt(shape: string): number {
@@ -78,6 +97,26 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
     uniform bool fresnelEnabled;
     uniform float fresnelPower;
     uniform float fresnelIntensity;
+
+    // ── Sprint 1.1: Spatial FX chain ──────────────────────────────────
+    // Stage ids: 0=mirror, 1=displace, 2=slice, 3=chroma, 4=blur,
+    // 5=pixelate, 6=shapeOverlay. u_chainOrder[i] holds the stage that
+    // runs at position i — this is what makes the chain user-reorderable
+    // without any shader recompilation (order is data, not code).
+    uniform int u_chainOrder[7];
+
+    uniform bool quadMirrorEnabled;
+    uniform vec2 quadMirrorCenter;
+
+    uniform bool noiseDisplaceEnabled;
+    uniform float noiseDisplaceAmount;
+    uniform float noiseDisplaceScale;
+    uniform float noiseDisplaceSpeed;
+
+    uniform bool graphicSliceEnabled;
+    uniform float graphicSliceBands;
+    uniform float graphicSliceAmount;
+    uniform float graphicSliceRate;
 
     // Sprint 2: Shader-based flash uniforms — replaces CSS div overlays.
     // Flash is applied after all effects and respects mask alpha so masked regions never flash.
@@ -545,6 +584,74 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
       return hsv2rgb(hsv);
     }
     
+    // ── Sprint 1.1: Spatial FX chain — Quad Mirror / Noise Displacement /
+    // Graphic Slice, ported from Visual Mood Lab's VFX rack (fxMain
+    // contract), adapted to BlendCraft's single-pass post-process shader.
+    //
+    // Precision-safe hash: 'sin(dot(p, large_constants))'-style hashes
+    // (as used elsewhere in this file for grain/dither) collapse into
+    // coherent banding once fed pixel-scale coordinates (values in the
+    // thousands) — float32 only carries ~7 decimal digits. This idiom
+    // (multiply-by-small-constant-then-fract-immediately) stays precision-
+    // safe at any input magnitude. Standing principle for future GPU
+    // noise work in this codebase — see VFX_RACK_ARCHITECTURE.md §8.1.
+    vec2 safeHash2(vec2 p) {
+      vec3 p3 = fract(vec3(p.xyx) * 0.13);
+      p3 += dot(p3, p3.yzx + 3.333);
+      return fract(vec2((p3.x + p3.y) * p3.z, (p3.y + p3.z) * p3.x));
+    }
+
+    // Bilinear-interpolated (smoothstep-eased) hash-grid value noise —
+    // deliberately self-contained (own hash pair, not shared/imported)
+    // per the same self-contained-effect-file convention VML documents.
+    float valueNoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      float a = safeHash2(i).x;
+      float b = safeHash2(i + vec2(1.0, 0.0)).x;
+      float c = safeHash2(i + vec2(0.0, 1.0)).x;
+      float d = safeHash2(i + vec2(1.0, 1.0)).x;
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    }
+
+    // Quad Mirror — 4-way kaleidoscope fold around an adjustable center.
+    // Clamped to [0,1]: an off-center fold can otherwise push the sample
+    // outside texture bounds (same guard chromatic aberration already
+    // uses for its lateral offset).
+    vec2 applyQuadMirrorUV(vec2 uv, vec2 center) {
+      vec2 folded = center + abs(uv - center);
+      return clamp(folded, 0.0, 1.0);
+    }
+
+    // Noise Displacement — smooth animated 2D value-noise field offsets
+    // the sample position. Distinct from Graphic Slice's stepped clock:
+    // this drifts continuously.
+    vec2 applyNoiseDisplaceUV(vec2 uv, float amount, float scale, float speed) {
+      vec2 field = uv * scale + time * speed;
+      float nx = valueNoise(field);
+      float ny = valueNoise(field + vec2(37.2, 91.7));
+      vec2 offset = (vec2(nx, ny) - 0.5) * 2.0 * amount;
+      return clamp(uv + offset, 0.0, 1.0);
+    }
+
+    // Graphic Slice — stepped-clock row-banded horizontal displacement
+    // glitch. Re-randomizes on a discrete time step (not a continuous
+    // drift) so each band holds steady then snaps — reads as a glitch
+    // cut rather than a smooth wobble.
+    // Hash inputs (band index / step index, each x a small constant) stay
+    // small — this is the one place in the new code where the plain
+    // sin()-based hash is safe, matching VML's own slice.frag.
+    vec2 applyGraphicSliceUV(vec2 uv, float bands, float amount, float rate) {
+      float bandCount = max(1.0, bands);
+      float band = floor(uv.y * bandCount);
+      float stepIndex = floor(time * rate);
+      float n = band * 12.9898 + stepIndex * 78.233;
+      float h = fract(sin(n) * 43758.5453);
+      float offset = (h - 0.5) * 2.0 * amount;
+      return clamp(vec2(uv.x + offset, uv.y), 0.0, 1.0);
+    }
+
     // PHASE 1: Fresnel Effect - Edge lighting based on viewing angle
     vec3 applyFresnelEffect(vec3 color, vec2 uv, float power, float intensity) {
       // Create pseudo-normal from UV position (centered)
@@ -570,36 +677,77 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
       // (chroma, blur, all effects) reads from the jolted coordinate. Clamp so
       // the smeared edge stays in-bounds rather than wrapping.
       vec2 uv = clamp(vUv + uShake, 0.0, 1.0);
-      
-      // Start with initial sample - apply chromatic aberration if active
-      vec3 color;
-      float alpha; // Preserve alpha channel from mask
-      
-      if (chromaticAberration > 0.01) {
-        color = applyChromaticAberration(uv, chromaticAberration);
-        alpha = texture2D(tDiffuse, uv).a; // Preserve original alpha
-      } else {
-        vec4 originalColor = texture2D(tDiffuse, uv);
-        color = originalColor.rgb;
-        alpha = originalColor.a; // Preserve alpha from masked gradient
+
+      // Initial sample establishes the chain's starting (uv, color, alpha).
+      // alpha is captured HERE and only ever updated again by a stage that
+      // actually relocates the sample position (Mirror/Displace/Slice) —
+      // filter-only stages (Chroma/Blur/Pixelate/ShapeOverlay) intentionally
+      // leave alpha untouched, exactly matching pre-Sprint-1.1 behavior.
+      vec4 initialSample = texture2D(tDiffuse, uv);
+      vec3 color = initialSample.rgb;
+      float alpha = initialSample.a;
+
+      // ── Sprint 1.1: Spatial FX chain ──────────────────────────────────
+      // Ordered, composable UV-domain stages. Each iteration reads the
+      // CURRENT working 'uv' (which reflects every upstream remap), so
+      // e.g. Blur placed after Mirror blurs the already-folded image
+      // rather than the original — that's the composability fix.
+      //
+      // Remap stages (Mirror/Displace/Slice) advance 'uv' itself and
+      // re-fetch (color, alpha) at the new position, so mask/layer
+      // boundaries (alpha) move together with the visible pixels they
+      // gate rather than staying pinned to the pre-remap position.
+      // Filter stages (Chroma/Blur/Pixelate/ShapeOverlay) sample around/at
+      // the current 'uv' and only update 'color', matching their original,
+      // already-shipped behavior.
+      //
+      // GLSL ES 1.00 note: 'i' here is a standard bounded for-loop counter
+      // (constant init/compare/increment), which qualifies as a constant-
+      // index-expression for array indexing per spec — safe on ANGLE
+      // (Chromium's GL backend, this app's target environment).
+      for (int i = 0; i < 7; i++) {
+        int stage = u_chainOrder[i];
+
+        if (stage == 0) { // Quad Mirror
+          if (quadMirrorEnabled) {
+            uv = applyQuadMirrorUV(uv, quadMirrorCenter);
+            vec4 s = texture2D(tDiffuse, uv);
+            color = s.rgb;
+            alpha = s.a;
+          }
+        } else if (stage == 1) { // Noise Displacement
+          if (noiseDisplaceEnabled && noiseDisplaceAmount > 0.001) {
+            uv = applyNoiseDisplaceUV(uv, noiseDisplaceAmount, noiseDisplaceScale, noiseDisplaceSpeed);
+            vec4 s = texture2D(tDiffuse, uv);
+            color = s.rgb;
+            alpha = s.a;
+          }
+        } else if (stage == 2) { // Graphic Slice
+          if (graphicSliceEnabled && graphicSliceAmount > 0.001) {
+            uv = applyGraphicSliceUV(uv, graphicSliceBands, graphicSliceAmount, graphicSliceRate);
+            vec4 s = texture2D(tDiffuse, uv);
+            color = s.rgb;
+            alpha = s.a;
+          }
+        } else if (stage == 3) { // Chromatic Aberration
+          if (chromaticAberration > 0.01) {
+            color = applyChromaticAberration(uv, chromaticAberration);
+          }
+        } else if (stage == 4) { // Blur
+          if (blur > 0.01) {
+            color = applyBlur(uv, blur);
+          }
+        } else if (stage == 5) { // Pixelate
+          if (pixelateEnabled && pixelate > 0.0) {
+            color = applyPixelate(uv, pixelate);
+          }
+        } else if (stage == 6) { // Shape Overlay
+          if (shapeOverlayEnabled && shapeOverlay > 0.0) {
+            color = applyHalftone2(uv, shapeOverlay, creativeShape);
+          }
+        }
       }
-      
-      // Apply blur if active
-      if (blur > 0.01) {
-        color = applyBlur(uv, blur);
-        // Alpha is already captured above
-      }
-      
-      // Apply pixelation if active (overrides blur/chroma)
-      if (pixelateEnabled && pixelate > 0.0) {
-        color = applyPixelate(uv, pixelate);
-      }
-      
-      // Apply shape overlay if active (FIXED - was missing!)
-      if (shapeOverlayEnabled && shapeOverlay > 0.0) {
-        color = applyHalftone2(uv, shapeOverlay, creativeShape);
-      }
-      
+
       // Apply posterize
       if (posterizeEnabled && posterize > 0.01) {
         color = applyPosterize(color, uv, posterize, posterizeDithering, creativeShape, ditherStrength, ditherScale);
@@ -754,6 +902,18 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
       fresnelEnabled: { value: effects.fresnelEnabled || false },
       fresnelPower: { value: effects.fresnelPower || 2 },
       fresnelIntensity: { value: effects.fresnelIntensity || 0.5 },
+      // Sprint 1.1: Spatial FX chain
+      u_chainOrder: { value: spatialChainOrderToShaderInts(effects.spatialChainOrder) },
+      quadMirrorEnabled: { value: effects.quadMirrorEnabled || false },
+      quadMirrorCenter: { value: new THREE.Vector2(effects.quadMirrorCenterX ?? 0.5, effects.quadMirrorCenterY ?? 0.5) },
+      noiseDisplaceEnabled: { value: effects.noiseDisplaceEnabled || false },
+      noiseDisplaceAmount: { value: effects.noiseDisplaceAmount ?? 0.1 },
+      noiseDisplaceScale: { value: effects.noiseDisplaceScale ?? 2 },
+      noiseDisplaceSpeed: { value: effects.noiseDisplaceSpeed ?? 0.5 },
+      graphicSliceEnabled: { value: effects.graphicSliceEnabled || false },
+      graphicSliceBands: { value: effects.graphicSliceBands ?? 16 },
+      graphicSliceAmount: { value: effects.graphicSliceAmount ?? 0.08 },
+      graphicSliceRate: { value: effects.graphicSliceRate ?? 8 },
       // Sprint 2: shader-based flash — driven by flash RAF loop in GradientCanvas
       uFlashOpacity:   { value: 0.0 },
       uFlashColor:     { value: new THREE.Vector3(1, 1, 1) },
@@ -787,7 +947,13 @@ export function hasActiveEffects(effects: EffectsConfig): boolean {
     (effects.pixelateEnabled && effects.pixelate > 0) ||
     effects.invert ||
     effects.fresnelEnabled || // PHASE 1: Fresnel effect
-    effects.flashEnabled      // Flash FX — needs post-process path to run the flash shader
+    effects.flashEnabled ||   // Flash FX — needs post-process path to run the flash shader
+    // Sprint 1.1: Spatial FX chain — same amount-threshold pattern the
+    // shader itself uses (> 0.001 for displace/slice), so this predicate
+    // and the shader's own early-outs never disagree about "is this on".
+    effects.quadMirrorEnabled ||
+    (effects.noiseDisplaceEnabled && (effects.noiseDisplaceAmount || 0) > 0.001) ||
+    (effects.graphicSliceEnabled && (effects.graphicSliceAmount || 0) > 0.001)
   );
 }
 
