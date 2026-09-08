@@ -33,7 +33,15 @@ test('export frame zero preserves preview phase and speed before deterministic c
   });
   assert.ok(second.smoothedSpeed > first.smoothedSpeed);
   assert.ok(second.smoothedSpeed < 1.2);
-  assert.ok(Math.abs(second.phase - (first.phase + second.smoothedSpeed / 30)) < 1e-12);
+  // F.7 integrates speed over the interval; splitting that interval must
+  // preserve distance, unlike sampling only the speed at its endpoint.
+  const half = advanceExportLayerTimeline({ previous: first, capturedPhase: 12.5,
+    capturedSpeed: 0.4, targetSpeed: 1.2, deltaSeconds: 1 / 60 });
+  const split = advanceExportLayerTimeline({ previous: half, capturedPhase: 12.5,
+    capturedSpeed: 0.4, targetSpeed: 1.2, deltaSeconds: 1 / 60 });
+  assert.ok(Math.abs(second.phase - split.phase) < 1e-12);
+  assert.ok(second.phase > first.phase + first.smoothedSpeed / 30);
+  assert.ok(second.phase < first.phase + second.smoothedSpeed / 30);
 });
 
 test('frame certification validates render and encoded timestamps and durations', () => {
