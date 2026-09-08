@@ -18,7 +18,7 @@ import { publishLayerRoster } from '../../audio/audioLayerRoster';
 import { pumpAnalysisFrame, setAnalysisExternallyDriven } from '../../audio/audioEngine';
 import { beginAnalysis, endAnalysis, installAudioPerf } from '../../audio/audioPerf';
 import { phaseBegin, phaseEnd, installFrameProfile } from '../../utils/frameProfile';
-import { createEffectsMaterial, hasActiveEffects, shouldUsePostProcess } from '../../utils/effectsRenderer';
+import { createEffectsMaterial, hasActiveEffects, shouldUsePostProcess, spatialChainOrderToShaderInts } from '../../utils/effectsRenderer';
 import { InteractiveControls } from '../controls/InteractiveControls';
 import { sortColorStops } from '../../utils/colorStopValidation';
 import { hexToShaderRgb } from '../../utils/colors';
@@ -3102,6 +3102,23 @@ export const GradientCanvas = memo(function GradientCanvas({
     material.uniforms.fresnelEnabled.value = effects.fresnelEnabled || false;
     material.uniforms.fresnelPower.value = effects.fresnelPower || 2;
     material.uniforms.fresnelIntensity.value = effects.fresnelIntensity || 0.5;
+
+    // Sprint 1.1: Spatial FX chain — order + the three new effects.
+    if (material.uniforms.u_chainOrder) {
+      material.uniforms.u_chainOrder.value = spatialChainOrderToShaderInts(effects.spatialChainOrder);
+    }
+    if (material.uniforms.quadMirrorEnabled) material.uniforms.quadMirrorEnabled.value = effects.quadMirrorEnabled || false;
+    if (material.uniforms.quadMirrorCenter) material.uniforms.quadMirrorCenter.value.set(
+      effects.quadMirrorCenterX ?? 0.5, effects.quadMirrorCenterY ?? 0.5
+    );
+    if (material.uniforms.noiseDisplaceEnabled) material.uniforms.noiseDisplaceEnabled.value = effects.noiseDisplaceEnabled || false;
+    if (material.uniforms.noiseDisplaceAmount) material.uniforms.noiseDisplaceAmount.value = effects.noiseDisplaceAmount ?? 0.1;
+    if (material.uniforms.noiseDisplaceScale) material.uniforms.noiseDisplaceScale.value = effects.noiseDisplaceScale ?? 2;
+    if (material.uniforms.noiseDisplaceSpeed) material.uniforms.noiseDisplaceSpeed.value = effects.noiseDisplaceSpeed ?? 0.5;
+    if (material.uniforms.graphicSliceEnabled) material.uniforms.graphicSliceEnabled.value = effects.graphicSliceEnabled || false;
+    if (material.uniforms.graphicSliceBands) material.uniforms.graphicSliceBands.value = effects.graphicSliceBands ?? 16;
+    if (material.uniforms.graphicSliceAmount) material.uniforms.graphicSliceAmount.value = effects.graphicSliceAmount ?? 0.08;
+    if (material.uniforms.graphicSliceRate) material.uniforms.graphicSliceRate.value = effects.graphicSliceRate ?? 8;
     
     // Update new uniforms for shape and dithering
     const shapeMap: Record<string, number> = {
@@ -4569,6 +4586,21 @@ export const GradientCanvas = memo(function GradientCanvas({
       if (eu.fresnelEnabled)     eu.fresnelEnabled.value      = ef.fresnelEnabled || false;
       if (eu.fresnelPower)       eu.fresnelPower.value        = ef.fresnelPower || 2;
       if (eu.fresnelIntensity)   eu.fresnelIntensity.value    = ef.fresnelIntensity || 0.5;
+      // Sprint 1.1: Spatial FX chain — pulled forward from the 1.4 export-
+      // parity task since it's the same refresh block; without this, an
+      // export triggered right after a slider change (before the next RAF
+      // tick) could ship stale/default mirror/displace/slice values.
+      if (eu.u_chainOrder)       eu.u_chainOrder.value        = spatialChainOrderToShaderInts(ef.spatialChainOrder);
+      if (eu.quadMirrorEnabled)  eu.quadMirrorEnabled.value   = ef.quadMirrorEnabled || false;
+      if (eu.quadMirrorCenter)   eu.quadMirrorCenter.value.set(ef.quadMirrorCenterX ?? 0.5, ef.quadMirrorCenterY ?? 0.5);
+      if (eu.noiseDisplaceEnabled) eu.noiseDisplaceEnabled.value = ef.noiseDisplaceEnabled || false;
+      if (eu.noiseDisplaceAmount)  eu.noiseDisplaceAmount.value  = ef.noiseDisplaceAmount ?? 0.1;
+      if (eu.noiseDisplaceScale)   eu.noiseDisplaceScale.value   = ef.noiseDisplaceScale ?? 2;
+      if (eu.noiseDisplaceSpeed)   eu.noiseDisplaceSpeed.value   = ef.noiseDisplaceSpeed ?? 0.5;
+      if (eu.graphicSliceEnabled)  eu.graphicSliceEnabled.value  = ef.graphicSliceEnabled || false;
+      if (eu.graphicSliceBands)    eu.graphicSliceBands.value    = ef.graphicSliceBands ?? 16;
+      if (eu.graphicSliceAmount)   eu.graphicSliceAmount.value   = ef.graphicSliceAmount ?? 0.08;
+      if (eu.graphicSliceRate)     eu.graphicSliceRate.value     = ef.graphicSliceRate ?? 8;
     }
 
     const targetWidth = renderer.domElement.width || canvasSettings.width;
