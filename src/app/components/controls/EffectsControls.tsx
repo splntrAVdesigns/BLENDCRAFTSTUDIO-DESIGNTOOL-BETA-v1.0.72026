@@ -8,6 +8,7 @@ import { Button } from '../ui/button';
 import { ConditionalTooltip } from '../ui/ConditionalTooltip';
 import { Sparkles, Copy, Clipboard } from 'lucide-react';
 import { copyEffects, pasteEffects, hasEffectsInClipboard } from '../../utils/effectsClipboard';
+import { SpatialChainOrderControl } from './SpatialChainOrderControl';
 import { toast } from 'sonner';
 
 // ── Sprint 1.1: Spatial FX chain ────────────────────────────────────────
@@ -284,6 +285,21 @@ export const EffectsControls = memo(function EffectsControls({
   const resetToDefaults = () => {
     onChange(defaultEffects);
   };
+
+  // Sprint 1.3: which spatial-chain stages are currently "on", for the
+  // reorder control's dim/highlight state. Mirrors each stage's own
+  // isActive() check in postfx/stages/*.ts closely enough for a UI hint —
+  // doesn't need to match the amount-threshold precision the compositor
+  // uses, just enabled-vs-not.
+  const activeSpatialStages = new Set<SpatialStageId>([
+    ...(effects.quadMirrorEnabled ? (['mirror'] as const) : []),
+    ...(effects.noiseDisplaceEnabled ? (['displace'] as const) : []),
+    ...(effects.graphicSliceEnabled ? (['slice'] as const) : []),
+    ...(effects.chromaticAberration > 0.01 ? (['chroma'] as const) : []),
+    ...(effects.blur > 0.01 ? (['blur'] as const) : []),
+    ...(effects.pixelateEnabled && effects.pixelate > 0 ? (['pixelate'] as const) : []),
+    ...(effects.shapeOverlayEnabled && effects.shapeOverlay > 0 ? (['shapeOverlay'] as const) : []),
+  ]);
 
   const creativeShapeOptions = [
     { value: 'square', label: '■ Square' },
@@ -906,10 +922,216 @@ export const EffectsControls = memo(function EffectsControls({
                   </>
                 )}
               </div>
+
+              {/* ── Noise & Symmetry — Sprint 1.3 ──────────────────────────
+                  Quad Mirror / Noise Displacement / Graphic Slice, ported
+                  from Visual Mood Lab's VFX rack. These three compose
+                  fully with Chroma/Blur/Pixelate/Shape Overlay via the
+                  multi-pass spatial FX chain (src/app/postfx/) — order
+                  below is user-configurable, drag to reorder. */}
+              <div className="space-y-4 rounded-md border border-zinc-800 bg-zinc-900/30 p-3">
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium text-zinc-300">Noise & Symmetry</Label>
+                  <p className="text-[10px] text-zinc-500">
+                    Composable spatial effects — drag to change the order they apply in.
+                  </p>
+                </div>
+
+                <SpatialChainOrderControl
+                  order={
+                    Array.isArray(effects.spatialChainOrder) && effects.spatialChainOrder.length === 7
+                      ? effects.spatialChainOrder
+                      : DEFAULT_SPATIAL_CHAIN_ORDER
+                  }
+                  activeStages={activeSpatialStages}
+                  onChange={(order) => onChange({ ...effects, spatialChainOrder: order })}
+                  onCommitHistory={onCommitHistory}
+                />
+
+                {/* Quad Mirror */}
+                <div className="space-y-2 border-t border-zinc-800 pt-3">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs text-zinc-400">Quad Mirror</Label>
+                    <Switch
+                      checked={effects.quadMirrorEnabled}
+                      onCheckedChange={(checked) => updateEffect('quadMirrorEnabled', checked)}
+                    />
+                  </div>
+                  {effects.quadMirrorEnabled && (
+                    <>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs text-zinc-500">Center X</Label>
+                          <span className="text-xs text-zinc-500">{Math.round(localEffects.quadMirrorCenterX * 100)}%</span>
+                        </div>
+                        <Slider
+                          value={[localEffects.quadMirrorCenterX * 100]}
+                          onValueChange={([value]) => {
+                            onStartDrag?.();
+                            updateLocalEffect('quadMirrorCenterX', value / 100);
+                          }}
+                          onValueCommit={([value]) => commitEffect('quadMirrorCenterX', value / 100)}
+                          min={0}
+                          max={100}
+                          step={1}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs text-zinc-500">Center Y</Label>
+                          <span className="text-xs text-zinc-500">{Math.round(localEffects.quadMirrorCenterY * 100)}%</span>
+                        </div>
+                        <Slider
+                          value={[localEffects.quadMirrorCenterY * 100]}
+                          onValueChange={([value]) => {
+                            onStartDrag?.();
+                            updateLocalEffect('quadMirrorCenterY', value / 100);
+                          }}
+                          onValueCommit={([value]) => commitEffect('quadMirrorCenterY', value / 100)}
+                          min={0}
+                          max={100}
+                          step={1}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Noise Displacement */}
+                <div className="space-y-2 border-t border-zinc-800 pt-3">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs text-zinc-400">Noise Displacement</Label>
+                    <Switch
+                      checked={effects.noiseDisplaceEnabled}
+                      onCheckedChange={(checked) => updateEffect('noiseDisplaceEnabled', checked)}
+                    />
+                  </div>
+                  {effects.noiseDisplaceEnabled && (
+                    <>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs text-zinc-500">Amount</Label>
+                          <span className="text-xs text-zinc-500">{localEffects.noiseDisplaceAmount.toFixed(2)}</span>
+                        </div>
+                        <Slider
+                          value={[localEffects.noiseDisplaceAmount]}
+                          onValueChange={([value]) => {
+                            onStartDrag?.();
+                            updateLocalEffect('noiseDisplaceAmount', value);
+                          }}
+                          onValueCommit={([value]) => commitEffect('noiseDisplaceAmount', value)}
+                          min={0}
+                          max={0.5}
+                          step={0.01}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs text-zinc-500">Scale</Label>
+                          <span className="text-xs text-zinc-500">{localEffects.noiseDisplaceScale.toFixed(1)}</span>
+                        </div>
+                        <Slider
+                          value={[localEffects.noiseDisplaceScale]}
+                          onValueChange={([value]) => {
+                            onStartDrag?.();
+                            updateLocalEffect('noiseDisplaceScale', value);
+                          }}
+                          onValueCommit={([value]) => commitEffect('noiseDisplaceScale', value)}
+                          min={0.5}
+                          max={8}
+                          step={0.1}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs text-zinc-500">Speed</Label>
+                          <span className="text-xs text-zinc-500">{localEffects.noiseDisplaceSpeed.toFixed(2)}</span>
+                        </div>
+                        <Slider
+                          value={[localEffects.noiseDisplaceSpeed]}
+                          onValueChange={([value]) => {
+                            onStartDrag?.();
+                            updateLocalEffect('noiseDisplaceSpeed', value);
+                          }}
+                          onValueCommit={([value]) => commitEffect('noiseDisplaceSpeed', value)}
+                          min={0}
+                          max={2}
+                          step={0.05}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Graphic Slice */}
+                <div className="space-y-2 border-t border-zinc-800 pt-3">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs text-zinc-400">Graphic Slice</Label>
+                    <Switch
+                      checked={effects.graphicSliceEnabled}
+                      onCheckedChange={(checked) => updateEffect('graphicSliceEnabled', checked)}
+                    />
+                  </div>
+                  {effects.graphicSliceEnabled && (
+                    <>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs text-zinc-500">Bands</Label>
+                          <span className="text-xs text-zinc-500">{Math.round(localEffects.graphicSliceBands)}</span>
+                        </div>
+                        <Slider
+                          value={[localEffects.graphicSliceBands]}
+                          onValueChange={([value]) => {
+                            onStartDrag?.();
+                            updateLocalEffect('graphicSliceBands', value);
+                          }}
+                          onValueCommit={([value]) => commitEffect('graphicSliceBands', value)}
+                          min={2}
+                          max={64}
+                          step={1}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs text-zinc-500">Amount</Label>
+                          <span className="text-xs text-zinc-500">{localEffects.graphicSliceAmount.toFixed(2)}</span>
+                        </div>
+                        <Slider
+                          value={[localEffects.graphicSliceAmount]}
+                          onValueChange={([value]) => {
+                            onStartDrag?.();
+                            updateLocalEffect('graphicSliceAmount', value);
+                          }}
+                          onValueCommit={([value]) => commitEffect('graphicSliceAmount', value)}
+                          min={0}
+                          max={0.3}
+                          step={0.01}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs text-zinc-500">Rate</Label>
+                          <span className="text-xs text-zinc-500">{localEffects.graphicSliceRate.toFixed(1)} Hz</span>
+                        </div>
+                        <Slider
+                          value={[localEffects.graphicSliceRate]}
+                          onValueChange={([value]) => {
+                            onStartDrag?.();
+                            updateLocalEffect('graphicSliceRate', value);
+                          }}
+                          onValueCommit={([value]) => commitEffect('graphicSliceRate', value)}
+                          min={0.5}
+                          max={30}
+                          step={0.5}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
             </div>
           </AccordionContent>
         </AccordionItem>
-        {/* ── Light Flash Effects ──────────────────────────────────────── */}
         <AccordionItem value="flash-fx" className="border-0 rounded-lg overflow-hidden bg-zinc-900/60">
           <AccordionTrigger className="px-3 py-2.5 hover:bg-zinc-800/50 transition-colors">
             <span className="text-sm font-medium text-zinc-100">Light Flash Effects</span>
