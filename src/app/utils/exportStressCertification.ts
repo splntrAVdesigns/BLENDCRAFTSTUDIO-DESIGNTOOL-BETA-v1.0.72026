@@ -5,8 +5,8 @@ export interface ExportTimingSample {
   totalSec: number;
   renderSec: number;
   encodeWaitSec: number;
-  flushSec: number;
-  muxSec: number;
+  flushSec: number | null;
+  muxSec: number | null;
   /** Public Mediabunny completion boundary. Prefer this over attempting to
    *  split native encoder drain from muxing through private internals. */
   encoderDrainAndMuxSec?: number;
@@ -64,12 +64,12 @@ function round(value: number): number {
 }
 
 export function identifyExportBottleneck(timing: ExportTimingSample): ExportProductionGate['bottleneck'] {
-  const publicFinalize = timing.encoderDrainAndMuxSec ?? (timing.flushSec + timing.muxSec);
+  const publicFinalize = timing.encoderDrainAndMuxSec ?? ((timing.flushSec ?? 0) + (timing.muxSec ?? 0));
   const finalization = publicFinalize + timing.blobSec + timing.downloadHandoffSec;
   const entries = [
     ['render', timing.renderSec],
     ['encode-wait', timing.encodeWaitSec],
-    ['flush', timing.encoderDrainAndMuxSec == null ? timing.flushSec : 0],
+    ['flush', timing.encoderDrainAndMuxSec == null ? (timing.flushSec ?? 0) : 0],
     ['finalization', finalization],
   ] as const;
   const winner = entries.reduce((best, current) => current[1] > best[1] ? current : best, entries[0]);
@@ -92,8 +92,8 @@ export function evaluateExportProductionGate(input: ExportCertificationSample[])
     totalSec: acc.totalSec + timing.totalSec,
     renderSec: acc.renderSec + timing.renderSec,
     encodeWaitSec: acc.encodeWaitSec + timing.encodeWaitSec,
-    flushSec: acc.flushSec + timing.flushSec,
-    muxSec: acc.muxSec + timing.muxSec,
+    flushSec: (acc.flushSec ?? 0) + (timing.flushSec ?? 0),
+    muxSec: (acc.muxSec ?? 0) + (timing.muxSec ?? 0),
     encoderDrainAndMuxSec: (acc.encoderDrainAndMuxSec ?? 0) + (timing.encoderDrainAndMuxSec ?? 0),
     blobSec: acc.blobSec + timing.blobSec,
     downloadHandoffSec: acc.downloadHandoffSec + timing.downloadHandoffSec,
