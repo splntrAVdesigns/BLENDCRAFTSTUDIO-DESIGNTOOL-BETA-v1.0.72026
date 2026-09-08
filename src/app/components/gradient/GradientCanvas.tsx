@@ -3091,8 +3091,9 @@ export const GradientCanvas = memo(function GradientCanvas({
       );
     
     // Update all effect uniforms
-    material.uniforms.blur.value = effects.blur;
-    material.uniforms.chromaticAberration.value = effects.chromaticAberration;
+    // Sprint 1.2: blur/chromaticAberration/shapeOverlay/pixelate (+ their
+    // enabled flags) no longer live on this material — they moved to their
+    // own postfx stage materials, driven by runSpatialChain() instead.
     material.uniforms.vignette.value = effects.vignette;
     material.uniforms.saturation.value = effects.saturation;
     material.uniforms.brightness.value = effects.brightness;
@@ -3113,12 +3114,8 @@ export const GradientCanvas = memo(function GradientCanvas({
     if (material.uniforms.ditherScale) material.uniforms.ditherScale.value = effects.ditherScale ?? 50;
     material.uniforms.halftone.value = effects.halftone || 0;
     material.uniforms.halftoneAngle.value = effects.halftoneAngle || 0;
-    material.uniforms.shapeOverlay.value = effects.shapeOverlay || 0;
-    material.uniforms.pixelate.value = effects.pixelate || 0;
     material.uniforms.posterizeEnabled.value = effects.posterizeEnabled || false;
     material.uniforms.halftoneEnabled.value = effects.halftoneEnabled || false;
-    material.uniforms.shapeOverlayEnabled.value = effects.shapeOverlayEnabled || false;
-    material.uniforms.pixelateEnabled.value = effects.pixelateEnabled || false;
     material.uniforms.invert.value = effects.invert || false;
     
     // PHASE 1: Update Fresnel Effect uniforms
@@ -4601,8 +4598,10 @@ export const GradientCanvas = memo(function GradientCanvas({
       // the preview viewport size. renderer.domElement is already at export size here
       // because setExportSize() is called before every renderAtTime invocation.
       if (eu.resolution) eu.resolution.value.set(renderer.domElement.width, renderer.domElement.height);
-      if (eu.blur)               eu.blur.value               = ef.blur;
-      if (eu.chromaticAberration)eu.chromaticAberration.value = ef.chromaticAberration;
+      // Sprint 1.2: blur/chromaticAberration/shapeOverlay/pixelate (+ their
+      // enabled flags) no longer live on this material — postfx stage
+      // materials now own them, synced via runSpatialChain() at the actual
+      // render dispatch further down this function.
       if (eu.vignette)           eu.vignette.value            = ef.vignette;
       if (eu.saturation)         eu.saturation.value          = ef.saturation;
       if (eu.brightness)         eu.brightness.value          = ef.brightness;
@@ -4616,12 +4615,8 @@ export const GradientCanvas = memo(function GradientCanvas({
       if (eu.ditherScale)        eu.ditherScale.value         = ef.ditherScale ?? 50;
       if (eu.halftone)           eu.halftone.value            = ef.halftone || 0;
       if (eu.halftoneAngle)      eu.halftoneAngle.value       = ef.halftoneAngle || 0;
-      if (eu.shapeOverlay)       eu.shapeOverlay.value        = ef.shapeOverlay || 0;
-      if (eu.pixelate)           eu.pixelate.value            = ef.pixelate || 0;
       if (eu.posterizeEnabled)   eu.posterizeEnabled.value    = ef.posterizeEnabled || false;
       if (eu.halftoneEnabled)    eu.halftoneEnabled.value     = ef.halftoneEnabled || false;
-      if (eu.shapeOverlayEnabled)eu.shapeOverlayEnabled.value = ef.shapeOverlayEnabled || false;
-      if (eu.pixelateEnabled)    eu.pixelateEnabled.value     = ef.pixelateEnabled || false;
       if (eu.invert)             eu.invert.value              = ef.invert || false;
       if (eu.fresnelEnabled)     eu.fresnelEnabled.value      = ef.fresnelEnabled || false;
       if (eu.fresnelPower)       eu.fresnelPower.value        = ef.fresnelPower || 2;
