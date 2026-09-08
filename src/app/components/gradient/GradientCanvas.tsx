@@ -18,7 +18,14 @@ import { publishLayerRoster } from '../../audio/audioLayerRoster';
 import { pumpAnalysisFrame, setAnalysisExternallyDriven } from '../../audio/audioEngine';
 import { beginAnalysis, endAnalysis, installAudioPerf } from '../../audio/audioPerf';
 import { phaseBegin, phaseEnd, installFrameProfile } from '../../utils/frameProfile';
-import { createEffectsMaterial, hasActiveEffects, shouldUsePostProcess, spatialChainOrderToShaderInts } from '../../utils/effectsRenderer';
+import { createEffectsMaterial, hasActiveEffects, shouldUsePostProcess } from '../../utils/effectsRenderer';
+import {
+  createSpatialChainCompositor,
+  resizeSpatialChainCompositor,
+  disposeSpatialChainCompositor,
+  runSpatialChain,
+  SpatialChainCompositor,
+} from '../../postfx/pingPongCompositor';
 import { InteractiveControls } from '../controls/InteractiveControls';
 import { sortColorStops } from '../../utils/colorStopValidation';
 import { hexToShaderRgb } from '../../utils/colors';
@@ -457,6 +464,11 @@ export const GradientCanvas = memo(function GradientCanvas({
   const postProcessCameraRef = useRef<THREE.OrthographicCamera | null>(null);
   const postProcessQuadRef = useRef<THREE.Mesh | null>(null);
   const effectsMaterialRef = useRef<THREE.ShaderMaterial | null>(null);
+  // Sprint 1.2: spatial FX chain (Mirror/Displace/Slice/Chroma/Blur/
+  // Pixelate/Shape Overlay) — real multi-pass ping-pong compositor, lives
+  // in src/app/postfx/. Runs BEFORE effectsMaterial (the finishing pass
+  // above) each frame that needs it.
+  const spatialCompositorRef = useRef<SpatialChainCompositor | null>(null);
   const maskTexturesRef = useRef<Map<string, THREE.Texture>>(new Map());
   const patternTexturesRef = useRef<Map<string, THREE.Texture>>(new Map());
   const mediaTexturesRef = useRef<Map<string, THREE.Texture>>(new Map()); // Media Layer System (Stage 1)
@@ -1742,6 +1754,8 @@ export const GradientCanvas = memo(function GradientCanvas({
     // Clean up old render target
     disposeRenderTargetRef(renderTargetRef);
     disposeRenderTargetRef(captureRTRef);
+    disposeSpatialChainCompositor(spatialCompositorRef.current);
+    spatialCompositorRef.current = null;
 
     // Create scene for gradient rendering
     const scene = new THREE.Scene();
@@ -1866,6 +1880,13 @@ export const GradientCanvas = memo(function GradientCanvas({
     effectsMaterial.uniforms.resolution.value.set(drawingBufferSize.x, drawingBufferSize.y);
     effectsMaterialRef.current = effectsMaterial;
 
+    // Sprint 1.2: spatial FX chain compositor — two ping-pong render
+    // targets at the same size as every other render target here, plus
+    // the 7 stage materials (Mirror/Displace/Slice/Chroma/Blur/Pixelate/
+    // Shape Overlay). Created once per canvas-init cycle, same lifecycle
+    // as renderTarget/captureRT above.
+    spatialCompositorRef.current = createSpatialChainCompositor(drawingBufferSize.x, drawingBufferSize.y);
+
     // Create mesh for post-processing
     const postProcessQuad = new THREE.Mesh(quadGeometry, effectsMaterial);
     postProcessScene.add(postProcessQuad);
@@ -1897,6 +1918,8 @@ export const GradientCanvas = memo(function GradientCanvas({
       // Dispose render targets and materials
       disposeRenderTargetRef(renderTargetRef);
       disposeRenderTargetRef(captureRTRef);
+      disposeSpatialChainCompositor(spatialCompositorRef.current);
+      spatialCompositorRef.current = null;
       if (effectsMaterialRef.current) {
         effectsMaterialRef.current.dispose();
         effectsMaterialRef.current = null;
@@ -3102,23 +3125,6 @@ export const GradientCanvas = memo(function GradientCanvas({
     material.uniforms.fresnelEnabled.value = effects.fresnelEnabled || false;
     material.uniforms.fresnelPower.value = effects.fresnelPower || 2;
     material.uniforms.fresnelIntensity.value = effects.fresnelIntensity || 0.5;
-
-    // Sprint 1.1: Spatial FX chain — order + the three new effects.
-    if (material.uniforms.u_chainOrder) {
-      material.uniforms.u_chainOrder.value = spatialChainOrderToShaderInts(effects.spatialChainOrder);
-    }
-    if (material.uniforms.quadMirrorEnabled) material.uniforms.quadMirrorEnabled.value = effects.quadMirrorEnabled || false;
-    if (material.uniforms.quadMirrorCenter) material.uniforms.quadMirrorCenter.value.set(
-      effects.quadMirrorCenterX ?? 0.5, effects.quadMirrorCenterY ?? 0.5
-    );
-    if (material.uniforms.noiseDisplaceEnabled) material.uniforms.noiseDisplaceEnabled.value = effects.noiseDisplaceEnabled || false;
-    if (material.uniforms.noiseDisplaceAmount) material.uniforms.noiseDisplaceAmount.value = effects.noiseDisplaceAmount ?? 0.1;
-    if (material.uniforms.noiseDisplaceScale) material.uniforms.noiseDisplaceScale.value = effects.noiseDisplaceScale ?? 2;
-    if (material.uniforms.noiseDisplaceSpeed) material.uniforms.noiseDisplaceSpeed.value = effects.noiseDisplaceSpeed ?? 0.5;
-    if (material.uniforms.graphicSliceEnabled) material.uniforms.graphicSliceEnabled.value = effects.graphicSliceEnabled || false;
-    if (material.uniforms.graphicSliceBands) material.uniforms.graphicSliceBands.value = effects.graphicSliceBands ?? 16;
-    if (material.uniforms.graphicSliceAmount) material.uniforms.graphicSliceAmount.value = effects.graphicSliceAmount ?? 0.08;
-    if (material.uniforms.graphicSliceRate) material.uniforms.graphicSliceRate.value = effects.graphicSliceRate ?? 8;
     
     // Update new uniforms for shape and dithering
     const shapeMap: Record<string, number> = {
@@ -3675,20 +3681,23 @@ export const GradientCanvas = memo(function GradientCanvas({
       // Written every frame ON TOP of the user's slider values rather than
       // replacing them, so a scene with chromatic aberration already dialled in
       // gets audio movement around that setting instead of having it reset.
+      //
+      // Sprint 1.2: Chromatic Aberration and Blur uniforms no longer live on
+      // effectsMaterial (the finishing pass) — they moved to their own
+      // postfx stage materials. audioChromaOverride/audioBlurOverride carry
+      // this frame's final (base + audio delta) values down to the
+      // runSpatialChain() call below, which is what actually drives those
+      // two stages now.
+      let audioChromaOverride: number;
+      let audioBlurOverride: number;
       {
         const g = getGlobalAudioDeltas();
-        if (effectsMaterial.uniforms.chromaticAberration) {
-          effectsMaterial.uniforms.chromaticAberration.value =
-            effectsRef.current.chromaticAberration + g.chromaAdd;
-        }
+        audioChromaOverride = effectsRef.current.chromaticAberration + g.chromaAdd;
+        audioBlurOverride = effectsRef.current.blur + g.blurAdd;
         if (effectsMaterial.uniforms.brightness) {
           // Strobe maps to brightness: a full hit flashes the frame white.
           effectsMaterial.uniforms.brightness.value =
             effectsRef.current.brightness + g.brightnessAdd + g.strobeAdd;
-        }
-        if (effectsMaterial.uniforms.blur) {
-          effectsMaterial.uniforms.blur.value =
-            effectsRef.current.blur + g.blurAdd;
         }
         if (effectsMaterial.uniforms.saturation) {
           effectsMaterial.uniforms.saturation.value =
@@ -3725,10 +3734,28 @@ export const GradientCanvas = memo(function GradientCanvas({
           renderer.setRenderTarget(renderTarget);
           renderer.clear();
           renderer.render(scene, camera);
-          // Update post-process tDiffuse
-          if (postProcessQuadRef.current?.material) {
+          // Update post-process tDiffuse via the spatial FX chain (Mirror/
+          // Displace/Slice/Chroma/Blur/Pixelate/Shape Overlay) — see
+          // src/app/postfx/. Zero active stages = zero extra passes,
+          // returns renderTarget.texture straight through.
+          if (postProcessQuadRef.current?.material && spatialCompositorRef.current) {
             const pm = postProcessQuadRef.current.material as THREE.ShaderMaterial;
-            if (pm.uniforms?.tDiffuse) pm.uniforms.tDiffuse.value = renderTarget.texture;
+            if (pm.uniforms?.tDiffuse) {
+              pm.uniforms.tDiffuse.value = runSpatialChain(
+                renderer,
+                postProcessScene,
+                postProcessCamera,
+                postProcessQuadRef.current,
+                spatialCompositorRef.current,
+                effectsMaterial,
+                renderTarget.texture,
+                effectsRef.current,
+                animationTime,
+                effectsMaterial.uniforms.resolution.value,
+                audioChromaOverride,
+                audioBlurOverride
+              );
+            }
           }
           // Render composite â†’ captureRT first (so readFramePixels is always fresh)
           if (captureRTRef.current) {
@@ -3903,9 +3930,22 @@ export const GradientCanvas = memo(function GradientCanvas({
               // The animate loop does this every frame as a safety guard.  If the
               // render target is ever recreated (e.g. on resize), the effectsMaterial's
               // tDiffuse uniform still points to the OLD texture without this update.
-              if (postProcessQuadRef.current?.material) {
+              if (postProcessQuadRef.current?.material && spatialCompositorRef.current) {
                 const pm = postProcessQuadRef.current.material as THREE.ShaderMaterial;
-                if (pm.uniforms?.tDiffuse) pm.uniforms.tDiffuse.value = renderTarget.texture;
+                if (pm.uniforms?.tDiffuse) {
+                  pm.uniforms.tDiffuse.value = runSpatialChain(
+                    renderer,
+                    postProcessScene,
+                    postProcessCamera,
+                    postProcessQuadRef.current,
+                    spatialCompositorRef.current,
+                    pm,
+                    renderTarget.texture,
+                    effects,
+                    pm.uniforms.time?.value ?? 0,
+                    pm.uniforms.resolution?.value ?? new THREE.Vector2(1920, 1080)
+                  );
+                }
               }
               renderer.setRenderTarget(null);
               renderer.clear();                           // â† required: autoClear = false
@@ -4586,21 +4626,6 @@ export const GradientCanvas = memo(function GradientCanvas({
       if (eu.fresnelEnabled)     eu.fresnelEnabled.value      = ef.fresnelEnabled || false;
       if (eu.fresnelPower)       eu.fresnelPower.value        = ef.fresnelPower || 2;
       if (eu.fresnelIntensity)   eu.fresnelIntensity.value    = ef.fresnelIntensity || 0.5;
-      // Sprint 1.1: Spatial FX chain — pulled forward from the 1.4 export-
-      // parity task since it's the same refresh block; without this, an
-      // export triggered right after a slider change (before the next RAF
-      // tick) could ship stale/default mirror/displace/slice values.
-      if (eu.u_chainOrder)       eu.u_chainOrder.value        = spatialChainOrderToShaderInts(ef.spatialChainOrder);
-      if (eu.quadMirrorEnabled)  eu.quadMirrorEnabled.value   = ef.quadMirrorEnabled || false;
-      if (eu.quadMirrorCenter)   eu.quadMirrorCenter.value.set(ef.quadMirrorCenterX ?? 0.5, ef.quadMirrorCenterY ?? 0.5);
-      if (eu.noiseDisplaceEnabled) eu.noiseDisplaceEnabled.value = ef.noiseDisplaceEnabled || false;
-      if (eu.noiseDisplaceAmount)  eu.noiseDisplaceAmount.value  = ef.noiseDisplaceAmount ?? 0.1;
-      if (eu.noiseDisplaceScale)   eu.noiseDisplaceScale.value   = ef.noiseDisplaceScale ?? 2;
-      if (eu.noiseDisplaceSpeed)   eu.noiseDisplaceSpeed.value   = ef.noiseDisplaceSpeed ?? 0.5;
-      if (eu.graphicSliceEnabled)  eu.graphicSliceEnabled.value  = ef.graphicSliceEnabled || false;
-      if (eu.graphicSliceBands)    eu.graphicSliceBands.value    = ef.graphicSliceBands ?? 16;
-      if (eu.graphicSliceAmount)   eu.graphicSliceAmount.value   = ef.graphicSliceAmount ?? 0.08;
-      if (eu.graphicSliceRate)     eu.graphicSliceRate.value     = ef.graphicSliceRate ?? 8;
     }
 
     const targetWidth = renderer.domElement.width || canvasSettings.width;
@@ -4921,6 +4946,7 @@ export const GradientCanvas = memo(function GradientCanvas({
     if (needsResize) {
       renderer.setSize(targetWidth, targetHeight, false);
       resizeRenderTargets(targetWidth, targetHeight, renderTargetRef.current, captureRT);
+      resizeSpatialChainCompositor(spatialCompositorRef.current, targetWidth, targetHeight);
       // SPRINT 1 FIX: update effects resolution for this transient export-size render so
       // all resolution-dependent FX (film grain, dither, halftone, chromatic aberration)
       // operate at the correct pixel density during the export frame pass.
@@ -4933,12 +4959,20 @@ export const GradientCanvas = memo(function GradientCanvas({
     // Blur / Saturation / Vignette / Strobe) into the effects material for this
     // export frame, on top of the user's manual effect settings — mirroring the
     // live global write so the exported frame matches the preview.
+    //
+    // Sprint 1.2: Chromatic Aberration and Blur no longer have uniforms on
+    // effectsMaterial (the finishing pass) — they're postfx stages now.
+    // exportChromaOverride/exportBlurOverride carry this frame's final
+    // (base + audio delta) values to the runSpatialChain() call below,
+    // computed unconditionally (matching shouldUsePostProcess's own
+    // unconditional read of exportGlobal a few lines down) so export stays
+    // correct whether or not exportAudioActive happens to be true.
+    const exportChromaOverride = effectsRef.current.chromaticAberration + exportGlobal.chromaAdd;
+    const exportBlurOverride = effectsRef.current.blur + exportGlobal.blurAdd;
     if (exportAudioActive && effectsMaterialRef.current?.uniforms) {
       const eu = effectsMaterialRef.current.uniforms;
       const base = effectsRef.current;
-      if (eu.chromaticAberration) eu.chromaticAberration.value = base.chromaticAberration + exportGlobal.chromaAdd;
       if (eu.brightness) eu.brightness.value = base.brightness + exportGlobal.brightnessAdd + exportGlobal.strobeAdd;
-      if (eu.blur) eu.blur.value = base.blur + exportGlobal.blurAdd;
       if (eu.saturation) eu.saturation.value = base.saturation + exportGlobal.saturationAdd;
       if (eu.vignette) eu.vignette.value = base.vignette + exportGlobal.vignetteAdd;
       if (eu.uShake) eu.uShake.value.set(exportGlobal.shakeX, exportGlobal.shakeY);
@@ -4953,9 +4987,24 @@ export const GradientCanvas = memo(function GradientCanvas({
       renderer.setRenderTarget(renderTarget);
       renderer.clear();
       renderer.render(scene, camera);
-      if (postProcessQuadRef.current?.material) {
+      if (postProcessQuadRef.current?.material && spatialCompositorRef.current) {
         const pm = postProcessQuadRef.current.material as THREE.ShaderMaterial;
-        if (pm.uniforms?.tDiffuse) pm.uniforms.tDiffuse.value = renderTarget.texture;
+        if (pm.uniforms?.tDiffuse) {
+          pm.uniforms.tDiffuse.value = runSpatialChain(
+            renderer,
+            postProcessScene,
+            postProcessCamera,
+            postProcessQuadRef.current,
+            spatialCompositorRef.current,
+            pm,
+            renderTarget.texture,
+            effectsRef.current,
+            pm.uniforms.time?.value ?? 0,
+            pm.uniforms.resolution?.value ?? new THREE.Vector2(1920, 1080),
+            exportChromaOverride,
+            exportBlurOverride
+          );
+        }
       }
       if (captureRT) {
         renderer.setRenderTarget(captureRT);
@@ -4979,6 +5028,7 @@ export const GradientCanvas = memo(function GradientCanvas({
     if (needsResize) {
       renderer.setSize(liveW, liveH, false);
       resizeRenderTargets(liveW, liveH, renderTargetRef.current, captureRT);
+      resizeSpatialChainCompositor(spatialCompositorRef.current, liveW, liveH);
       // SPRINT 1 FIX: restore effects resolution to live preview size after the export
       // frame pass so subsequent live-preview renders use the correct viewport density.
       if (effectsMaterialRef.current?.uniforms.resolution) {
@@ -5054,6 +5104,7 @@ export const GradientCanvas = memo(function GradientCanvas({
     renderer.setPixelRatio(1);
     renderer.setSize(w, h, false);
     resizeRenderTargets(w, h, renderTargetRef.current, captureRTRef.current);
+    resizeSpatialChainCompositor(spatialCompositorRef.current, w, h);
     // SPRINT 1 FIX: keep effects resolution uniform in sync with the export renderer size.
     // This is the primary update point — setExportSize is called once before each export
     // session, sizing the renderer from preview to export dimensions. Without this, every
@@ -5077,6 +5128,7 @@ export const GradientCanvas = memo(function GradientCanvas({
       const drawW = Math.max(2, renderer.domElement.width);
       const drawH = Math.max(2, renderer.domElement.height);
       resizeRenderTargets(drawW, drawH, renderTargetRef.current, captureRTRef.current);
+      resizeSpatialChainCompositor(spatialCompositorRef.current, drawW, drawH);
       // SPRINT 1 FIX: restore effects resolution to preview size after export so the live
       // canvas renders film grain, dither, halftone, and chromatic aberration at the
       // correct density for the preview viewport — not the export resolution.
