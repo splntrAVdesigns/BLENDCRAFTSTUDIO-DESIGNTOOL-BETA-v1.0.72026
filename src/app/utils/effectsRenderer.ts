@@ -1,46 +1,23 @@
 import * as THREE from '../lib/three';
 import { EffectsConfig } from '../components/controls/EffectsControls';
 
-// Convert shape string to integer for shader
-function shapeToInt(shape: string): number {
-  const shapeMap: Record<string, number> = {
-    'square': 0,
-    'circle': 1,
-    'hexagon': 2,
-    'diamond': 3,
-    'triangle': 4,
-    'lines': 5,
-  };
-  return shapeMap[shape] || 0;
-}
-
-// Convert dithering string to integer for shader
-function ditheringToInt(dithering: string): number {
-  const ditheringMap: Record<string, number> = {
-    'none': 0,
-    'bayer': 1,
-    'noise': 2,
-    'blueNoise': 3,
-    'scanline': 4,
-    'dotDiffusion': 5,
-    'crosshatch': 6,
-  };
-  return ditheringMap[dithering] || 0;
-}
-
 // ── The "finishing" pass ─────────────────────────────────────────────────
-// Sprint 1.2 note: this material used to also handle Chromatic Aberration,
-// Blur, Pixelate, Shape Overlay, and (briefly, in Sprint 1.1) Quad Mirror/
-// Noise Displacement/Graphic Slice, all in one shader. Those seven now run
-// as their own ping-pong passes in src/app/postfx/ BEFORE this material
-// ever runs — see pingPongCompositor.ts for why (multi-tap filters need
-// real neighbor-pixel access to the previous stage's output, which a
-// single fragment shader invocation can't get from anything short of an
-// actual prior render pass). This shader now only owns what was always a
-// genuinely fixed-order tail: posterize, halftone, color grading, grain,
-// vignette, fresnel, invert, and flash. Its `tDiffuse` input is whatever
-// the spatial chain produced (or the raw composited frame, unchanged, when
-// no spatial stage is active).
+// Sprint 1.4 note: this material used to also handle Chromatic Aberration,
+// Blur, Pixelate, Shape Overlay, Quad Mirror, Noise Displacement, Graphic
+// Slice, Vignette, Film Grain, Posterize, Halftone, and Fresnel — all 12
+// now run as their own ping-pong passes in src/app/postfx/ BEFORE this
+// material ever runs — see pingPongCompositor.ts (multi-tap filters like
+// Blur need real neighbor-pixel access to the previous stage's output,
+// which a single fragment shader invocation can't get from anything short
+// of an actual prior render pass; the 5 folded in during Sprint 1.4 never
+// had that problem — they're pure per-pixel color transforms — but moved
+// into the same system anyway so they can be freely reordered relative to
+// the other 7 in the unified Effects Layering list). This shader now only
+// owns what's explicitly NOT meant to be layerable: Color Adjustments
+// (saturation/brightness/contrast/hue shift), Temperature/Tint, Invert,
+// and Flash — all fixed position, applied after the layering chain
+// resolves. Its `tDiffuse` input is whatever that chain produced (or the
+// raw composited frame, unchanged, when no layerable stage is active).
 export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMaterial {
   const vertexShader = `
     varying vec2 vUv;
@@ -53,24 +30,12 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
 
   const fragmentShader = `
     uniform sampler2D tDiffuse;
-    uniform float vignette;
     uniform float saturation;
     uniform float brightness;
     uniform float contrast;
     uniform float hueShift;
-    uniform float filmGrain;
-    uniform float filmGrainSize;
     uniform float temperature;
     uniform float tint;
-    uniform float posterize;
-    uniform float ditherStrength;
-    uniform float ditherScale;
-    uniform float halftone;
-    uniform float halftoneAngle;
-    uniform int posterizeDithering; // 0=none, 1=bayer, 2=noise, 3=blue-noise hash, 4=scanline, 5=dot diffusion, 6=crosshatch
-    uniform int creativeShape; // 0=square, 1=circle, 2=hexagon, 3=diamond, 4=triangle, 5=lines
-    uniform bool posterizeEnabled;
-    uniform bool halftoneEnabled;
     uniform bool invert;
     uniform float time;
     uniform vec2 resolution;
@@ -80,10 +45,6 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
     // edges smear rather than reveal black. Zero when audio isn't driving it,
     // so a non-shaking frame samples exactly as before.
     uniform vec2 uShake;
-    // PHASE 1: Fresnel Effect
-    uniform bool fresnelEnabled;
-    uniform float fresnelPower;
-    uniform float fresnelIntensity;
 
     // Sprint 2: Shader-based flash uniforms — replaces CSS div overlays.
     // Flash is applied after all effects and respects mask alpha so masked regions never flash.
@@ -148,103 +109,6 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
       return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
     }
     
-    // Random function for noise
-    float random(vec2 st) {
-      return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
-    }
-    
-    // High quality STATIC grain (no animation)
-    float filmGrainNoise(vec2 uv) {
-      return fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453123);
-    }
-    
-    // Shape detection function for halftone (still used here — the OTHER
-    // halftone, applyHalftone below, distinct from the Shape Overlay effect
-    // which moved to postfx/stages/shapeOverlayStage.ts along with its own
-    // copy of this function, per the self-contained-effect-file convention).
-    float getShape(vec2 cellPos, vec2 cellCenter, float size, int shape) {
-      vec2 delta = cellPos - cellCenter;
-      float dist = length(delta);
-      
-      if (shape == 0) { // Square
-        return (abs(delta.x) < size * 0.4 && abs(delta.y) < size * 0.4) ? 1.0 : 0.0;
-      } else if (shape == 1) { // Circle
-        return (dist < size * 0.4) ? 1.0 : 0.0;
-      } else if (shape == 2) { // Hexagon
-        float angle = atan(delta.y, delta.x);
-        float hexDist = cos(floor(0.5 + angle / 1.047197) * 1.047197 - angle) * dist;
-        return (hexDist < size * 0.4) ? 1.0 : 0.0;
-      } else if (shape == 3) { // Diamond
-        float diamondDist = abs(delta.x) + abs(delta.y);
-        return (diamondDist < size * 0.5) ? 1.0 : 0.0;
-      } else if (shape == 4) { // Triangle - handled specially in tessellation
-        // This shouldn't be called for triangles when proper tessellation is used
-        return 1.0;
-      } else if (shape == 5) { // Lines (horizontal)
-        return (abs(delta.y) < size * 0.1) ? 1.0 : 0.0;
-      }
-      
-      return 1.0;
-    }
-    
-    // Halftone effect with angle and shape support
-    vec3 applyHalftone(vec3 color, vec2 uv, float amount, float angle, int shape) {
-      if (amount < 1.0) return color;
-      
-      // Convert to grayscale
-      float gray = dot(color, vec3(0.299, 0.587, 0.114));
-      
-      // Rotate UV based on angle
-      float angleRad = radians(angle);
-      vec2 center = vec2(0.5, 0.5);
-      vec2 uvCentered = uv - center;
-      mat2 rotation = mat2(cos(angleRad), -sin(angleRad), sin(angleRad), cos(angleRad));
-      vec2 rotatedUV = rotation * uvCentered + center;
-      
-      // Create halftone pattern
-      vec2 pixelPos = rotatedUV * resolution;
-      float dotSize = amount;
-      vec2 cellIndex = floor(pixelPos / dotSize);
-      vec2 cellCenter = (cellIndex + 0.5) * dotSize;
-      
-      // Adjust dot size based on luminance
-      float dotScale = 1.0 - gray;
-      float adjustedDotSize = dotSize * dotScale;
-      
-      // Apply shape mask with luminance-based sizing
-      float shapeMask = getShape(pixelPos, cellCenter, adjustedDotSize, shape);
-      
-      return mix(color, vec3(0.0), 1.0 - shapeMask);
-    }
-    
-    // Film grain - MUCH MORE VISIBLE with animated noise
-    vec3 applyFilmGrain(vec3 color, vec2 uv, float amount, float grainSize) {
-      if (amount < 0.01) return color;
-      
-      // Ultra-high frequency for visible grain
-      float frequency = 500.0 / max(grainSize, 0.1);
-      vec2 grainUV = uv * resolution / frequency;
-      
-      // Generate animated noise
-      float noise = filmGrainNoise(grainUV);
-      
-      // Make grain MUCH stronger - increased from 0.05 to 0.5!
-      float grainValue = (noise - 0.5) * amount * 2.0;
-      
-      // Apply to luminance for realistic film grain
-      return clamp(color + vec3(grainValue), 0.0, 1.0);
-    }
-    
-    // Vignette
-    vec3 applyVignette(vec3 color, vec2 uv, float intensity) {
-      if (intensity < 0.01) return color;
-      
-      vec2 position = uv - vec2(0.5);
-      float dist = length(position);
-      float vig = smoothstep(0.8, 0.4, dist);
-      vig = mix(1.0, vig, intensity);
-      return color * vig;
-    }
     
     // Color adjustments
     vec3 adjustColor(vec3 color, float sat, float bright, float cont) {
@@ -284,92 +148,6 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
       return clamp(color, 0.0, 1.0);
     }
     
-    float bayer4(vec2 pixel) {
-      vec2 p = mod(pixel, 4.0);
-      float x = p.x;
-      float y = p.y;
-      float row0 = mix(mix(0.0, 8.0, step(1.0, x)), mix(2.0, 10.0, step(3.0, x)), step(2.0, x));
-      float row1 = mix(mix(12.0, 4.0, step(1.0, x)), mix(14.0, 6.0, step(3.0, x)), step(2.0, x));
-      float row2 = mix(mix(3.0, 11.0, step(1.0, x)), mix(1.0, 9.0, step(3.0, x)), step(2.0, x));
-      float row3 = mix(mix(15.0, 7.0, step(1.0, x)), mix(13.0, 5.0, step(3.0, x)), step(2.0, x));
-      float upper = mix(row0, row1, step(1.0, y));
-      float lower = mix(row2, row3, step(3.0, y));
-      return (mix(upper, lower, step(2.0, y)) + 0.5) / 16.0;
-    }
-
-    // Stable hash dither with a blue-noise-like high-frequency distribution.
-    float blueNoiseHash(vec2 pixel) {
-      float a = random(pixel * vec2(0.754877, 0.569840));
-      float b = random((pixel + vec2(37.0, 17.0)) * vec2(1.324718, 2.236068));
-      return fract(a + b * 0.618034);
-    }
-
-    float scanlineDither(vec2 pixel) {
-      float row = mod(pixel.y, 4.0);
-      float rowBias = mix(-0.35, 0.35, step(2.0, row));
-      float fine = random(vec2(pixel.x, floor(pixel.y * 0.5))) - 0.5;
-      return clamp(0.5 + rowBias + fine * 0.35, 0.0, 1.0);
-    }
-
-    float dotDiffusionDither(vec2 pixel) {
-      vec2 cell = mod(pixel, 6.0) - 3.0;
-      float dot = smoothstep(3.2, 0.0, length(cell));
-      float jitter = random(floor(pixel / 6.0)) * 0.25;
-      return clamp(dot * 0.85 + jitter, 0.0, 1.0);
-    }
-
-    float crosshatchDither(vec2 pixel) {
-      float a = step(0.5, mod(pixel.x + pixel.y, 8.0) / 8.0);
-      float b = step(0.5, mod(pixel.x - pixel.y + 64.0, 8.0) / 8.0);
-      float noise = random(floor(pixel / 2.0)) * 0.2;
-      return clamp((a + b) * 0.35 + noise, 0.0, 1.0);
-    }
-
-    // Posterize. User-facing posterize is 0-100; curve is intentionally front-loaded
-    // so 30% is already visible and 60% feels strong for design-use dithering.
-    vec3 applyPosterize(vec3 color, vec2 uv, float amount, int dithering, int shape, float dStrength, float dScale) {
-      if (amount <= 0.01) return color;
-
-      float strength = clamp(amount / 100.0, 0.0, 1.0);
-      float curvedStrength = pow(strength, 0.45);
-      float l = floor(mix(24.0, 2.0, curvedStrength) + 0.5);
-      float stepSize = 1.0 / max(1.0, l - 1.0);
-
-      float density = mix(0.28, 2.4, clamp(dScale / 100.0, 0.0, 1.0));
-      vec2 pixel = floor(uv * resolution * density);
-      vec3 working = color;
-      float threshold = 0.5;
-      float amp = mix(0.0, 3.25, clamp(dStrength / 100.0, 0.0, 1.0));
-      
-      if (dithering == 1) {
-        threshold = bayer4(pixel);
-        amp *= 1.1;
-      } else if (dithering == 2) {
-        threshold = random(pixel + floor(time * 24.0));
-        amp *= 1.35;
-      } else if (dithering == 3) {
-        threshold = blueNoiseHash(pixel);
-        amp *= 1.25;
-      } else if (dithering == 4) {
-        threshold = scanlineDither(pixel);
-        amp *= 1.2;
-      } else if (dithering == 5) {
-        threshold = dotDiffusionDither(pixel);
-        amp *= 1.3;
-      } else if (dithering == 6) {
-        threshold = crosshatchDither(pixel);
-        amp *= 1.25;
-      }
-
-      if (dithering > 0) {
-        vec3 lumaBias = vec3(dot(color, vec3(0.299, 0.587, 0.114)));
-        vec3 pushed = mix(color, lumaBias, clamp(strength * 0.24, 0.0, 0.24));
-        working = clamp(pushed + (threshold - 0.5) * stepSize * amp, 0.0, 1.0);
-      }
-      
-      return floor(working * (l - 1.0) + 0.5) / (l - 1.0);
-    }
-    
     // Hue shift
     vec3 applyHueShift(vec3 color, float shift) {
       if (abs(shift) < 0.001) return color;
@@ -377,26 +155,6 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
       vec3 hsv = rgb2hsv(color);
       hsv.x = fract(hsv.x + shift / 360.0);
       return hsv2rgb(hsv);
-    }
-    
-    // PHASE 1: Fresnel Effect - Edge lighting based on viewing angle
-    vec3 applyFresnelEffect(vec3 color, vec2 uv, float power, float intensity) {
-      // Create pseudo-normal from UV position (centered)
-      vec2 centered = uv - 0.5;
-      float dist = length(centered);
-      
-      // Enhanced Fresnel approximation using distance from center
-      // Invert so edges are bright
-      float edgeDist = clamp(dist * 2.0, 0.0, 1.0);
-      float fresnel = pow(edgeDist, power);
-      
-      // Strengthen edge glow effect
-      vec3 edgeColor = color * (1.0 + fresnel * intensity * 4.0);
-      
-      // Add strong white rim at extreme edges for glass/chrome effect
-      edgeColor += vec3(fresnel * fresnel * intensity * 1.5);
-      
-      return mix(color, edgeColor, intensity);
     }
     
     void main() {
@@ -414,16 +172,6 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
       vec3 color = initialSample.rgb;
       float alpha = initialSample.a;
 
-      // Apply posterize
-      if (posterizeEnabled && posterize > 0.01) {
-        color = applyPosterize(color, uv, posterize, posterizeDithering, creativeShape, ditherStrength, ditherScale);
-      }
-      
-      // Apply halftone
-      if (halftoneEnabled && halftone > 0.01) {
-        color = applyHalftone(color, uv, halftone, halftoneAngle, creativeShape);
-      }
-      
       // Apply temperature and tint
       if (abs(temperature) > 0.01) {
         color = applyTemperature(color, temperature);
@@ -438,21 +186,6 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
       // Apply hue shift
       if (abs(hueShift) > 0.01) {
         color = applyHueShift(color, hueShift);
-      }
-      
-      // Apply film grain
-      if (filmGrain > 0.01) {
-        color = applyFilmGrain(color, uv, filmGrain, filmGrainSize);
-      }
-      
-      // Apply vignette
-      if (vignette > 0.01) {
-        color = applyVignette(color, uv, vignette);
-      }
-      
-      // PHASE 1: Apply Fresnel effect (edge lighting)
-      if (fresnelEnabled) {
-        color = applyFresnelEffect(color, uv, fresnelPower, fresnelIntensity);
       }
       
       // Apply invert
@@ -534,34 +267,18 @@ export function createEffectsMaterial(effects: EffectsConfig): THREE.ShaderMater
   return new THREE.ShaderMaterial({
     uniforms: {
       tDiffuse: { value: null },
-      vignette: { value: effects.vignette },
       saturation: { value: effects.saturation },
       brightness: { value: effects.brightness },
       contrast: { value: effects.contrast },
       hueShift: { value: effects.hueShift },
-      filmGrain: { value: effects.filmGrain || 0 },
-      filmGrainSize: { value: effects.filmGrainSize || 1 },
       temperature: { value: effects.temperature || 0 },
       tint: { value: effects.tint || 0 },
-      posterize: { value: effects.posterize || 0 },
-      ditherStrength: { value: effects.ditherStrength ?? 65 },
-      ditherScale: { value: effects.ditherScale ?? 50 },
-      halftone: { value: effects.halftone || 0 },
-      halftoneAngle: { value: effects.halftoneAngle || 0 },
-      posterizeDithering: { value: ditheringToInt(effects.posterizeDithering || 'none') },
-      creativeShape: { value: shapeToInt(effects.creativeShape || 'square') },
-      posterizeEnabled: { value: effects.posterizeEnabled || false },
-      halftoneEnabled: { value: effects.halftoneEnabled || false },
       invert: { value: effects.invert || false },
       time: { value: 0 },
       resolution: { value: new THREE.Vector2(1920, 1080) },
       // STAGE 3.0.5: audio shake offset (UV space). Driven per-frame from the
       // global audio deltas; stays (0,0) whenever nothing routes to Shake.
       uShake: { value: new THREE.Vector2(0, 0) },
-      // PHASE 1: Fresnel Effect
-      fresnelEnabled: { value: effects.fresnelEnabled || false },
-      fresnelPower: { value: effects.fresnelPower || 2 },
-      fresnelIntensity: { value: effects.fresnelIntensity || 0.5 },
       // Sprint 2: shader-based flash — driven by flash RAF loop in GradientCanvas
       uFlashOpacity:   { value: 0.0 },
       uFlashColor:     { value: new THREE.Vector3(1, 1, 1) },

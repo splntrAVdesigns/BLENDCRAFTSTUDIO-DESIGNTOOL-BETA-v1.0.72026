@@ -7,7 +7,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback, mem
 import * as THREE from '../../lib/three';
 import { toast } from 'sonner';
 import { Layer, InteractionState, CanvasSettings, LayerTransformState, GradientConfig, EasingType, RenderApi } from '../../types/gradient';
-import { EffectsConfig } from '../controls/EffectsControls';
+import { EffectsConfig, SpatialStageId } from '../controls/EffectsControls';
 import { renderGradientLayer, getAnimationTypeValue } from '../../utils/gradientRenderer';
 import { calculateAnimationOffset, applyEasing, estimateCycleTime } from '../../hooks/useLayerAnimations';
 import { getAudioDeltasForLayer, tickAudioFrame, getGlobalAudioDeltas, tickAudioExportFrame } from '../../audio/audioReactiveRender';
@@ -3094,7 +3094,11 @@ export const GradientCanvas = memo(function GradientCanvas({
     // Sprint 1.2: blur/chromaticAberration/shapeOverlay/pixelate (+ their
     // enabled flags) no longer live on this material — they moved to their
     // own postfx stage materials, driven by runSpatialChain() instead.
-    material.uniforms.vignette.value = effects.vignette;
+    // Sprint 1.4: vignette/filmGrain/posterize/halftone/fresnel (+ their
+    // params/enabled flags/creativeShape/posterizeDithering) moved out the
+    // same way, for the same reason — all 5 are now layerable via the same
+    // Effects Layering system, which means they need real neighbor/position
+    // independence the compositor provides, not a fixed spot in this shader.
     material.uniforms.saturation.value = effects.saturation;
     material.uniforms.brightness.value = effects.brightness;
     material.uniforms.contrast.value = effects.contrast;
@@ -3105,41 +3109,11 @@ export const GradientCanvas = memo(function GradientCanvas({
       material.uniforms.hueShift.value = effects.hueShift;
     }
     
-    material.uniforms.filmGrain.value = effects.filmGrain || 0;
-    material.uniforms.filmGrainSize.value = effects.filmGrainSize || 1;
     material.uniforms.temperature.value = effects.temperature || 0;
     material.uniforms.tint.value = effects.tint || 0;
-    material.uniforms.posterize.value = effects.posterize || 0;
-    if (material.uniforms.ditherStrength) material.uniforms.ditherStrength.value = effects.ditherStrength ?? 65;
-    if (material.uniforms.ditherScale) material.uniforms.ditherScale.value = effects.ditherScale ?? 50;
-    material.uniforms.halftone.value = effects.halftone || 0;
-    material.uniforms.halftoneAngle.value = effects.halftoneAngle || 0;
-    material.uniforms.posterizeEnabled.value = effects.posterizeEnabled || false;
-    material.uniforms.halftoneEnabled.value = effects.halftoneEnabled || false;
     material.uniforms.invert.value = effects.invert || false;
     
-    // PHASE 1: Update Fresnel Effect uniforms
-    material.uniforms.fresnelEnabled.value = effects.fresnelEnabled || false;
-    material.uniforms.fresnelPower.value = effects.fresnelPower || 2;
-    material.uniforms.fresnelIntensity.value = effects.fresnelIntensity || 0.5;
-    
-    // Update new uniforms for shape and dithering
-    const shapeMap: Record<string, number> = {
-      'square': 0, 'circle': 1, 'hexagon': 2, 'diamond': 3, 'triangle': 4, 'lines': 5
-    };
-    const ditheringMap: Record<string, number> = {
-      'none': 0,
-      'bayer': 1,
-      'noise': 2,
-      'blueNoise': 3,
-      'scanline': 4,
-      'dotDiffusion': 5,
-      'crosshatch': 6,
-    };
-      material.uniforms.creativeShape.value = shapeMap[effects.creativeShape || 'square'] || 0;
-      material.uniforms.posterizeDithering.value = ditheringMap[effects.posterizeDithering || 'none'] || 0;
-      
-      // No need for material.needsUpdate when only updating uniforms
+    // No need for material.needsUpdate when only updating uniforms
   }, [effects, animationPropertiesKey]); // isPlaying removed â€” no uniform changes needed on play/pause here
 
   // Main animation loop
@@ -3679,18 +3653,20 @@ export const GradientCanvas = memo(function GradientCanvas({
       // replacing them, so a scene with chromatic aberration already dialled in
       // gets audio movement around that setting instead of having it reset.
       //
-      // Sprint 1.2: Chromatic Aberration and Blur uniforms no longer live on
-      // effectsMaterial (the finishing pass) — they moved to their own
-      // postfx stage materials. audioChromaOverride/audioBlurOverride carry
-      // this frame's final (base + audio delta) values down to the
+      // Sprint 1.2/1.4: Chromatic Aberration, Blur, and Vignette uniforms no
+      // longer live on effectsMaterial (the finishing pass) — they moved to
+      // their own postfx stage materials. audioSpatialOverrides carries this
+      // frame's final (base + audio delta) values down to the
       // runSpatialChain() call below, which is what actually drives those
-      // two stages now.
-      let audioChromaOverride: number;
-      let audioBlurOverride: number;
+      // three stages now.
+      let audioSpatialOverrides: Partial<Record<SpatialStageId, number>>;
       {
         const g = getGlobalAudioDeltas();
-        audioChromaOverride = effectsRef.current.chromaticAberration + g.chromaAdd;
-        audioBlurOverride = effectsRef.current.blur + g.blurAdd;
+        audioSpatialOverrides = {
+          chroma: effectsRef.current.chromaticAberration + g.chromaAdd,
+          blur: effectsRef.current.blur + g.blurAdd,
+          vignette: effectsRef.current.vignette + g.vignetteAdd,
+        };
         if (effectsMaterial.uniforms.brightness) {
           // Strobe maps to brightness: a full hit flashes the frame white.
           effectsMaterial.uniforms.brightness.value =
@@ -3699,10 +3675,6 @@ export const GradientCanvas = memo(function GradientCanvas({
         if (effectsMaterial.uniforms.saturation) {
           effectsMaterial.uniforms.saturation.value =
             effectsRef.current.saturation + g.saturationAdd;
-        }
-        if (effectsMaterial.uniforms.vignette) {
-          effectsMaterial.uniforms.vignette.value =
-            effectsRef.current.vignette + g.vignetteAdd;
         }
         // STAGE 3.0.5: audio SHAKE — whole-frame UV jolt. Set every frame;
         // (0,0) when nothing routes to Shake, so a still frame is unaffected.
@@ -3732,9 +3704,10 @@ export const GradientCanvas = memo(function GradientCanvas({
           renderer.clear();
           renderer.render(scene, camera);
           // Update post-process tDiffuse via the spatial FX chain (Mirror/
-          // Displace/Slice/Chroma/Blur/Pixelate/Shape Overlay) — see
-          // src/app/postfx/. Zero active stages = zero extra passes,
-          // returns renderTarget.texture straight through.
+          // Displace/Slice/Chroma/Blur/Pixelate/Shape Overlay/Vignette/
+          // Film Grain/Posterize/Halftone/Fresnel) — see src/app/postfx/.
+          // Zero active stages = zero extra passes, returns
+          // renderTarget.texture straight through.
           if (postProcessQuadRef.current?.material && spatialCompositorRef.current) {
             const pm = postProcessQuadRef.current.material as THREE.ShaderMaterial;
             if (pm.uniforms?.tDiffuse) {
@@ -3749,8 +3722,7 @@ export const GradientCanvas = memo(function GradientCanvas({
                 effectsRef.current,
                 animationTime,
                 effectsMaterial.uniforms.resolution.value,
-                audioChromaOverride,
-                audioBlurOverride
+                audioSpatialOverrides
               );
             }
           }
@@ -4955,21 +4927,23 @@ export const GradientCanvas = memo(function GradientCanvas({
     // export frame, on top of the user's manual effect settings — mirroring the
     // live global write so the exported frame matches the preview.
     //
-    // Sprint 1.2: Chromatic Aberration and Blur no longer have uniforms on
-    // effectsMaterial (the finishing pass) — they're postfx stages now.
-    // exportChromaOverride/exportBlurOverride carry this frame's final
-    // (base + audio delta) values to the runSpatialChain() call below,
-    // computed unconditionally (matching shouldUsePostProcess's own
-    // unconditional read of exportGlobal a few lines down) so export stays
-    // correct whether or not exportAudioActive happens to be true.
-    const exportChromaOverride = effectsRef.current.chromaticAberration + exportGlobal.chromaAdd;
-    const exportBlurOverride = effectsRef.current.blur + exportGlobal.blurAdd;
+    // Sprint 1.2/1.4: Chromatic Aberration, Blur, and Vignette no longer have
+    // uniforms on effectsMaterial (the finishing pass) — they're postfx
+    // stages now. exportSpatialOverrides carries this frame's final (base +
+    // audio delta) values to the runSpatialChain() call below, computed
+    // unconditionally (matching shouldUsePostProcess's own unconditional
+    // read of exportGlobal a few lines down) so export stays correct
+    // whether or not exportAudioActive happens to be true.
+    const exportSpatialOverrides: Partial<Record<SpatialStageId, number>> = {
+      chroma: effectsRef.current.chromaticAberration + exportGlobal.chromaAdd,
+      blur: effectsRef.current.blur + exportGlobal.blurAdd,
+      vignette: effectsRef.current.vignette + exportGlobal.vignetteAdd,
+    };
     if (exportAudioActive && effectsMaterialRef.current?.uniforms) {
       const eu = effectsMaterialRef.current.uniforms;
       const base = effectsRef.current;
       if (eu.brightness) eu.brightness.value = base.brightness + exportGlobal.brightnessAdd + exportGlobal.strobeAdd;
       if (eu.saturation) eu.saturation.value = base.saturation + exportGlobal.saturationAdd;
-      if (eu.vignette) eu.vignette.value = base.vignette + exportGlobal.vignetteAdd;
       if (eu.uShake) eu.uShake.value.set(exportGlobal.shakeX, exportGlobal.shakeY);
     }
 
@@ -4996,8 +4970,7 @@ export const GradientCanvas = memo(function GradientCanvas({
             effectsRef.current,
             pm.uniforms.time?.value ?? 0,
             pm.uniforms.resolution?.value ?? new THREE.Vector2(1920, 1080),
-            exportChromaOverride,
-            exportBlurOverride
+            exportSpatialOverrides
           );
         }
       }

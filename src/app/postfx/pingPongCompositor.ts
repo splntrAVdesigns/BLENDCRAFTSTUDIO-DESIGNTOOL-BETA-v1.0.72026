@@ -8,6 +8,11 @@ import { createChromaticAberrationStage } from './stages/chromaticAberrationStag
 import { createBlurStage } from './stages/blurStage';
 import { createPixelateStage } from './stages/pixelateStage';
 import { createShapeOverlayStage } from './stages/shapeOverlayStage';
+import { createVignetteStage } from './stages/vignetteStage';
+import { createFilmGrainStage } from './stages/filmGrainStage';
+import { createPosterizeStage } from './stages/posterizeStage';
+import { createHalftoneStage } from './stages/halftoneStage';
+import { createFresnelStage } from './stages/fresnelStage';
 
 // The multi-pass replacement for Sprint 1.1's single-pass spatial-chain
 // loop. Root cause of why that loop didn't actually deliver composability:
@@ -60,6 +65,11 @@ export function createSpatialChainCompositor(width: number, height: number): Spa
       blur: createBlurStage(),
       pixelate: createPixelateStage(),
       shapeOverlay: createShapeOverlayStage(),
+      vignette: createVignetteStage(),
+      filmGrain: createFilmGrainStage(),
+      posterize: createPosterizeStage(),
+      halftone: createHalftoneStage(),
+      fresnel: createFresnelStage(),
     },
   };
 }
@@ -88,18 +98,16 @@ export function disposeSpatialChainCompositor(compositor: SpatialChainCompositor
 export function getActiveSpatialStages(
   compositor: SpatialChainCompositor,
   effects: EffectsConfig,
-  chromaOverride?: number,
-  blurOverride?: number
+  overrides?: Partial<Record<SpatialStageId, number>>
 ): SpatialStageId[] {
-  const order = Array.isArray(effects.spatialChainOrder) && effects.spatialChainOrder.length === 7
+  const order = Array.isArray(effects.spatialChainOrder) && effects.spatialChainOrder.length === 12
     ? effects.spatialChainOrder
     : DEFAULT_SPATIAL_CHAIN_ORDER;
 
   return order.filter((id) => {
     const stage = compositor.stages[id];
     if (!stage) return false;
-    const override = id === 'chroma' ? chromaOverride : id === 'blur' ? blurOverride : undefined;
-    return stage.isActive(effects, override);
+    return stage.isActive(effects, overrides?.[id]);
   });
 }
 
@@ -109,6 +117,12 @@ export function getActiveSpatialStages(
 // grading, grain, vignette, fresnel, flash — everything downstream of the
 // spatial chain) renders with the right shader without having to remember
 // to reset it itself.
+//
+// `overrides` carries this frame's final (base + audio delta) value for
+// any stage that's audio-modulatable — currently chroma/blur/vignette.
+// A single map rather than one positional param per stage: adding the
+// next audio-reactive stage later is a new map key, not a new parameter
+// threaded through every call site.
 export function runSpatialChain(
   renderer: THREE.WebGLRenderer,
   scene: THREE.Scene,
@@ -120,10 +134,9 @@ export function runSpatialChain(
   effects: EffectsConfig,
   time: number,
   resolution: THREE.Vector2,
-  chromaOverride?: number,
-  blurOverride?: number
+  overrides?: Partial<Record<SpatialStageId, number>>
 ): THREE.Texture {
-  const activeIds = getActiveSpatialStages(compositor, effects, chromaOverride, blurOverride);
+  const activeIds = getActiveSpatialStages(compositor, effects, overrides);
 
   if (activeIds.length === 0) {
     return sourceTexture;
@@ -134,8 +147,7 @@ export function runSpatialChain(
 
   activeIds.forEach((id, i) => {
     const stage = compositor.stages[id];
-    const override = id === 'chroma' ? chromaOverride : id === 'blur' ? blurOverride : undefined;
-    stage.syncUniforms(effects, time, resolution, override);
+    stage.syncUniforms(effects, time, resolution, overrides?.[id]);
     (stage.material.uniforms.tSource as { value: THREE.Texture }).value = currentSource;
 
     const target = targets[i % 2];

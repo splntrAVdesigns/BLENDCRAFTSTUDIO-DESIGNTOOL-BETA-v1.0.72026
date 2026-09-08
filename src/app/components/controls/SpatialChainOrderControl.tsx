@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useDrag, useDrop, DndProvider } from 'react-dnd';
 import { HTML5Backend } from 'react-dnd-html5-backend';
 import { GripVertical } from 'lucide-react';
+import { ScrollArea } from '../ui/scroll-area';
 import type { SpatialStageId } from './EffectsControls';
 
 const STAGE_ITEM_TYPE = 'spatial-fx-stage';
@@ -21,6 +22,11 @@ const STAGE_LABELS: Record<SpatialStageId, string> = {
   blur: 'Blur',
   pixelate: 'Pixelate',
   shapeOverlay: 'Shape Overlay',
+  vignette: 'Vignette',
+  filmGrain: 'Film Grain',
+  posterize: 'Posterize',
+  halftone: 'Halftone',
+  fresnel: 'Fresnel Edge Glow',
 };
 
 interface DraggableStageRowProps {
@@ -118,19 +124,21 @@ export function SpatialChainOrderControl({ order, activeStages, onChange, onComm
   };
 
   return (
-    <div className="space-y-1.5">
-      <DndProvider backend={HTML5Backend}>
-        {localOrder.map((id, index) => (
-          <DraggableStageRow
-            key={id}
-            id={id}
-            index={index}
-            isActive={activeStages.has(id)}
-            moveStage={moveStage}
-            onReorderCommit={onCommitHistory}
-          />
-        ))}
-      </DndProvider>
-    </div>
+    <ScrollArea className="h-[164px] pr-2">
+      <div className="space-y-1.5">
+        <DndProvider backend={HTML5Backend}>
+          {localOrder.map((id, index) => (
+            <DraggableStageRow
+              key={id}
+              id={id}
+              index={index}
+              isActive={activeStages.has(id)}
+              moveStage={moveStage}
+              onReorderCommit={onCommitHistory}
+            />
+          ))}
+        </DndProvider>
+      </div>
+    </ScrollArea>
   );
 }

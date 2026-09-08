@@ -11,11 +11,19 @@ import { copyEffects, pasteEffects, hasEffectsInClipboard } from '../../utils/ef
 import { SpatialChainOrderControl } from './SpatialChainOrderControl';
 import { toast } from 'sonner';
 
-// ── Sprint 1.1: Spatial FX chain ────────────────────────────────────────
-// The set of UV-domain (spatial) stages that compose into one running
-// sample position + color, in user-configurable order. Everything else in
-// EffectsConfig (posterize, color grading, grain, vignette, fresnel, flash…)
-// stays in its existing fixed position, applied AFTER this chain resolves.
+// ── Sprint 1.1/1.4: Effects Layering chain ──────────────────────────────
+// The set of stages that compose into one running color (+ UV, for the
+// spatial ones) through the multi-pass compositor, in user-configurable
+// order. Started as just the 7 spatial (UV-remap/filter) effects; Sprint
+// 1.4 folded in 5 more pure per-pixel color effects (Vignette, Film Grain,
+// Posterize, Halftone, Fresnel) since those never had the composability
+// problem the spatial ones did — they already correctly operate on the
+// passed-in color — so bringing them into the same multi-pass system was
+// just a matter of giving each its own stage file, not a new pattern.
+// Color Adjustments (Saturation/Brightness/Contrast/Hue Shift),
+// Temperature/Tint, Invert, and Light Flash Effects stay OUT of this
+// chain — fixed position, applied after it resolves, per explicit
+// direction (they're not meant to be layerable).
 export type SpatialStageId =
   | 'mirror'        // Quad Mirror
   | 'displace'       // Noise Displacement
@@ -23,20 +31,29 @@ export type SpatialStageId =
   | 'chroma'         // Chromatic Aberration
   | 'blur'           // Blur
   | 'pixelate'       // Pixelate
-  | 'shapeOverlay';  // Shape Overlay
+  | 'shapeOverlay'   // Shape Overlay
+  | 'vignette'       // Vignette
+  | 'filmGrain'      // Film Grain
+  | 'posterize'      // Posterize
+  | 'halftone'       // Halftone
+  | 'fresnel';       // Fresnel Edge Glow
 
 // Default order: fold → distort → cut, then the pre-existing spatial
-// effects in their original execution order. Since Mirror/Displace/Slice
-// default to disabled, this default order produces byte-identical output
-// to the pre-Sprint-1.1 shader for every existing saved project.
+// effects in their original execution order, then the 5 newly-layerable
+// effects in their original fixed-shader order. Since Mirror/Displace/
+// Slice default to disabled, and the other 11 default to whatever they
+// already defaulted to, this order produces the same output as before
+// for every existing saved project until a user actually drags something.
 export const DEFAULT_SPATIAL_CHAIN_ORDER: SpatialStageId[] = [
   'mirror', 'displace', 'slice', 'chroma', 'blur', 'pixelate', 'shapeOverlay',
+  'posterize', 'halftone', 'filmGrain', 'vignette', 'fresnel',
 ];
 
 export interface EffectsConfig {
-  // Sprint 1.1: order of the composable spatial (UV-domain) effect chain.
-  // User-reorderable via drag UI (Sprint 1.3). Always length 7, one entry
-  // per SpatialStageId, no duplicates — validated at the point of use.
+  // Order of the composable Effects Layering chain (12 stages — see
+  // SpatialStageId above). User-reorderable via drag UI. Always length
+  // 12, one entry per SpatialStageId, no duplicates — validated at the
+  // point of use (falls back to DEFAULT_SPATIAL_CHAIN_ORDER if malformed).
   spatialChainOrder: SpatialStageId[];
 
   // Quad Mirror — 4-way kaleidoscope fold around an adjustable center.
@@ -299,6 +316,11 @@ export const EffectsControls = memo(function EffectsControls({
     ...(effects.blur > 0.01 ? (['blur'] as const) : []),
     ...(effects.pixelateEnabled && effects.pixelate > 0 ? (['pixelate'] as const) : []),
     ...(effects.shapeOverlayEnabled && effects.shapeOverlay > 0 ? (['shapeOverlay'] as const) : []),
+    ...(effects.vignette > 0.01 ? (['vignette'] as const) : []),
+    ...((effects.filmGrain || 0) > 0.01 ? (['filmGrain'] as const) : []),
+    ...(effects.posterizeEnabled && (effects.posterize || 0) > 0.01 ? (['posterize'] as const) : []),
+    ...(effects.halftoneEnabled && (effects.halftone || 0) > 0.01 ? (['halftone'] as const) : []),
+    ...(effects.fresnelEnabled ? (['fresnel'] as const) : []),
   ]);
 
   const creativeShapeOptions = [
@@ -380,17 +402,17 @@ export const EffectsControls = memo(function EffectsControls({
             </ConditionalTooltip>
           </div>
         </div>
-        <div className="grid grid-cols-3 gap-1.5">
+        <div className="grid grid-cols-3 gap-2">
           {EFFECT_PRESETS.map((preset) => (
-            <ConditionalTooltip key={preset.name} content={preset.description}>
-              <Button
-                onClick={() => onChange(preset.effects)}
-                variant="outline"
-                className="h-7 px-2 border-zinc-700 hover:border-blue-400 hover:bg-zinc-800/50 transition-all"
-              >
-                <span className="text-[11px] font-medium text-[#51a2ff] truncate">{preset.name}</span>
-              </Button>
-            </ConditionalTooltip>
+            <Button
+              key={preset.name}
+              onClick={() => onChange(preset.effects)}
+              variant="outline"
+              className="h-auto flex-col items-start p-2 border-zinc-700 hover:border-blue-400 hover:bg-zinc-800/50 transition-all"
+            >
+              <span className="text-[11px] font-medium text-[#51a2ff]">{preset.name}</span>
+              <span className="text-[9px] text-zinc-500 line-clamp-1">{preset.description}</span>
+            </Button>
           ))}
         </div>
       </div>
@@ -401,126 +423,6 @@ export const EffectsControls = memo(function EffectsControls({
         onValueChange={setOpenSections}
         className="space-y-4"
       >
-        {/* Visual Effects */}
-        <AccordionItem value="visual-effects" className="border-none">
-          <AccordionTrigger className="py-3 px-4 hover:no-underline">
-            <div className="flex items-center justify-between w-full pr-4">
-              <span className="text-sm font-medium text-zinc-100">Visual Effects</span>
-              {hasChanges && (
-                <span
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    resetToDefaults();
-                  }}
-                  className="text-xs text-blue-400 hover:text-blue-300 transition-colors cursor-pointer"
-                >
-                  Reset
-                </span>
-              )}
-            </div>
-          </AccordionTrigger>
-          <AccordionContent className="pb-4 pt-2">
-            <div className="space-y-4">
-              {/* Blur */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <ConditionalTooltip content="Apply Gaussian blur for soft, dreamy effects">
-                    <Label className="text-xs text-zinc-400">Blur</Label>
-                  </ConditionalTooltip>
-                  <span className="text-xs text-zinc-400">{localEffects.blur.toFixed(1)}px</span>
-                </div>
-                <Slider
-                  value={[localEffects.blur]}
-                  onValueChange={([value]) => {
-                    onStartDrag?.();
-                    updateLocalEffect('blur', value);
-                  }}
-                  onValueCommit={([value]) => commitEffect('blur', value)}
-                  min={0}
-                  max={20}
-                  step={0.1}
-                />
-              </div>
-
-              {/* Chromatic Aberration */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs text-zinc-400">Chromatic Aberration</Label>
-                  <span className="text-xs text-zinc-400">{localEffects.chromaticAberration.toFixed(2)}</span>
-                </div>
-                <Slider
-                  value={[localEffects.chromaticAberration * 100]}
-                  onValueChange={([value]) => {
-                    onStartDrag?.();
-                    updateLocalEffect('chromaticAberration', value / 100);
-                  }}
-                  onValueCommit={([value]) => commitEffect('chromaticAberration', value / 100)}
-                  min={0}
-                  max={50}
-                  step={0.5}
-                />
-              </div>
-
-              {/* Vignette */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs text-zinc-400">Vignette</Label>
-                  <span className="text-xs text-zinc-400">{Math.round(localEffects.vignette * 100)}%</span>
-                </div>
-                <Slider
-                  value={[localEffects.vignette * 100]}
-                  onValueChange={([value]) => {
-                    onStartDrag?.();
-                    updateLocalEffect('vignette', value / 100);
-                  }}
-                  onValueCommit={([value]) => commitEffect('vignette', value / 100)}
-                  min={0}
-                  max={100}
-                  step={1}
-                />
-              </div>
-
-              {/* Film Grain */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs text-zinc-400">Film Grain</Label>
-                  <span className="text-xs text-zinc-400">{Math.round((localEffects.filmGrain || 0) * 100)}%</span>
-                </div>
-                <Slider
-                  value={[(localEffects.filmGrain || 0) * 100]}
-                  onValueChange={([value]) => {
-                    onStartDrag?.();
-                    updateLocalEffect('filmGrain', value / 100);
-                  }}
-                  onValueCommit={([value]) => commitEffect('filmGrain', value / 100)}
-                  min={0}
-                  max={100}
-                  step={1}
-                />
-              </div>
-
-              {/* Film Grain Size */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label className="text-xs text-zinc-400">Grain Size</Label>
-                  <span className="text-xs text-zinc-400">{(localEffects.filmGrainSize || 1).toFixed(1)}</span>
-                </div>
-                <Slider
-                  value={[localEffects.filmGrainSize || 1]}
-                  onValueChange={([value]) => {
-                    onStartDrag?.();
-                    updateLocalEffect('filmGrainSize', value);
-                  }}
-                  onValueCommit={([value]) => commitEffect('filmGrainSize', value)}
-                  min={0.5}
-                  max={5}
-                  step={0.1}
-                />
-              </div>
-            </div>
-          </AccordionContent>
-        </AccordionItem>
-
         {/* Color Adjustments */}
         <AccordionItem value="color-adjustments" className="border-none">
           <AccordionTrigger className="py-3 px-4 hover:no-underline">
@@ -652,6 +554,150 @@ export const EffectsControls = memo(function EffectsControls({
                 <Switch
                   checked={effects.invert}
                   onCheckedChange={(checked) => updateEffect('invert', checked)}
+                />
+              </div>
+            </div>
+          </AccordionContent>
+        </AccordionItem>
+
+        {/* Effects Layering */}
+        <AccordionItem value="effects-layering" className="border-none">
+          <AccordionTrigger className="py-3 px-4 hover:no-underline">
+            <span className="text-sm font-medium text-zinc-100">Effects Layering</span>
+          </AccordionTrigger>
+          <AccordionContent className="pb-4 pt-2">
+            <div className="space-y-2">
+              <p className="text-[10px] text-zinc-500 px-1">
+                Effects Layering — drag a slot to change the order they apply in.
+              </p>
+              <SpatialChainOrderControl
+                order={
+                  Array.isArray(effects.spatialChainOrder) && effects.spatialChainOrder.length === 12
+                    ? effects.spatialChainOrder
+                    : DEFAULT_SPATIAL_CHAIN_ORDER
+                }
+                activeStages={activeSpatialStages}
+                onChange={(order) => onChange({ ...effects, spatialChainOrder: order })}
+                onCommitHistory={onCommitHistory}
+              />
+            </div>
+          </AccordionContent>
+        </AccordionItem>
+
+        {/* Visual Effects */}
+        <AccordionItem value="visual-effects" className="border-none">
+          <AccordionTrigger className="py-3 px-4 hover:no-underline">
+            <div className="flex items-center justify-between w-full pr-4">
+              <span className="text-sm font-medium text-zinc-100">Visual Effects</span>
+              {hasChanges && (
+                <span
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    resetToDefaults();
+                  }}
+                  className="text-xs text-blue-400 hover:text-blue-300 transition-colors cursor-pointer"
+                >
+                  Reset
+                </span>
+              )}
+            </div>
+          </AccordionTrigger>
+          <AccordionContent className="pb-4 pt-2">
+            <div className="space-y-4">
+              {/* Blur */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <ConditionalTooltip content="Apply Gaussian blur for soft, dreamy effects">
+                    <Label className="text-xs text-zinc-400">Blur</Label>
+                  </ConditionalTooltip>
+                  <span className="text-xs text-zinc-400">{localEffects.blur.toFixed(1)}px</span>
+                </div>
+                <Slider
+                  value={[localEffects.blur]}
+                  onValueChange={([value]) => {
+                    onStartDrag?.();
+                    updateLocalEffect('blur', value);
+                  }}
+                  onValueCommit={([value]) => commitEffect('blur', value)}
+                  min={0}
+                  max={20}
+                  step={0.1}
+                />
+              </div>
+
+              {/* Chromatic Aberration */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs text-zinc-400">Chromatic Aberration</Label>
+                  <span className="text-xs text-zinc-400">{localEffects.chromaticAberration.toFixed(2)}</span>
+                </div>
+                <Slider
+                  value={[localEffects.chromaticAberration * 100]}
+                  onValueChange={([value]) => {
+                    onStartDrag?.();
+                    updateLocalEffect('chromaticAberration', value / 100);
+                  }}
+                  onValueCommit={([value]) => commitEffect('chromaticAberration', value / 100)}
+                  min={0}
+                  max={50}
+                  step={0.5}
+                />
+              </div>
+
+              {/* Vignette */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs text-zinc-400">Vignette</Label>
+                  <span className="text-xs text-zinc-400">{Math.round(localEffects.vignette * 100)}%</span>
+                </div>
+                <Slider
+                  value={[localEffects.vignette * 100]}
+                  onValueChange={([value]) => {
+                    onStartDrag?.();
+                    updateLocalEffect('vignette', value / 100);
+                  }}
+                  onValueCommit={([value]) => commitEffect('vignette', value / 100)}
+                  min={0}
+                  max={100}
+                  step={1}
+                />
+              </div>
+
+              {/* Film Grain */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs text-zinc-400">Film Grain</Label>
+                  <span className="text-xs text-zinc-400">{Math.round((localEffects.filmGrain || 0) * 100)}%</span>
+                </div>
+                <Slider
+                  value={[(localEffects.filmGrain || 0) * 100]}
+                  onValueChange={([value]) => {
+                    onStartDrag?.();
+                    updateLocalEffect('filmGrain', value / 100);
+                  }}
+                  onValueCommit={([value]) => commitEffect('filmGrain', value / 100)}
+                  min={0}
+                  max={100}
+                  step={1}
+                />
+              </div>
+
+              {/* Film Grain Size */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs text-zinc-400">Grain Size</Label>
+                  <span className="text-xs text-zinc-400">{(localEffects.filmGrainSize || 1).toFixed(1)}</span>
+                </div>
+                <Slider
+                  value={[localEffects.filmGrainSize || 1]}
+                  onValueChange={([value]) => {
+                    onStartDrag?.();
+                    updateLocalEffect('filmGrainSize', value);
+                  }}
+                  onValueCommit={([value]) => commitEffect('filmGrainSize', value)}
+                  min={0.5}
+                  max={5}
+                  step={0.1}
                 />
               </div>
             </div>
@@ -923,33 +969,19 @@ export const EffectsControls = memo(function EffectsControls({
                 )}
               </div>
 
-              {/* ── Noise & Symmetry — Sprint 1.3 ──────────────────────────
-                  Quad Mirror / Noise Displacement / Graphic Slice, ported
-                  from Visual Mood Lab's VFX rack. These three compose
-                  fully with Chroma/Blur/Pixelate/Shape Overlay via the
-                  multi-pass spatial FX chain (src/app/postfx/) — order
-                  below is user-configurable, drag to reorder. */}
+              {/* ── Noise & Symmetry ────────────────────────────────────────
+                  Quad Mirror / Noise Displacement / Graphic Slice controls.
+                  Reorder now lives in the top-level "Effects Layering"
+                  section (which covers all 12 layerable effects) — this
+                  box just holds these three's own toggles/sliders, per
+                  explicit direction to keep them here under Fresnel. */}
               <div className="space-y-4 rounded-md border border-zinc-800 bg-zinc-900/30 p-3">
                 <div className="space-y-1">
                   <Label className="text-xs font-medium text-zinc-300">Noise & Symmetry</Label>
-                  <p className="text-[10px] text-zinc-500">
-                    Composable spatial effects — drag to change the order they apply in.
-                  </p>
                 </div>
 
-                <SpatialChainOrderControl
-                  order={
-                    Array.isArray(effects.spatialChainOrder) && effects.spatialChainOrder.length === 7
-                      ? effects.spatialChainOrder
-                      : DEFAULT_SPATIAL_CHAIN_ORDER
-                  }
-                  activeStages={activeSpatialStages}
-                  onChange={(order) => onChange({ ...effects, spatialChainOrder: order })}
-                  onCommitHistory={onCommitHistory}
-                />
-
                 {/* Quad Mirror */}
-                <div className="space-y-2 border-t border-zinc-800 pt-3">
+                <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <Label className="text-xs text-zinc-400">Quad Mirror</Label>
                     <Switch
