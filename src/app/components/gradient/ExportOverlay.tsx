@@ -40,7 +40,7 @@ export function ExportOverlay() {
 
   return (
     <div
-      className="absolute inset-0 z-30 flex items-center justify-center bg-zinc-950/80 backdrop-blur-[2px]"
+      className="absolute inset-0 z-30 flex items-center justify-center bg-zinc-950/80"
       role="status"
       aria-live="polite"
       aria-label={`Export in progress, ${percent} percent complete`}
