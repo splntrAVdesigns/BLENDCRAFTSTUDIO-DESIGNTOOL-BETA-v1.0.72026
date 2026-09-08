@@ -380,17 +380,17 @@ export const EffectsControls = memo(function EffectsControls({
             </ConditionalTooltip>
           </div>
         </div>
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-3 gap-1.5">
           {EFFECT_PRESETS.map((preset) => (
-            <Button
-              key={preset.name}
-              onClick={() => onChange(preset.effects)}
-              variant="outline"
-              className="h-auto flex-col items-start p-2 border-zinc-700 hover:border-blue-400 hover:bg-zinc-800/50 transition-all"
-            >
-              <span className="text-[11px] font-medium text-[#51a2ff]">{preset.name}</span>
-              <span className="text-[9px] text-zinc-500 line-clamp-1">{preset.description}</span>
-            </Button>
+            <ConditionalTooltip key={preset.name} content={preset.description}>
+              <Button
+                onClick={() => onChange(preset.effects)}
+                variant="outline"
+                className="h-7 px-2 border-zinc-700 hover:border-blue-400 hover:bg-zinc-800/50 transition-all"
+              >
+                <span className="text-[11px] font-medium text-[#51a2ff] truncate">{preset.name}</span>
+              </Button>
+            </ConditionalTooltip>
           ))}
         </div>
       </div>
