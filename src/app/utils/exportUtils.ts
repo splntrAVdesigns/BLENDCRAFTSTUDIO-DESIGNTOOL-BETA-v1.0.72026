@@ -12,6 +12,7 @@ import * as GIFLib from 'gif.js';
 import { encodeVideoWithMediabunny, canEncodeContainer } from '../export/mediabunnyExport';
 import {
   captureExportFrameSample,
+  isFidelitySampleFrame,
   compareExportFrameSamples,
   verifyExportedFrameFidelity,
   type ExportFrameSample,
@@ -125,54 +126,6 @@ export const WEBM_PRESETS: ExportPreset[] = [
 ];
 
 export type VideoQuality = 'standard' | 'high' | 'ultra' | 'max' | 'sharpMax';
-
-/**
- * Maps quality tier to keyframe interval. Two rounds of shortening the
- * default (2s -> 1s, see mediabunnyEncodeShared.ts) measurably reduced but
- * did not eliminate P-frame softening on dense, high-frequency,
- * continuously-warping content — confirmed via the app's own
- * verifyExportedFrameFidelity() check (maximumChannelError well above a
- * clean-compression baseline on real exports). "High" (the default tier,
- * and what's been tested) keeps the 1s interval. Higher tiers now actually
- * buy meaningfully different encode behavior instead of just a bitrate bump
- * — "Sharp Max" goes fully intra (a keyframe every single frame), which
- * removes inter-frame prediction error entirely at the cost of a much
- * larger file. This is the direct, available-today lever for content this
- * demanding, ahead of any further architecture work.
- */
-export function keyFrameIntervalSecondsForQuality(quality: VideoQuality, fps: number): number {
-  const safeFps = Math.max(1, fps);
-  switch (quality) {
-    case 'standard': return 1.5;
-    case 'high': return 1;
-    case 'ultra': return 0.5;
-    case 'max': return 3 / safeFps;
-    case 'sharpMax': return 1 / safeFps; // every frame is a keyframe
-    default: return 1;
-  }
-}
-
-/**
- * WebM/VP9 only (see buildCanvasSourceConfig's doc comment for the full
- * rationale). 'realtime' stays the default for standard/high — unchanged,
- * fast-preview behavior. Any tier that also pushes keyFrameIntervalSeconds
- * down toward full-intra needs 'quality' mode instead: forcing a
- * simple/fast rate-control mode into an all-keyframe pattern at a very
- * high bitrate is the likely cause of a real, reproduced failure (WebM +
- * Sharp Max stuck at 8/150 rendered frames for 2+ minutes, never
- * recovered — not the page-visibility stall pattern seen elsewhere, this
- * was genuinely stuck/slow encoder work).
- */
-export function latencyModeForQuality(quality: VideoQuality): 'quality' | 'realtime' {
-  switch (quality) {
-    case 'ultra':
-    case 'max':
-    case 'sharpMax':
-      return 'quality';
-    default:
-      return 'realtime';
-  }
-}
 
 export interface VideoQualityConfig {
   label: string;
@@ -1006,6 +959,8 @@ export async function exportWebMFromCanvas(options: {
   // STAGE 2.8.4: frame-0 reference for the loop check (see loopVerification.ts).
   let loopReference: LoopFrameSample | null = null;
   let encodedFrameReference: ExportFrameSample | null = null;
+  const encodedFrameReferences: ExportFrameSample[] = [];
+  const captureFrameComparisons: unknown[] = [];
 
   const phaseTimers = { renderMs: 0, encodeMs: 0, finalizeMs: 0, startedAt: performance.now() };
   const finalizationTimers = createExportFinalizationTimings();
@@ -1091,15 +1046,13 @@ export async function exportWebMFromCanvas(options: {
       totalFrames,
       bitrate,
       container: 'webm',
-      keyFrameIntervalSeconds: keyFrameIntervalSecondsForQuality(quality, clampedFps),
-      latencyMode: latencyModeForQuality(quality),
       signal: options.signal,
       onProgress,
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
       drawFrame: async (i, t) => {
         const renderedTimeline = await renderFrameAtTime(t, undefined);
         const liveCanvas = options.getLiveCanvas?.() ?? null;
-        const presentationReference = i === 0 && liveCanvas
+        const presentationReference = isFidelitySampleFrame(i, totalFrames) && liveCanvas
           ? captureExportFrameSample(liveCanvas)
           : null;
 
@@ -1119,11 +1072,13 @@ export async function exportWebMFromCanvas(options: {
         if (i === 0 && options.verifyLoop) {
           loopReference = captureCanvasLoopSample(stagingCanvas);
         }
-        if (i === 0) {
-          encodedFrameReference = captureExportFrameSample(stagingCanvas);
+        if (isFidelitySampleFrame(i, totalFrames)) {
+          encodedFrameReference = captureExportFrameSample(stagingCanvas, t);
+          if (encodedFrameReference) encodedFrameReferences.push(encodedFrameReference);
           if (presentationReference && encodedFrameReference) {
             const captureFidelity = compareExportFrameSamples(presentationReference, encodedFrameReference);
-            try { (window as unknown as Record<string, unknown>).__blendcraftLastCaptureFidelity = captureFidelity; } catch { /* diagnostics only */ }
+            captureFrameComparisons.push({ frameIndex: i, timestamp: t, ...captureFidelity });
+            try { (window as unknown as Record<string, unknown>).__blendcraftLastCaptureFidelity = { ...captureFidelity, frames: captureFrameComparisons }; } catch { /* diagnostics only */ }
             if (!captureFidelity.passed) {
               console.warn('[Export] Presentation-to-staging color drift detected:', captureFidelity);
             }
@@ -1170,69 +1125,80 @@ export async function exportWebMFromCanvas(options: {
     throwIfExportAborted(options.signal);
     const preparingFile = getExportFinalizationProgress('preparing-file');
     onProgress?.(preparingFile.progress, preparingFile.message);
-    await waitForNextPaint();
     const blobStartedAt = performance.now();
     const blob = result.blob;
     finalizationTimers.blobMs = performance.now() - blobStartedAt;
     finalizationTimers.encoderDrainAndMuxMs = phaseTimers.finalizeMs;
 
-    // Verify the ACTUAL exported file's duration, not just the numbers fed
-    // into the encoder — closes a false-PASS risk where a certification step
-    // trusted its own planned input instead of the real artifact.
-    const durationCheck = await verifyExportedArtifactDuration(
-      blob,
-      durationMs,
-      clampedFps,
-      targetWidth,
-      targetHeight,
-    );
-    if (durationCheck.checked && !durationCheck.withinTolerance) {
-      console.warn('[Export] Exported WebM duration mismatch:', durationCheck);
-    }
-    if (durationCheck.checked && durationCheck.resolutionMatches === false) {
-      console.error('[Export] Exported WebM resolution mismatch:', durationCheck);
-    }
-
-    const frameFidelity = await verifyExportedFrameFidelity(blob, encodedFrameReference);
-    if (!frameFidelity.checked) {
-      console.warn('[Export] WebM decoded-frame fidelity check unavailable:', frameFidelity.reason);
-    } else if (!frameFidelity.passed) {
-      console.warn('[Export] WebM decoded frame differs from the CanvasSource input:', frameFidelity);
-    } else if (import.meta.env?.DEV) {
-      console.info('[Export] WebM decoded-frame fidelity verified:', frameFidelity);
-    }
-    try { (window as unknown as Record<string, unknown>).__blendcraftLastFrameFidelity = frameFidelity; } catch { /* diagnostics only */ }
-
     throwIfExportAborted(options.signal);
     const exportingFile = getExportFinalizationProgress('exporting-file');
     onProgress?.(exportingFile.progress, exportingFile.message);
+    const currentProgress = (globalThis as any).__blendcraftEncoderProgress;
+    if (currentProgress?.jobId === result.jobId) currentProgress.boundaries.downloadStartedAt = performance.timeOrigin + performance.now();
     finalizationTimers.downloadHandoffMs = await handoffExportDownload(() => saveAs(blob, filename));
     downloadHandoffComplete = true;
 
-    const totalMs = performance.now() - phaseTimers.startedAt;
-    const pct = (ms: number) => `${((ms / Math.max(1, totalMs)) * 100).toFixed(0)}%`;
-    const timing = {
-      totalSec: +(totalMs / 1000).toFixed(1),
-      renderSec: +(phaseTimers.renderMs / 1000).toFixed(1),
-      encodeWaitSec: +(phaseTimers.encodeMs / 1000).toFixed(1),
-      flushSec: 0,
-      muxSec: 0,
-      encoderDrainAndMuxSec: +(finalizationTimers.encoderDrainAndMuxMs / 1000).toFixed(3),
-      blobSec: +(finalizationTimers.blobMs / 1000).toFixed(3),
-      downloadHandoffSec: +(finalizationTimers.downloadHandoffMs / 1000).toFixed(3),
-      frames: totalFrames,
-      msPerFrame: +(totalMs / Math.max(1, totalFrames)).toFixed(0),
-      breakdown: `render ${pct(phaseTimers.renderMs)} \u00b7 encode ${pct(phaseTimers.encodeMs)} \u00b7 encoder drain + mux ${pct(phaseTimers.finalizeMs)} \u00b7 blob ${pct(finalizationTimers.blobMs)} \u00b7 download ${pct(finalizationTimers.downloadHandoffMs)}`,
-      encoderPolicy: (encoderConfigInfo as { policy: string } | null)?.policy,
-      finalization: { ...finalizationTimers },
-      artifactDuration: durationCheck,
-      frameFidelity,
-      timelineCertification: result.timelineCertification,
-    };
-    console.info('[Export] Timing:', timing);
-    try { (window as unknown as Record<string, unknown>).__exportTiming = timing; } catch { /* diag */ }
-    try { (window as unknown as Record<string, unknown>).__blendcraftLastTimelineCertification = result.timelineCertification; } catch { /* diagnostics only */ }
-    recordExportTiming(timing);
+    const deliveryTotalMs = performance.now() - phaseTimers.startedAt;
+    const exportProgress = (globalThis as any).__blendcraftEncoderProgress;
+    if (exportProgress?.jobId === result.jobId) exportProgress.boundaries.downloadHandedOffAt = performance.timeOrigin + performance.now();
+    void (async () => {
+      const ownsDiagnostics = () => (globalThis as any).__blendcraftEncoderProgress?.jobId === result.jobId;
+      // Verify the ACTUAL exported file's duration, not just the numbers fed
+      // into the encoder — closes a false-PASS risk where a certification step
+      // trusted its own planned input instead of the real artifact.
+      const durationCheck = await verifyExportedArtifactDuration(
+        blob,
+        durationMs,
+        clampedFps,
+        targetWidth,
+        targetHeight,
+      );
+      if (durationCheck.checked && !durationCheck.withinTolerance) {
+        console.warn('[Export] Exported WebM duration mismatch:', durationCheck);
+      }
+      if (durationCheck.checked && durationCheck.resolutionMatches === false) {
+        console.error('[Export] Exported WebM resolution mismatch:', durationCheck);
+      }
+
+      if (!ownsDiagnostics()) return;
+      const frameFidelity = await verifyExportedFrameFidelity(blob, encodedFrameReferences);
+      if (!ownsDiagnostics()) return;
+      if (!frameFidelity.checked) {
+        console.warn('[Export] WebM decoded-frame fidelity check unavailable:', frameFidelity.reason);
+      } else if (!frameFidelity.passed) {
+        console.warn('[Export] WebM decoded frame differs from the captured encoder input:', frameFidelity);
+      } else if (import.meta.env?.DEV) {
+        console.info('[Export] WebM decoded-frame fidelity verified:', frameFidelity);
+      }
+      try { (window as unknown as Record<string, unknown>).__blendcraftLastFrameFidelity = frameFidelity; } catch { /* diagnostics only */ }
+
+
+      const totalMs = deliveryTotalMs;
+      const pct = (ms: number) => `${((ms / Math.max(1, totalMs)) * 100).toFixed(0)}%`;
+      const timing = {
+        totalSec: +(totalMs / 1000).toFixed(1),
+        renderSec: +(phaseTimers.renderMs / 1000).toFixed(1),
+        encodeWaitSec: +(phaseTimers.encodeMs / 1000).toFixed(1),
+        flushSec: result.flushMs == null ? null : +(result.flushMs / 1000).toFixed(3),
+        muxSec: result.containerCompletionMs == null ? null : +(result.containerCompletionMs / 1000).toFixed(3),
+        encoderDrainAndMuxSec: +(finalizationTimers.encoderDrainAndMuxMs / 1000).toFixed(3),
+        blobSec: +(finalizationTimers.blobMs / 1000).toFixed(3),
+        downloadHandoffSec: +(finalizationTimers.downloadHandoffMs / 1000).toFixed(3),
+        frames: totalFrames,
+        msPerFrame: +(totalMs / Math.max(1, totalFrames)).toFixed(0),
+        breakdown: `render ${pct(phaseTimers.renderMs)} \u00b7 encode ${pct(phaseTimers.encodeMs)} \u00b7 encoder drain + mux ${pct(phaseTimers.finalizeMs)} \u00b7 blob ${pct(finalizationTimers.blobMs)} \u00b7 download ${pct(finalizationTimers.downloadHandoffMs)}`,
+        encoderPolicy: (encoderConfigInfo as { policy: string } | null)?.policy,
+        finalization: { ...finalizationTimers },
+        artifactDuration: durationCheck,
+        frameFidelity,
+        timelineCertification: result.timelineCertification,
+      };
+      console.info('[Export] Timing:', timing);
+      try { (window as unknown as Record<string, unknown>).__exportTiming = timing; } catch { /* diag */ }
+      try { (window as unknown as Record<string, unknown>).__blendcraftLastTimelineCertification = result.timelineCertification; } catch { /* diagnostics only */ }
+      recordExportTiming(timing);
+    })().catch(error => console.warn('[Export] Non-blocking WebM verification failed:', error));
+
   } catch (error) {
     if (!fallbackUsed) {
       recordExportFailure(error);
@@ -1251,9 +1217,7 @@ export async function exportWebMFromCanvas(options: {
     if (downloadHandoffComplete) {
       const cleanupStage = getExportFinalizationProgress('cleanup');
       onProgress?.(cleanupStage.progress, cleanupStage.message);
-      await waitForNextPaint();
     }
-    await waitForNextPaint();
     await new Promise<void>((resolve) => {
       const ric = (globalThis as any).requestIdleCallback as undefined | ((cb: () => void, opts?: { timeout: number }) => number);
       if (ric) ric(() => resolve(), { timeout: 250 });
@@ -1950,6 +1914,8 @@ export async function exportMP4FromCanvas(options: {
 
   onProgress?.(0, `Encoding ${totalFrames} frames (MP4/H.264)...`);
   let encodedFrameReference: ExportFrameSample | null = null;
+  const encodedFrameReferences: ExportFrameSample[] = [];
+  const captureFrameComparisons: unknown[] = [];
   let cleanupMs = 0;
   let encoderConfigInfo: {
     codec: string;
@@ -1969,14 +1935,12 @@ export async function exportMP4FromCanvas(options: {
       totalFrames,
       bitrate,
       container: 'mp4',
-      keyFrameIntervalSeconds: keyFrameIntervalSecondsForQuality(quality, clampedFps),
-      latencyMode: latencyModeForQuality(quality),
       signal: options.signal,
       onProgress,
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
       drawFrame: async (i, t) => {
         const renderedTimeline = await renderFrameAtTime(t, undefined);
-        const presentationReference = i === 0 && liveCanvas
+        const presentationReference = isFidelitySampleFrame(i, totalFrames) && liveCanvas
           ? captureExportFrameSample(liveCanvas)
           : null;
         drawFrameToStagingCanvas({
@@ -1988,11 +1952,13 @@ export async function exportMP4FromCanvas(options: {
           codecSafety: options.codecSafety || 'sharp',
           flashOverlay: options.getFlashOverlayFrame?.(t) ?? null,
         });
-        if (i === 0) {
-          encodedFrameReference = captureExportFrameSample(stagingCanvas);
+        if (isFidelitySampleFrame(i, totalFrames)) {
+          encodedFrameReference = captureExportFrameSample(stagingCanvas, t);
+          if (encodedFrameReference) encodedFrameReferences.push(encodedFrameReference);
           if (presentationReference && encodedFrameReference) {
             const captureFidelity = compareExportFrameSamples(presentationReference, encodedFrameReference);
-            try { (window as unknown as Record<string, unknown>).__blendcraftLastCaptureFidelity = captureFidelity; } catch { /* diagnostics only */ }
+            captureFrameComparisons.push({ frameIndex: i, timestamp: t, ...captureFidelity });
+            try { (window as unknown as Record<string, unknown>).__blendcraftLastCaptureFidelity = { ...captureFidelity, frames: captureFrameComparisons }; } catch { /* diagnostics only */ }
             if (!captureFidelity.passed) {
               console.warn('[Export] Presentation-to-staging color drift detected:', captureFidelity);
             }
@@ -2002,6 +1968,7 @@ export async function exportMP4FromCanvas(options: {
       },
     });
 
+    throwIfExportAborted(options.signal);
     assertUsableVideoBlob(result.blob, 'MP4 export');
     assertEncoderResolution(encoderConfigInfo, targetWidth, targetHeight, 'MP4 export');
 
@@ -2009,17 +1976,20 @@ export async function exportMP4FromCanvas(options: {
     // the browser before running nonessential duration/fidelity self-decodes.
     const preparingFile = getExportFinalizationProgress('preparing-file');
     onProgress?.(preparingFile.progress, preparingFile.message);
-    await waitForNextPaint();
+    const exportProgress = (globalThis as any).__blendcraftEncoderProgress;
+    if (exportProgress?.jobId === result.jobId) exportProgress.boundaries.downloadStartedAt = performance.timeOrigin + performance.now();
     const downloadHandoffMs = await handoffExportDownload(
       () => saveAs(result.blob, filename.replace(/\.webm$/, '.mp4')),
     );
     const deliveredAt = performance.now();
+    if (exportProgress?.jobId === result.jobId) exportProgress.boundaries.downloadHandedOffAt = performance.timeOrigin + deliveredAt;
     onProgress?.(100, 'MP4 export complete!');
 
     // Diagnostics intentionally run after download handoff and do not block the
     // user's file. Each stage is measured independently and published when the
     // checks complete so a future stall has an exact owner.
     void (async () => {
+      const ownsDiagnostics = () => (globalThis as any).__blendcraftEncoderProgress?.jobId === result.jobId;
       const durationStartedAt = performance.now();
       const durationCheck = await verifyExportedArtifactDuration(
         result.blob,
@@ -2036,13 +2006,15 @@ export async function exportMP4FromCanvas(options: {
         console.error('[Export] Exported MP4 resolution mismatch:', durationCheck);
       }
 
+      if (!ownsDiagnostics()) return;
       const fidelityStartedAt = performance.now();
-      const frameFidelity = await verifyExportedFrameFidelity(result.blob, encodedFrameReference);
+      const frameFidelity = await verifyExportedFrameFidelity(result.blob, encodedFrameReferences);
       const fidelityCheckMs = performance.now() - fidelityStartedAt;
+      if (!ownsDiagnostics()) return;
       if (!frameFidelity.checked) {
         console.warn('[Export] MP4 decoded-frame fidelity check unavailable:', frameFidelity.reason);
       } else if (!frameFidelity.passed) {
-        console.warn('[Export] MP4 decoded frame differs from the CanvasSource input:', frameFidelity);
+        console.warn('[Export] MP4 decoded frame differs from the captured encoder input:', frameFidelity);
       } else if (import.meta.env?.DEV) {
         console.info('[Export] MP4 decoded-frame fidelity verified:', frameFidelity);
       }
@@ -2053,8 +2025,9 @@ export async function exportMP4FromCanvas(options: {
         totalSec: +(deliveryMs / 1000).toFixed(1),
         renderSec: +(result.renderMs / 1000).toFixed(1),
         encodeWaitSec: +(result.encodeMs / 1000).toFixed(1),
-        flushSec: 0,
-        muxSec: 0,
+        flushSec: result.flushMs == null ? null : +(result.flushMs / 1000).toFixed(3),
+        muxSec: result.containerCompletionMs == null ? null : +(result.containerCompletionMs / 1000).toFixed(3),
+        jobId: result.jobId,
         encoderDrainAndMuxSec: +(result.finalizeMs / 1000).toFixed(3),
         blobSec: 0,
         downloadHandoffSec: +(downloadHandoffMs / 1000).toFixed(3),
@@ -2078,7 +2051,7 @@ export async function exportMP4FromCanvas(options: {
     });
   } catch (error) {
     // Never launch the WebM fallback after a user-initiated abort.
-    if (options.signal?.aborted) throw error;
+    if (options.signal?.aborted || (error instanceof DOMException && ['AbortError', 'TimeoutError'].includes(error.name))) throw error;
     // H.264 encode failed mid-pass (rare once the capability probe above has
     // passed, but a driver can still reject at encode time) — fall back to
     // VP9/WebM and save with .webm so the file is actually playable.
