@@ -10,7 +10,51 @@ import { Sparkles, Copy, Clipboard } from 'lucide-react';
 import { copyEffects, pasteEffects, hasEffectsInClipboard } from '../../utils/effectsClipboard';
 import { toast } from 'sonner';
 
+// ── Sprint 1.1: Spatial FX chain ────────────────────────────────────────
+// The set of UV-domain (spatial) stages that compose into one running
+// sample position + color, in user-configurable order. Everything else in
+// EffectsConfig (posterize, color grading, grain, vignette, fresnel, flash…)
+// stays in its existing fixed position, applied AFTER this chain resolves.
+export type SpatialStageId =
+  | 'mirror'        // Quad Mirror
+  | 'displace'       // Noise Displacement
+  | 'slice'          // Graphic Slice
+  | 'chroma'         // Chromatic Aberration
+  | 'blur'           // Blur
+  | 'pixelate'       // Pixelate
+  | 'shapeOverlay';  // Shape Overlay
+
+// Default order: fold → distort → cut, then the pre-existing spatial
+// effects in their original execution order. Since Mirror/Displace/Slice
+// default to disabled, this default order produces byte-identical output
+// to the pre-Sprint-1.1 shader for every existing saved project.
+export const DEFAULT_SPATIAL_CHAIN_ORDER: SpatialStageId[] = [
+  'mirror', 'displace', 'slice', 'chroma', 'blur', 'pixelate', 'shapeOverlay',
+];
+
 export interface EffectsConfig {
+  // Sprint 1.1: order of the composable spatial (UV-domain) effect chain.
+  // User-reorderable via drag UI (Sprint 1.3). Always length 7, one entry
+  // per SpatialStageId, no duplicates — validated at the point of use.
+  spatialChainOrder: SpatialStageId[];
+
+  // Quad Mirror — 4-way kaleidoscope fold around an adjustable center.
+  quadMirrorEnabled: boolean;
+  quadMirrorCenterX: number; // 0–1
+  quadMirrorCenterY: number; // 0–1
+
+  // Noise Displacement — smooth animated value-noise UV offset.
+  noiseDisplaceEnabled: boolean;
+  noiseDisplaceAmount: number; // 0–0.5
+  noiseDisplaceScale: number;  // 0.5–8
+  noiseDisplaceSpeed: number;  // 0–2
+
+  // Graphic Slice — stepped-clock row-banded horizontal glitch.
+  graphicSliceEnabled: boolean;
+  graphicSliceBands: number;  // 2–64
+  graphicSliceAmount: number; // 0–0.3
+  graphicSliceRate: number;   // 0.5–30 Hz
+
   blur: number;
   chromaticAberration: number;
   vignette: number;
@@ -61,6 +105,22 @@ interface EffectsControlsProps {
 }
 
 export const defaultEffects: EffectsConfig = {
+  // Sprint 1.1: Spatial FX chain — all three new effects ship OFF by
+  // default with the default chain order, so existing projects are
+  // visually unaffected until a user explicitly enables one.
+  spatialChainOrder: DEFAULT_SPATIAL_CHAIN_ORDER,
+  quadMirrorEnabled: false,
+  quadMirrorCenterX: 0.5,
+  quadMirrorCenterY: 0.5,
+  noiseDisplaceEnabled: false,
+  noiseDisplaceAmount: 0.1,
+  noiseDisplaceScale: 2,
+  noiseDisplaceSpeed: 0.5,
+  graphicSliceEnabled: false,
+  graphicSliceBands: 16,
+  graphicSliceAmount: 0.08,
+  graphicSliceRate: 8,
+
   blur: 0,
   chromaticAberration: 0,
   vignette: 0,
