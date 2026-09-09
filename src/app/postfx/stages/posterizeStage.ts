@@ -14,7 +14,7 @@ function ditheringToInt(dithering: string): number {
 // is duplicated here per the self-contained-effect-file convention, not
 // imported — Film Grain has its own separate copy for the same reason.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform vec2 resolution;
   uniform float time;
@@ -132,7 +132,9 @@ export function createPosterizeStage(): PostProcessStage {
       ditherScale: { value: 50 },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
