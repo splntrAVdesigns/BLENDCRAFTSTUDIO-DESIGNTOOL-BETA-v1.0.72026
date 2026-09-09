@@ -6,7 +6,7 @@ import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
 // unchanged from the finishing shader. Pure per-pixel color transform, no
 // neighbor sampling.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform bool fresnelEnabled;
   uniform float fresnelPower;
@@ -41,7 +41,9 @@ export function createFresnelStage(): PostProcessStage {
       fresnelIntensity: { value: 0.5 },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
