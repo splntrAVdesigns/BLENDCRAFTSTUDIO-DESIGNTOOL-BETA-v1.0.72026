@@ -1,6 +1,6 @@
 import * as THREE from '../lib/three';
 import { EffectsConfig, SpatialStageId, DEFAULT_SPATIAL_CHAIN_ORDER } from '../components/controls/EffectsControls';
-import { PostProcessStage, StageOverrides } from './types';
+import { PostProcessStage } from './types';
 import { createQuadMirrorStage } from './stages/quadMirrorStage';
 import { createNoiseDisplaceStage } from './stages/noiseDisplaceStage';
 import { createGraphicSliceStage } from './stages/graphicSliceStage';
@@ -41,22 +41,30 @@ export interface SpatialChainCompositor {
   stages: Record<SpatialStageId, PostProcessStage>;
 }
 
-function createTarget(width: number, height: number): THREE.WebGLRenderTarget {
+function createTarget(
+  width: number,
+  height: number,
+  type: THREE.TextureDataType,
+): THREE.WebGLRenderTarget {
   return new THREE.WebGLRenderTarget(width, height, {
     minFilter: THREE.LinearFilter,
     magFilter: THREE.LinearFilter,
     format: THREE.RGBAFormat,
-    type: THREE.UnsignedByteType,
+    type,
     colorSpace: THREE.SRGBColorSpace,
     depthBuffer: false,
     stencilBuffer: false,
   });
 }
 
-export function createSpatialChainCompositor(width: number, height: number): SpatialChainCompositor {
+export function createSpatialChainCompositor(
+  width: number,
+  height: number,
+  type: THREE.TextureDataType = THREE.UnsignedByteType,
+): SpatialChainCompositor {
   return {
-    targetA: createTarget(width, height),
-    targetB: createTarget(width, height),
+    targetA: createTarget(width, height, type),
+    targetB: createTarget(width, height, type),
     stages: {
       mirror: createQuadMirrorStage(),
       displace: createNoiseDisplaceStage(),
@@ -98,7 +106,7 @@ export function disposeSpatialChainCompositor(compositor: SpatialChainCompositor
 export function getActiveSpatialStages(
   compositor: SpatialChainCompositor,
   effects: EffectsConfig,
-  overrides?: Partial<Record<SpatialStageId, StageOverrides>>
+  overrides?: Partial<Record<SpatialStageId, number>>
 ): SpatialStageId[] {
   const order = Array.isArray(effects.spatialChainOrder) && effects.spatialChainOrder.length === 12
     ? effects.spatialChainOrder
@@ -118,13 +126,11 @@ export function getActiveSpatialStages(
 // spatial chain) renders with the right shader without having to remember
 // to reset it itself.
 //
-// `overrides` carries this frame's final (base + audio delta) value(s) for
-// any stage that's audio-modulatable — Sprint 2.1 covers chroma/blur/
-// vignette/displace/slice/pixelate/filmGrain. A map of small bags rather
-// than one positional param per stage: adding the next audio-reactive
-// stage later is a new map key, not a new parameter threaded through
-// every call site. Most stages only ever populate `amount`; Graphic Slice
-// is the one stage using `rate` too.
+// `overrides` carries this frame's final (base + audio delta) value for
+// any stage that's audio-modulatable — currently chroma/blur/vignette.
+// A single map rather than one positional param per stage: adding the
+// next audio-reactive stage later is a new map key, not a new parameter
+// threaded through every call site.
 export function runSpatialChain(
   renderer: THREE.WebGLRenderer,
   scene: THREE.Scene,
@@ -136,7 +142,7 @@ export function runSpatialChain(
   effects: EffectsConfig,
   time: number,
   resolution: THREE.Vector2,
-  overrides?: Partial<Record<SpatialStageId, StageOverrides>>
+  overrides?: Partial<Record<SpatialStageId, number>>
 ): THREE.Texture {
   const activeIds = getActiveSpatialStages(compositor, effects, overrides);
 
