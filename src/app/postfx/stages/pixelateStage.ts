@@ -1,6 +1,6 @@
 import * as THREE from '../../lib/three';
 import { EffectsConfig } from '../../components/controls/EffectsControls';
-import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
+import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../types';
 
 // Pixelate — 4-tap supersampled grid snap, ported unchanged from the
 // pre-multipass finishing shader. Needs `resolution` (pixel grid math), so
@@ -44,11 +44,13 @@ export function createPixelateStage(): PostProcessStage {
   return {
     id: 'pixelate',
     material,
-    isActive(effects: EffectsConfig): boolean {
-      return !!effects.pixelateEnabled && (effects.pixelate || 0) > 0;
+    isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean {
+      if (!effects.pixelateEnabled) return false;
+      const amount = overrides?.amount ?? effects.pixelate ?? 0;
+      return amount > 0;
     },
-    syncUniforms(effects: EffectsConfig, _time: number, resolution: THREE.Vector2): void {
-      material.uniforms.pixelate.value = effects.pixelate || 0;
+    syncUniforms(effects: EffectsConfig, _time: number, resolution: THREE.Vector2, overrides?: StageOverrides): void {
+      material.uniforms.pixelate.value = overrides?.amount ?? effects.pixelate ?? 0;
       material.uniforms.resolution.value.copy(resolution);
     },
   };

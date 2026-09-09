@@ -74,7 +74,24 @@ export type AudioTargetId =
   | 'blur'            // post FX: gaussian blur radius
   | 'saturation'      // post FX: colour saturation boost/crush
   | 'vignette'        // post FX: edge darkening
-  | 'strobe';         // post FX: flash-to-white on beat
+  | 'strobe'          // post FX: flash-to-white on beat
+  // Sprint 2.1 — the three new spatial-chain effects, plus the strongest
+  // remaining Effects Layering candidates. All post-process/global, same
+  // as chroma/blur/vignette above.
+  | 'displaceAmount'  // post FX: Noise Displacement strength
+  | 'sliceAmount'     // post FX: Graphic Slice tear strength
+  | 'sliceRate'       // post FX: Graphic Slice glitch-cut speed
+  | 'pixelateAmount'  // post FX: Pixelate strength
+  | 'filmGrainAmount' // post FX: Film Grain strength
+  // Sprint 2.1 — Light Flash Effects had its own fully self-contained
+  // deterministic LFO (computeFlashState in GradientCanvas.tsx) that never
+  // touched the real audio bus despite mode names like "Beat Drop". These
+  // three route the ACTUAL detected beat/hit/band signal to trigger a
+  // specific flash character. Only one flashType can be active at a time —
+  // see tickMappings' winner-takes-strongest-envelope resolution below.
+  | 'flashDark'
+  | 'flashLight'
+  | 'flashColorCycle';
 
 export interface AudioMapping {
   id: string;
@@ -149,6 +166,15 @@ export const AUDIO_TARGETS: Array<{
   { id: 'strobe',        label: 'Strobe',         hint: 'Flash-to-white on beat — whole frame', universal: true, global: true },
   { id: 'speed',         label: 'Speed',          hint: 'Surges animation rate on hit then returns to normal — works on any animated layer', universal: false },
   { id: 'glitch',        label: 'Glitch',         hint: 'UV tear/slice distortion — works on any visible layer', universal: false },
+  // Sprint 2.1
+  { id: 'displaceAmount',  label: 'Displace Amount',  hint: 'Noise Displacement strength — whole frame (Displacement must be enabled)', universal: true, global: true },
+  { id: 'sliceAmount',     label: 'Slice Amount',     hint: 'Graphic Slice tear strength — whole frame (Graphic Slice must be enabled)', universal: true, global: true },
+  { id: 'sliceRate',       label: 'Slice Rate',       hint: 'Graphic Slice glitch-cut speed — whole frame (Graphic Slice must be enabled)', universal: true, global: true },
+  { id: 'pixelateAmount',  label: 'Pixelate Amount',  hint: 'Pixelation strength — whole frame (Pixelate must be enabled)', universal: true, global: true },
+  { id: 'filmGrainAmount', label: 'Film Grain Amount', hint: 'Grain intensity — whole frame', universal: true, global: true },
+  { id: 'flashDark',       label: 'Flash: Dark',       hint: 'Beat-synced dark flash — takes over Flash Type while active', universal: true, global: true },
+  { id: 'flashLight',      label: 'Flash: Light',      hint: 'Beat-synced white flash — takes over Flash Type while active', universal: true, global: true },
+  { id: 'flashColorCycle', label: 'Flash: Color Cycle', hint: 'Beat-synced colour-cycling flash — takes over Flash Type while active', universal: true, global: true },
 ];
 
 /**
@@ -179,6 +205,21 @@ const RANGE = {
   saturation: 1.0,      // additive saturation multiplier. 1.0 = doubles saturation on full hit.
   vignette: 0.50,       // 0–1 vignette strength. 0.5 = clear centre, dark corners on full hit.
   strobe: 1.0,          // 0–1 white flash. Multiplied by amount; 1.0 full-white on full hit.
+  // Sprint 2.1 — proportions chosen consistent with the existing set (blur's
+  // 4.0 is 20% of its 0–20 slider range; these land in the same 20–40%
+  // band of each target's own slider range, tuned toward the more generous
+  // end since "3.0.4 opened ranges up after testing reported every target
+  // except Hue as too weak" applies here too).
+  displaceAmount: 0.15,   // noiseDisplaceAmount slider is 0–0.5; 30% of range.
+  sliceAmount: 0.12,      // graphicSliceAmount slider is 0–0.3; 40% of range.
+  sliceRate: 10,          // graphicSliceRate slider is 0.5–30 Hz; a solid speed-up on a full hit.
+  pixelateAmount: 40,     // pixelate slider is 0–200; 20% of range.
+  filmGrainAmount: 0.35,  // filmGrain slider is 0–1; a visible grain surge on full hit.
+  // Flash targets: envelope maps directly to opacity, matching how strobe's
+  // RANGE=1.0 already works ("0–1 white flash... 1.0 full-white on full hit").
+  flashDark: 1.0,
+  flashLight: 1.0,
+  flashColorCycle: 1.0,
 };
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -207,7 +248,10 @@ const DEFAULTS: AudioMapping[] = [
 ];
 
 const SOURCE_IDS: AudioSourceId[] = ['subBass','low','mid','high','level','subBassHit','lowHit','midHit','highHit','levelHit','beat','beatDown','beatOff','beatBar','beat8','beat16','lfo'];
-const TARGET_IDS: AudioTargetId[] = ['gradientScale','layerPunch','shake','hue','intensity','glitch','speed','chroma','brightness','blur','saturation','vignette','strobe'];
+const TARGET_IDS: AudioTargetId[] = [
+  'gradientScale','layerPunch','shake','hue','intensity','glitch','speed','chroma','brightness','blur','saturation','vignette','strobe',
+  'displaceAmount','sliceAmount','sliceRate','pixelateAmount','filmGrainAmount','flashDark','flashLight','flashColorCycle',
+];
 const CURVES: ResponseCurve[] = ['linear','exponential','gate'];
 
 function load(): AudioMapping[] {
@@ -320,6 +364,16 @@ const deltas: AudioDeltas = {
 const globalDeltas = {
   chromaAdd: 0, brightnessAdd: 0, shakeX: 0, shakeY: 0,
   blurAdd: 0, saturationAdd: 0, vignetteAdd: 0, strobeAdd: 0,
+  // Sprint 2.1
+  displaceAmountAdd: 0, sliceAmountAdd: 0, sliceRateAdd: 0,
+  pixelateAmountAdd: 0, filmGrainAmountAdd: 0,
+  // Flash: unlike every other field here, these aren't additive deltas —
+  // flashOverrideType names which flashType (if any) audio is currently
+  // driving, flashOverrideOpacity is that flash's live envelope-driven
+  // opacity. null/0 means "no audio flash route is currently firing;
+  // Light Flash Effects' own internal clock/mode runs unmodified."
+  flashOverrideType: null as 'dark' | 'quick' | 'color' | null,
+  flashOverrideOpacity: 0,
 };
 
 let anyActive = false;
@@ -354,6 +408,13 @@ export function tickMappings(dt: number): void {
       globalDeltas.saturationAdd = 0;
       globalDeltas.vignetteAdd = 0;
       globalDeltas.strobeAdd = 0;
+      globalDeltas.displaceAmountAdd = 0;
+      globalDeltas.sliceAmountAdd = 0;
+      globalDeltas.sliceRateAdd = 0;
+      globalDeltas.pixelateAmountAdd = 0;
+      globalDeltas.filmGrainAmountAdd = 0;
+      globalDeltas.flashOverrideType = null;
+      globalDeltas.flashOverrideOpacity = 0;
       anyActive = false;
     }
     return;
@@ -414,6 +475,15 @@ function stepAllMappings(
   let saturation = 0;
   let vignette = 0;
   let strobe = 0;
+  // Sprint 2.1
+  let displaceAmount = 0;
+  let sliceAmount = 0;
+  let sliceRate = 0;
+  let pixelateAmount = 0;
+  let filmGrainAmount = 0;
+  let flashDarkE = 0;
+  let flashLightE = 0;
+  let flashColorE = 0;
 
   for (let i = 0; i < mappings.length; i++) {
     const m = mappings[i];
@@ -437,6 +507,14 @@ function stepAllMappings(
     else if (m.target === 'vignette') vignette += RANGE.vignette * next;
     else if (m.target === 'strobe') strobe += RANGE.strobe * next;
     else if (m.target === 'shake') shakeMag += RANGE.shake * next;
+    else if (m.target === 'displaceAmount') displaceAmount += RANGE.displaceAmount * next;
+    else if (m.target === 'sliceAmount') sliceAmount += RANGE.sliceAmount * next;
+    else if (m.target === 'sliceRate') sliceRate += RANGE.sliceRate * next;
+    else if (m.target === 'pixelateAmount') pixelateAmount += RANGE.pixelateAmount * next;
+    else if (m.target === 'filmGrainAmount') filmGrainAmount += RANGE.filmGrainAmount * next;
+    else if (m.target === 'flashDark') flashDarkE += RANGE.flashDark * next;
+    else if (m.target === 'flashLight') flashLightE += RANGE.flashLight * next;
+    else if (m.target === 'flashColorCycle') flashColorE += RANGE.flashColorCycle * next;
   }
 
   globalDeltas.chromaAdd = chroma;
@@ -445,6 +523,33 @@ function stepAllMappings(
   globalDeltas.saturationAdd = saturation;
   globalDeltas.vignetteAdd = vignette;
   globalDeltas.strobeAdd = strobe;
+  globalDeltas.displaceAmountAdd = displaceAmount;
+  globalDeltas.sliceAmountAdd = sliceAmount;
+  globalDeltas.sliceRateAdd = sliceRate;
+  globalDeltas.pixelateAmountAdd = pixelateAmount;
+  globalDeltas.filmGrainAmountAdd = filmGrainAmount;
+
+  // Flash: three targets compete for one flashType. Whichever has the
+  // strongest envelope this frame wins — confirmed resolution rule, not
+  // an assumption. Ties are vanishingly unlikely (continuous envelopes);
+  // 'dark' wins a literal tie only because it's checked first, which is
+  // an implementation detail, not a designed priority order.
+  if (flashDarkE > 0.0001 || flashLightE > 0.0001 || flashColorE > 0.0001) {
+    if (flashDarkE >= flashLightE && flashDarkE >= flashColorE) {
+      globalDeltas.flashOverrideType = 'dark';
+      globalDeltas.flashOverrideOpacity = Math.min(1, flashDarkE);
+    } else if (flashLightE >= flashColorE) {
+      globalDeltas.flashOverrideType = 'quick';
+      globalDeltas.flashOverrideOpacity = Math.min(1, flashLightE);
+    } else {
+      globalDeltas.flashOverrideType = 'color';
+      globalDeltas.flashOverrideOpacity = Math.min(1, flashColorE);
+    }
+  } else {
+    globalDeltas.flashOverrideType = null;
+    globalDeltas.flashOverrideOpacity = 0;
+  }
+
   if (shakeMag > 0.0001) {
     globalDeltas.shakeX = shakeMag * Math.sin(shakeClock * 0.045);
     globalDeltas.shakeY = shakeMag * Math.sin(shakeClock * 0.037 + 1.7);
@@ -497,6 +602,9 @@ export function tickMappingsFromBaked(
 export function getGlobalAudioDeltas(): Readonly<{
   chromaAdd: number; brightnessAdd: number; shakeX: number; shakeY: number;
   blurAdd: number; saturationAdd: number; vignetteAdd: number; strobeAdd: number;
+  displaceAmountAdd: number; sliceAmountAdd: number; sliceRateAdd: number;
+  pixelateAmountAdd: number; filmGrainAmountAdd: number;
+  flashOverrideType: 'dark' | 'quick' | 'color' | null; flashOverrideOpacity: number;
 }> {
   return globalDeltas;
 }

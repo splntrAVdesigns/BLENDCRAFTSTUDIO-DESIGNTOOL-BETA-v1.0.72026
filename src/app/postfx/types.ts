@@ -13,6 +13,16 @@ export const FULLSCREEN_VERTEX_SHADER = `
   }
 `;
 
+// Audio-delta overrides for one stage this frame. Most stages have exactly
+// one audio-modulatable parameter and use the `amount` key; Graphic Slice
+// is the first stage with two independent ones (amount AND rate), which is
+// why this is a small bag rather than a single number — a single number
+// covered every case through Sprint 1.4, but stopped being enough here.
+export interface StageOverrides {
+  amount?: number;
+  rate?: number;
+}
+
 // One compiled full-screen pass. Each stage module (stages/*.ts) builds one
 // of these. The compositor (pingPongCompositor.ts) owns sequencing —
 // individual stage modules only know their own math, never the chain order
@@ -22,19 +32,19 @@ export interface PostProcessStage {
   id: SpatialStageId;
   material: THREE.ShaderMaterial;
 
-  // Whether this stage should run at all this frame. `liveOverride`, when
-  // provided, is the final post-audio-delta numeric value to test instead
-  // of the raw EffectsConfig field — only Chromatic Aberration and Blur are
-  // audio-modulatable today, so only their stage modules read it.
-  isActive(effects: EffectsConfig, liveOverride?: number): boolean;
+  // Whether this stage should run at all this frame. `overrides`, when
+  // provided, carries the final post-audio-delta value(s) to test instead
+  // of the raw EffectsConfig field(s) — only audio-modulatable stages read
+  // it; stages with no audio routing ignore it entirely.
+  isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean;
 
   // Push this frame's uniform values into `material`. Every stage receives
   // `time` and `resolution` even if it doesn't use them, for a uniform
-  // call signature across all seven stage modules.
+  // call signature shared across every stage module.
   syncUniforms(
     effects: EffectsConfig,
     time: number,
     resolution: THREE.Vector2,
-    liveOverride?: number
+    overrides?: StageOverrides
   ): void;
 }

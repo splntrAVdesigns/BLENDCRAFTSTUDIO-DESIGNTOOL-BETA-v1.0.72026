@@ -1,6 +1,6 @@
 import * as THREE from '../lib/three';
 import { EffectsConfig, SpatialStageId, DEFAULT_SPATIAL_CHAIN_ORDER } from '../components/controls/EffectsControls';
-import { PostProcessStage } from './types';
+import { PostProcessStage, StageOverrides } from './types';
 import { createQuadMirrorStage } from './stages/quadMirrorStage';
 import { createNoiseDisplaceStage } from './stages/noiseDisplaceStage';
 import { createGraphicSliceStage } from './stages/graphicSliceStage';
@@ -98,7 +98,7 @@ export function disposeSpatialChainCompositor(compositor: SpatialChainCompositor
 export function getActiveSpatialStages(
   compositor: SpatialChainCompositor,
   effects: EffectsConfig,
-  overrides?: Partial<Record<SpatialStageId, number>>
+  overrides?: Partial<Record<SpatialStageId, StageOverrides>>
 ): SpatialStageId[] {
   const order = Array.isArray(effects.spatialChainOrder) && effects.spatialChainOrder.length === 12
     ? effects.spatialChainOrder
@@ -118,11 +118,13 @@ export function getActiveSpatialStages(
 // spatial chain) renders with the right shader without having to remember
 // to reset it itself.
 //
-// `overrides` carries this frame's final (base + audio delta) value for
-// any stage that's audio-modulatable — currently chroma/blur/vignette.
-// A single map rather than one positional param per stage: adding the
-// next audio-reactive stage later is a new map key, not a new parameter
-// threaded through every call site.
+// `overrides` carries this frame's final (base + audio delta) value(s) for
+// any stage that's audio-modulatable — Sprint 2.1 covers chroma/blur/
+// vignette/displace/slice/pixelate/filmGrain. A map of small bags rather
+// than one positional param per stage: adding the next audio-reactive
+// stage later is a new map key, not a new parameter threaded through
+// every call site. Most stages only ever populate `amount`; Graphic Slice
+// is the one stage using `rate` too.
 export function runSpatialChain(
   renderer: THREE.WebGLRenderer,
   scene: THREE.Scene,
@@ -134,7 +136,7 @@ export function runSpatialChain(
   effects: EffectsConfig,
   time: number,
   resolution: THREE.Vector2,
-  overrides?: Partial<Record<SpatialStageId, number>>
+  overrides?: Partial<Record<SpatialStageId, StageOverrides>>
 ): THREE.Texture {
   const activeIds = getActiveSpatialStages(compositor, effects, overrides);
 

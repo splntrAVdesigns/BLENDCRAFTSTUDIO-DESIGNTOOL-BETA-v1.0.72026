@@ -1,6 +1,6 @@
 import * as THREE from '../../lib/three';
 import { EffectsConfig } from '../../components/controls/EffectsControls';
-import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
+import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../types';
 
 // Vignette — radial darkening toward the frame edges, ported unchanged
 // from the pre-expansion finishing shader. Pure per-pixel color transform
@@ -43,12 +43,12 @@ export function createVignetteStage(): PostProcessStage {
   return {
     id: 'vignette',
     material,
-    isActive(effects: EffectsConfig, liveOverride?: number): boolean {
-      const value = liveOverride ?? effects.vignette ?? 0;
+    isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean {
+      const value = overrides?.amount ?? effects.vignette ?? 0;
       return value > 0.01;
     },
-    syncUniforms(effects: EffectsConfig, _time: number, _resolution: THREE.Vector2, liveOverride?: number): void {
-      material.uniforms.vignette.value = liveOverride ?? effects.vignette ?? 0;
+    syncUniforms(effects: EffectsConfig, _time: number, _resolution: THREE.Vector2, overrides?: StageOverrides): void {
+      material.uniforms.vignette.value = overrides?.amount ?? effects.vignette ?? 0;
     },
   };
 }

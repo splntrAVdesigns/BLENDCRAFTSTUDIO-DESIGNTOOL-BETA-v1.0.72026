@@ -334,6 +334,12 @@ export interface PostProcessAudioDeltas {
   saturationAdd: number;
   vignetteAdd: number;
   strobeAdd: number;
+  // Sprint 2.1
+  displaceAmountAdd: number;
+  sliceAmountAdd: number;
+  sliceRateAdd: number;
+  pixelateAmountAdd: number;
+  filmGrainAmountAdd: number;
 }
 
 /**
@@ -353,5 +359,14 @@ export function shouldUsePostProcess(
     audio.blurAdd > 0.001 ||
     audio.saturationAdd > 0.001 ||
     audio.vignetteAdd > 0.001 ||
-    audio.strobeAdd > 0.001;
+    audio.strobeAdd > 0.001 ||
+    // Sprint 2.1: audio-only-driven versions of these (base slider at 0,
+    // effect toggled on, audio provides all the visible amount) must still
+    // engage post-process. sliceRateAdd deliberately excluded — rate alone
+    // with zero amount produces nothing visible, matching
+    // graphicSliceStage's own isActive gate (amount-only).
+    audio.displaceAmountAdd > 0.001 ||
+    audio.sliceAmountAdd > 0.001 ||
+    audio.pixelateAmountAdd > 0.001 ||
+    audio.filmGrainAmountAdd > 0.001;
 }
