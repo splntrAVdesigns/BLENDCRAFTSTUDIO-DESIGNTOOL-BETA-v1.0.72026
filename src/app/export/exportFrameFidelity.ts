@@ -6,7 +6,7 @@ import {
 } from 'mediabunny';
 import { compareRgbaFrames, type FrameParityMetrics } from '../utils/exportRenderQuality';
 
-const DETAIL_SIZE = 128;
+const DETAIL_SIZE = 256;
 
 type ExportVideoColorSpace = {
   primaries?: string | null;
@@ -37,9 +37,85 @@ export interface ExportFrameFidelityResult {
   decodedMeanLuma: number | null;
   lumaDelta: number | null;
   colorSpace: ExportVideoColorSpace | null;
+  colorContractPassed?: boolean;
+  detail?: ExportDetailMetrics | null;
   reason?: string;
   frames?: ExportFrameFidelityResult[];
   timestamp?: number;
+}
+
+export interface ExportDetailMetrics {
+  referenceLumaEdgeEnergy: number;
+  decodedLumaEdgeEnergy: number;
+  edgeRetentionRatio: number;
+  chromaMeanAbsoluteError: number;
+  passed: boolean;
+}
+
+const luma = (r: number, g: number, b: number) => r * 0.2126 + g * 0.7152 + b * 0.0722;
+const cb = (r: number, g: number, b: number) => -r * 0.1146 - g * 0.3854 + b * 0.5;
+const cr = (r: number, g: number, b: number) => r * 0.5 - g * 0.4542 - b * 0.0458;
+
+/** Native-pixel edge/chroma certification. Unlike global RGB averages, this
+ * detects the softening and colored-edge loss characteristic of YUV codecs. */
+export function compareExportDetail(
+  reference: ExportFrameSample,
+  candidate: ExportFrameSample,
+): ExportDetailMetrics {
+  const width = reference.width;
+  const height = reference.height;
+  const regionCount = Math.max(1, reference.regions?.length ?? 1);
+  const regionWidth = Math.max(1, Math.floor(width / regionCount));
+  let referenceEdges = 0;
+  let candidateEdges = 0;
+  let edgeSamples = 0;
+  let chromaError = 0;
+  let chromaSamples = 0;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const rr = reference.rgba[i], rg = reference.rgba[i + 1], rb = reference.rgba[i + 2];
+      const cr0 = candidate.rgba[i], cg = candidate.rgba[i + 1], cb0 = candidate.rgba[i + 2];
+      chromaError += Math.abs(cb(rr, rg, rb) - cb(cr0, cg, cb0));
+      chromaError += Math.abs(cr(rr, rg, rb) - cr(cr0, cg, cb0));
+      chromaSamples += 2;
+
+      // Exclude the artificial seams between packed detail regions.
+      const atRegionEdge = x % regionWidth === regionWidth - 1;
+      if (!atRegionEdge && x + 1 < width) {
+        const n = i + 4;
+        referenceEdges += Math.abs(luma(rr, rg, rb) - luma(reference.rgba[n], reference.rgba[n + 1], reference.rgba[n + 2]));
+        candidateEdges += Math.abs(luma(cr0, cg, cb0) - luma(candidate.rgba[n], candidate.rgba[n + 1], candidate.rgba[n + 2]));
+        edgeSamples++;
+      }
+      if (y + 1 < height) {
+        const n = i + width * 4;
+        referenceEdges += Math.abs(luma(rr, rg, rb) - luma(reference.rgba[n], reference.rgba[n + 1], reference.rgba[n + 2]));
+        candidateEdges += Math.abs(luma(cr0, cg, cb0) - luma(candidate.rgba[n], candidate.rgba[n + 1], candidate.rgba[n + 2]));
+        edgeSamples++;
+      }
+    }
+  }
+
+  const referenceLumaEdgeEnergy = referenceEdges / Math.max(1, edgeSamples);
+  const decodedLumaEdgeEnergy = candidateEdges / Math.max(1, edgeSamples);
+  const edgeRetentionRatio = decodedLumaEdgeEnergy / Math.max(0.0001, referenceLumaEdgeEnergy);
+  const chromaMeanAbsoluteError = chromaError / Math.max(1, chromaSamples);
+  return {
+    referenceLumaEdgeEnergy,
+    decodedLumaEdgeEnergy,
+    edgeRetentionRatio,
+    chromaMeanAbsoluteError,
+    passed: edgeRetentionRatio >= 0.82 && edgeRetentionRatio <= 1.25 && chromaMeanAbsoluteError <= 10,
+  };
+}
+
+export function isBt709DeliveryColorSpace(colorSpace: ExportVideoColorSpace | null): boolean {
+  return colorSpace?.primaries === 'bt709'
+    && colorSpace?.transfer === 'bt709'
+    && colorSpace?.matrix === 'bt709'
+    && colorSpace?.fullRange === false;
 }
 
 export function compareExportFrameSamples(
@@ -177,7 +253,9 @@ export async function verifyExportedFrameFidelity(
         maximumChannelError: 96,
       });
       const lumaDelta = decoded.meanLuma - reference.meanLuma;
-      const passed = metrics.passed && Math.abs(lumaDelta) <= 6;
+      const detail = compareExportDetail(reference, decoded);
+      const colorContractPassed = isBt709DeliveryColorSpace(colorSpace);
+      const passed = metrics.passed && Math.abs(lumaDelta) <= 6 && detail.passed && colorContractPassed;
       return {
         timestamp: reference.timestamp,
         checked: true,
@@ -189,6 +267,8 @@ export async function verifyExportedFrameFidelity(
         decodedMeanLuma: decoded.meanLuma,
         lumaDelta,
         colorSpace,
+        colorContractPassed,
+        detail,
       };
     } finally {
       sample.close();
