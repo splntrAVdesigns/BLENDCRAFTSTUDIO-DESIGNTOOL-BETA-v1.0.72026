@@ -15,7 +15,7 @@ function shapeToInt(shape: string): number {
 // overlay with no rotation or luminance response. Each has its own copy
 // of getShape() per the self-contained-effect-file convention.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform vec2 resolution;
   uniform float halftone;
@@ -89,7 +89,9 @@ export function createHalftoneStage(): PostProcessStage {
       creativeShape: { value: 0 },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
