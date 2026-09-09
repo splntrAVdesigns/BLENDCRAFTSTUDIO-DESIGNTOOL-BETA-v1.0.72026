@@ -7,7 +7,7 @@ import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
 // ping-pong pass so it composes correctly with every other stage — see
 // SPATIAL_FX_MULTIPASS.md for why a single shared shader couldn't do this.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform vec2 quadMirrorCenter;
   varying vec2 vUv;
@@ -31,7 +31,9 @@ export function createQuadMirrorStage(): PostProcessStage {
       quadMirrorCenter: { value: new THREE.Vector2(0.5, 0.5) },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
