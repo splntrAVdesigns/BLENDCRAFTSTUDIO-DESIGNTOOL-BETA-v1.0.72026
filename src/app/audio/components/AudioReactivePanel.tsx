@@ -43,6 +43,7 @@ import {
 } from '../audioMapping';
 import { useLayerRoster } from '../audioLayerRoster';
 import { requestMasterPlay } from '../audioTransport';
+import { syncGatedEffectForTarget } from '../audioEffectsGateSync';
 import { BandMeter } from './BandMeter';
 import { BeatControls, LFOControls } from './TimingControls';
 
@@ -224,7 +225,14 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
                   >
                     <button
                       type="button"
-                      onClick={() => updateMapping(m.id, { enabled: !m.enabled })}
+                      onClick={() => {
+                        const nowEnabled = !m.enabled;
+                        updateMapping(m.id, { enabled: nowEnabled });
+                        // Re-enabling a mapping that already targets a
+                        // gated effect syncs the toggle too — not just
+                        // picking a new target (below).
+                        if (nowEnabled) syncGatedEffectForTarget(m.target);
+                      }}
                       className={`h-3 w-3 rounded-sm border transition-colors ${
                         m.enabled ? 'border-blue-500 bg-blue-500' : 'border-zinc-600 bg-transparent'
                       }`}
@@ -239,7 +247,13 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
                     <span className="text-center text-[10px] text-zinc-600">→</span>
                     <Picker
                       value={m.target}
-                      onChange={(v) => updateMapping(m.id, { target: v as never })}
+                      onChange={(v) => {
+                        updateMapping(m.id, { target: v as never });
+                        // Option A: selecting a gated target auto-enables
+                        // its effect toggle — audio modulates, the user
+                        // shouldn't also have to flip a second switch.
+                        syncGatedEffectForTarget(v);
+                      }}
                       options={AUDIO_TARGETS.map((t) => ({ value: t.id, label: t.label }))}
                       title={target?.hint}
                     />

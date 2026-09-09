@@ -25,6 +25,7 @@ import {
 import { useCanvasGridState, toggleGrid } from '../canvas/useCanvasGrid';
 import { useAudioReactiveEnabled, toggleAudioReactive } from '../../audio/audioReactiveState';
 import { AudioReactiveMount } from '../../audio/components/AudioReactiveMount';
+import type { GatedToggleField } from '../../audio/audioEffectsGateSync';
 import { Music } from 'lucide-react';
 import { useExportStatus } from '../../state/exportStatus';
 
@@ -41,6 +42,8 @@ interface AppHeaderProps {
   onLeftPanelToggle: () => void;
   onRightPanelToggle: () => void;
   onOpenTutorial?: () => void;
+  /** Option A: routing-driven effect toggle sync, handed down to AudioReactiveMount. */
+  onEnableGatedEffect: (field: GatedToggleField) => void;
 }
 
 export function AppHeader({
@@ -56,6 +59,7 @@ export function AppHeader({
   onLeftPanelToggle,
   onRightPanelToggle,
   onOpenTutorial,
+  onEnableGatedEffect,
 }: AppHeaderProps) {
   const { tooltipsEnabled, toggleTooltips } = useTooltipContext();
   /**
@@ -249,6 +253,7 @@ export function AppHeader({
           <AudioReactiveMount
             isPlaying={isPlaying}
             onPlayPauseToggle={onPlayPauseToggle}
+            onEnableGatedEffect={onEnableGatedEffect}
           />
 
           <div className="w-px h-6 bg-zinc-700" />

@@ -36,6 +36,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { installAudioEngine, disposeAudioEngine, pauseAudio, getAudioEngineStatus } from '../audioEngine';
 import { setTransportPlayHandler, requestMasterPause } from '../audioTransport';
+import { setGatedEffectEnableHandler, type GatedToggleField } from '../audioEffectsGateSync';
 import { useAudioReactiveEnabled, installAudioUIDiagnostic } from '../audioReactiveState';
 import { AudioReactivePanel } from './AudioReactivePanel';
 
@@ -52,9 +53,11 @@ interface AudioReactiveMountProps {
   /** Master transport state + control, handed down from AppHeader. */
   isPlaying: boolean;
   onPlayPauseToggle: () => void;
+  /** Option A: routing-driven effect toggle sync, handed down from AppHeader. */
+  onEnableGatedEffect: (field: GatedToggleField) => void;
 }
 
-export function AudioReactiveMount({ isPlaying, onPlayPauseToggle }: AudioReactiveMountProps) {
+export function AudioReactiveMount({ isPlaying, onPlayPauseToggle, onEnableGatedEffect }: AudioReactiveMountProps) {
   const enabled = useAudioReactiveEnabled();
   const [host, setHost] = useState<HTMLElement | null>(null);
 
@@ -74,6 +77,15 @@ export function AudioReactiveMount({ isPlaying, onPlayPauseToggle }: AudioReacti
     setTransportPlayHandler(onPlayPauseToggle);
     return () => setTransportPlayHandler(null);
   }, [onPlayPauseToggle]);
+
+  // Option A: same re-registration pattern as the transport handler above,
+  // for the same reason — onEnableGatedEffect closes over App's current
+  // effects state, so it must be re-registered whenever App re-renders
+  // with new effects, not captured once.
+  useEffect(() => {
+    setGatedEffectEnableHandler(onEnableGatedEffect);
+    return () => setGatedEffectEnableHandler(null);
+  }, [onEnableGatedEffect]);
 
   // Pausing the canvas pauses audio, so the two clocks can't drift apart.
   // Only acts on a real transition into paused, so it can't fight the user's

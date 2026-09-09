@@ -313,6 +313,16 @@ export const EffectsControls = memo(function EffectsControls({
   // Accordion state: single-open, so opening one detail section (Color
   // Adjustments/Visual Effects/Creative Effects/Light Flash Effects) closes
   // whichever else was open — this is what actually cuts the clutter, not
+  // Sprint 2.6: which preset (if any) is the one currently applied — tracked
+  // explicitly rather than deep-comparing `effects` against each preset's
+  // values. Deep-compare would be twitchy: any single manual slider nudge
+  // after applying a preset would silently un-highlight it, which is
+  // technically accurate but not what "show the active preset" should feel
+  // like. This only changes on an explicit preset click (apply or the
+  // second click that clears it) — incidental effects changes elsewhere
+  // leave the highlight alone.
+  const [activePresetName, setActivePresetName] = useState<string | null>(null);
+
   // moving sections around. Effects Layering is pinned outside this
   // accordion entirely (always visible, same treatment as Effect Presets)
   // since it's meant to stay glanceable while a detail section is open.
@@ -462,17 +472,36 @@ export const EffectsControls = memo(function EffectsControls({
           </div>
         </div>
         <div className="grid grid-cols-3 gap-1.5">
-          {EFFECT_PRESETS.map((preset) => (
-            <ConditionalTooltip key={preset.name} content={preset.description}>
-              <Button
-                onClick={() => onChange(preset.effects)}
-                variant="outline"
-                className="h-7 px-2 border-zinc-700 hover:border-blue-400 hover:bg-zinc-800/50 transition-all"
-              >
-                <span className="text-[11px] font-medium text-[#51a2ff] truncate">{preset.name}</span>
-              </Button>
-            </ConditionalTooltip>
-          ))}
+          {EFFECT_PRESETS.map((preset) => {
+            const isActive = activePresetName === preset.name;
+            return (
+              <ConditionalTooltip key={preset.name} content={preset.description}>
+                <Button
+                  onClick={() => {
+                    if (isActive) {
+                      // Second click on the active preset — clear it back
+                      // to the baseline rather than leaving it applied
+                      // with nothing to show it's still "on".
+                      onChange(defaultEffects);
+                      setActivePresetName(null);
+                    } else {
+                      onChange(preset.effects);
+                      setActivePresetName(preset.name);
+                    }
+                  }}
+                  variant="outline"
+                  aria-pressed={isActive}
+                  className={`h-7 px-2 transition-all ${
+                    isActive
+                      ? 'border-blue-500 bg-zinc-800/60'
+                      : 'border-zinc-700 hover:border-blue-400 hover:bg-zinc-800/50'
+                  }`}
+                >
+                  <span className="text-[11px] font-medium text-[#51a2ff] truncate">{preset.name}</span>
+                </Button>
+              </ConditionalTooltip>
+            );
+          })}
         </div>
       </div>
 
