@@ -1,6 +1,6 @@
 import * as THREE from '../../lib/three';
 import { EffectsConfig } from '../../components/controls/EffectsControls';
-import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../types';
+import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
 
 // Graphic Slice — stepped-clock row-banded horizontal displacement glitch.
 // Ported from Visual Mood Lab's VFX rack (family: slice). Re-randomizes on
@@ -12,7 +12,7 @@ import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../t
 // slice.frag. Contrast with Noise Displacement, which needs the
 // precision-safe hash because it evaluates noise continuously.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform float time;
   uniform float graphicSliceBands;
@@ -44,26 +44,22 @@ export function createGraphicSliceStage(): PostProcessStage {
       graphicSliceRate: { value: 8 },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
     id: 'slice',
     material,
-    // Two independent audio-modulatable params here (amount AND rate) —
-    // this is the stage StageOverrides was generalized from a single
-    // number for. Same "must be manually enabled first" reasoning as
-    // Noise Displacement: audio modulates, it doesn't turn on.
-    isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean {
-      if (!effects.graphicSliceEnabled) return false;
-      const amount = overrides?.amount ?? effects.graphicSliceAmount ?? 0;
-      return amount > 0.001;
+    isActive(effects: EffectsConfig): boolean {
+      return !!effects.graphicSliceEnabled && (effects.graphicSliceAmount || 0) > 0.001;
     },
-    syncUniforms(effects: EffectsConfig, time: number, _resolution: THREE.Vector2, overrides?: StageOverrides): void {
+    syncUniforms(effects: EffectsConfig, time: number): void {
       material.uniforms.time.value = time;
       material.uniforms.graphicSliceBands.value = effects.graphicSliceBands ?? 16;
-      material.uniforms.graphicSliceAmount.value = overrides?.amount ?? effects.graphicSliceAmount ?? 0.08;
-      material.uniforms.graphicSliceRate.value = overrides?.rate ?? effects.graphicSliceRate ?? 8;
+      material.uniforms.graphicSliceAmount.value = effects.graphicSliceAmount ?? 0.08;
+      material.uniforms.graphicSliceRate.value = effects.graphicSliceRate ?? 8;
     },
   };
 }
