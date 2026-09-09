@@ -8,6 +8,18 @@
  * so this panel is about tuning and confirming them — it doesn't wire anything
  * itself. That reuse is the whole point of adding them as sources: everything
  * 3.0.3 built (curves, envelopes, targets, per-layer scope) applies unchanged.
+ *
+ * ── SPRINT 2.9 LAYOUT ─────────────────────────────────────────────────────
+ * Every control here is stacked (label above, control below) instead of
+ * label-left/control-right — that's what lets BPM, LFO, and Mapping each
+ * get their own narrower column in AudioReactivePanel.tsx without anything
+ * getting squeezed. Sprint 2.8 pulled the phase meters into one shared row
+ * spanning two of the three columns, which fixed vertical alignment but
+ * added a whole extra row of height and left the third column short — the
+ * actual complaint. That shared row is gone: each meter is back under its
+ * own section's header line, and they land in the same visual row because
+ * both sit at the same consistent first position in same-height columns,
+ * not because they're one shared component.
  */
 
 import { useEffect, useState } from 'react';
@@ -20,6 +32,7 @@ import { PhaseIndicator } from './PhaseIndicator';
 export function BeatControls() {
   const beatClock = useBeatClock();
   const [beat, setBeat] = useState(() => getBeatInfo());
+  const [beatPhase, setBeatPhase] = useState(0);
   const [clockActive, setClockActive] = useState(false);
 
   useEffect(() => {
@@ -29,6 +42,7 @@ export function BeatControls() {
       if (t - last >= 50) {
         last = t;
         setBeat(getBeatInfo());
+        setBeatPhase(getBeatPhase());
         setClockActive(isBeatClockActive());
       }
       raf = requestAnimationFrame(tick);
@@ -45,33 +59,32 @@ export function BeatControls() {
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between">
-        <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-500">Beat</span>
+        <span className="text-[9px] font-semibold uppercase tracking-wider text-zinc-500">BPM</span>
         <span className="text-[9px] tabular-nums text-zinc-500">
-          {beat.bpm} BPM
+          {beat.bpm} bpm
           <span className={`ml-1 ${beat.confidence > 0.6 ? 'text-blue-400' : 'text-zinc-600'}`}>
             {beat.usingTap ? '· tap' : beat.confidence > 0.6 ? '· lock' : '· …'}
           </span>
         </span>
       </div>
-      <div className="flex items-center gap-1.5">
+      <PhaseIndicator phase={beatPhase} active={beat.confidence > 0.3 || beat.usingTap} />
+      <button
+        type="button"
+        onClick={handleTap}
+        className="w-full rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-white"
+      >
+        Tap tempo
+      </button>
+      {beat.usingTap && (
         <button
           type="button"
-          onClick={handleTap}
-          className="flex-1 rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-300 transition-colors hover:bg-zinc-700 hover:text-white"
+          onClick={() => { clearTap(); setBeat(getBeatInfo()); }}
+          className="w-full rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-500 transition-colors hover:text-zinc-300"
+          title="Hand tempo back to auto-detection"
         >
-          Tap tempo
+          Auto
         </button>
-        {beat.usingTap && (
-          <button
-            type="button"
-            onClick={() => { clearTap(); setBeat(getBeatInfo()); }}
-            className="rounded bg-zinc-800 px-2 py-1 text-[10px] text-zinc-500 transition-colors hover:text-zinc-300"
-            title="Hand tempo back to auto-detection"
-          >
-            Auto
-          </button>
-        )}
-      </div>
+      )}
       {/* STAGE 3.0.6: drive the animation clock from the beat. */}
       <button
         type="button"
@@ -98,6 +111,21 @@ export function BeatControls() {
 
 export function LFOControls() {
   const lfo = useLFOConfig();
+  const [lfoPhase, setLfoPhase] = useState(0);
+
+  useEffect(() => {
+    let raf = 0;
+    let last = 0;
+    const tick = (t: number) => {
+      if (t - last >= 50) {
+        last = t;
+        setLfoPhase(getLFOPhase());
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
   return (
     <div className="space-y-1.5">
@@ -113,13 +141,14 @@ export function LFOControls() {
           aria-pressed={lfo.enabled}
         />
       </div>
+      <PhaseIndicator phase={lfoPhase} active={lfo.enabled} />
 
-      <div className="flex items-center gap-1">
-        <span className="w-10 flex-shrink-0 text-[9px] text-zinc-500">Shape</span>
+      <div className="space-y-0.5">
+        <span className="text-[9px] text-zinc-500">Shape</span>
         <select
           value={lfo.shape}
           onChange={(e) => updateLFO({ shape: e.target.value as never })}
-          className="min-w-0 flex-1 rounded bg-zinc-800 px-1 py-0.5 text-[10px] text-zinc-300 outline-none"
+          className="w-full rounded bg-zinc-800 px-1.5 py-1 text-[10px] text-zinc-300 outline-none"
         >
           {WAVEFORM_SHAPES.map((w) => (
             <option key={w.id} value={w.id}>{w.label}</option>
@@ -127,12 +156,12 @@ export function LFOControls() {
         </select>
       </div>
 
-      <div className="flex items-center gap-1">
-        <span className="w-10 flex-shrink-0 text-[9px] text-zinc-500">Sync</span>
+      <div className="space-y-0.5">
+        <span className="text-[9px] text-zinc-500">Sync</span>
         <select
           value={lfo.syncMode}
           onChange={(e) => updateLFO({ syncMode: e.target.value as never })}
-          className="min-w-0 flex-1 rounded bg-zinc-800 px-1 py-0.5 text-[10px] text-zinc-300 outline-none"
+          className="w-full rounded bg-zinc-800 px-1.5 py-1 text-[10px] text-zinc-300 outline-none"
         >
           <option value="bpm">BPM-locked</option>
           <option value="free">Free (Hz)</option>
@@ -162,46 +191,6 @@ export function LFOControls() {
   );
 }
 
-/**
- * Sprint 2.8: Beat's and LFO's phase meters used to each render at the
- * bottom of their own sub-column, so they landed at different vertical
- * positions whenever the content above them was a different height —
- * Beat and LFO don't have the same number of controls. Pulling both into
- * one shared row (still separately labelled, one poll loop instead of the
- * two BeatControls/LFOControls used to run independently) guarantees they
- * sit level with each other regardless of what's above.
- */
-export function TimingPhaseRow() {
-  const lfo = useLFOConfig();
-  const [beatPhase, setBeatPhase] = useState(0);
-  const [beatActive, setBeatActive] = useState(false);
-  const [lfoPhase, setLfoPhase] = useState(0);
-
-  useEffect(() => {
-    let raf = 0;
-    let last = 0;
-    const tick = (t: number) => {
-      if (t - last >= 50) {
-        last = t;
-        const beat = getBeatInfo();
-        setBeatPhase(getBeatPhase());
-        setBeatActive(beat.confidence > 0.3 || beat.usingTap);
-        setLfoPhase(getLFOPhase());
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
-
-  return (
-    <div className="mt-1.5 grid grid-cols-2 gap-x-3">
-      <PhaseIndicator phase={beatPhase} label="Beat" active={beatActive} />
-      <PhaseIndicator phase={lfoPhase} label="LFO" active={lfo.enabled} />
-    </div>
-  );
-}
-
 function RateRow({
   label, value, min, max, step, format, onChange,
 }: {
@@ -212,18 +201,18 @@ function RateRow({
   onChange: (v: number) => void;
 }) {
   return (
-    <div className="flex items-center gap-1">
-      <span className="w-10 flex-shrink-0 text-[9px] text-zinc-500">{label}</span>
+    <div className="space-y-0.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[9px] text-zinc-500">{label}</span>
+        <span className="text-[9px] tabular-nums text-zinc-600">{format(value)}</span>
+      </div>
       <input
         type="range"
         min={min} max={max} step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500"
+        className="h-1 w-full cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500"
       />
-      <span className="w-9 flex-shrink-0 text-right text-[9px] tabular-nums text-zinc-600">
-        {format(value)}
-      </span>
     </div>
   );
 }

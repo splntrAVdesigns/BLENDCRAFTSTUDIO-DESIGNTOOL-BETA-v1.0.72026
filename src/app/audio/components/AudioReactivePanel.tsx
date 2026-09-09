@@ -45,7 +45,7 @@ import { useLayerRoster } from '../audioLayerRoster';
 import { requestMasterPlay } from '../audioTransport';
 import { syncGatedEffectForTarget, syncGatedEffectAfterRouteChange } from '../audioEffectsGateSync';
 import { BandMeter } from './BandMeter';
-import { BeatControls, LFOControls, TimingPhaseRow } from './TimingControls';
+import { BeatControls, LFOControls } from './TimingControls';
 
 interface AudioReactivePanelProps {
   /** Master transport state, so play can sync without toggling it off. */
@@ -113,7 +113,7 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
           <button
             type="button"
             onClick={() => setCollapsed(!collapsed)}
-            className="flex items-center gap-2"
+            className="flex items-center gap-2 rounded outline-none focus-visible:ring-1 focus-visible:ring-blue-500/50"
             title={collapsed ? 'Expand audio panel' : 'Collapse audio panel'}
             aria-expanded={!collapsed}
           >
@@ -150,7 +150,7 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
             squeezed off the edge as they were in 3.0.2. */}
         <div className="grid grid-cols-[152px_92px_minmax(0,400px)_minmax(0,1fr)] divide-x divide-zinc-800">
           {/* ── SOURCE ── */}
-          <div className="space-y-2 px-2.5 py-2">
+          <div className="space-y-2 px-2.5 py-1.5">
             <SectionLabel>Source</SectionLabel>
             {!hasSource ? (
               <button
@@ -206,13 +206,13 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
           </div>
 
           {/* ── LEVELS ── */}
-          <div className="space-y-2 px-2.5 py-2">
+          <div className="space-y-2 px-2.5 py-1.5">
             <SectionLabel>Levels</SectionLabel>
             <BandMeter low={ui.low} mid={ui.mid} high={ui.high} />
           </div>
 
           {/* ── ROUTING ── */}
-          <div className="min-w-0 space-y-2 px-2.5 py-2">
+          <div className="min-w-0 space-y-2 px-2.5 py-1.5">
             {/* STAGE 3.0.5a: the per-target info line moved up here, right of the
                 header, so it no longer adds a row at the bottom that pushed the
                 panel taller. Shows the SELECTED mapping's target hint. */}
@@ -334,17 +334,19 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
               to spare, so the two go SIDE BY SIDE instead: Beat/LFO on the
               left, the selected mapping's controls on the right. Height drops
               back to the 3.0.3 profile. */}
-          {/* ── PRECISION & SPECIALTY — three sub-columns, no scroll ──
-              STAGE 3.0.5: Beat | LFO | Selected Mapping, side by side. 3.0.4a
-              stacked Beat above LFO in one sub-column, which was the last thing
-              forcing height. Three flat columns keep the panel slim. */}
-          <div className="px-2.5 py-2">
+          {/* ── PRECISION & SPECIALTY — three even columns ──
+              Sprint 2.9: BPM | LFO | Mapping, each stacked (label above,
+              control below) instead of label-left/control-right — that's
+              what makes three genuinely separate columns fit without
+              anything getting squeezed. Replaces Sprint 2.8's shared
+              phase-meter row (which fixed alignment by adding a whole
+              extra row of height and leaving the third column short) —
+              each meter is back under its own section's header line now,
+              and they land in the same row because both columns are the
+              same height by construction, not because of a shared row. */}
+          <div className="px-2.5 py-1.5">
             <SectionLabel>Precision &amp; Specialty</SectionLabel>
-            {/* Sprint 2.8: switched from `divide-x` (border by DOM order) to
-                explicit per-column borders, since the DOM order trick breaks
-                the moment a 4th item — the shared phase row below — needs to
-                span two columns instead of occupying its own. */}
-            <div className="mt-2 grid grid-cols-[0.55fr_1fr_1fr] gap-x-3">
+            <div className="mt-1.5 grid grid-cols-3 gap-x-3">
               <div className="pr-1">
                 <BeatControls />
               </div>
@@ -353,20 +355,13 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
               </div>
               <div className="border-l border-zinc-800 pl-3">
                 <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-500">
-                  Selected mapping
+                  Mapping
                 </div>
                 {selected ? (
                   <PrecisionControls mapping={selected} />
                 ) : (
                   <p className="text-[10px] text-zinc-600">Select a routing row to tune it.</p>
                 )}
-              </div>
-              {/* Sprint 2.8: Beat's and LFO's phase meters, previously each
-                  nested at the bottom of their own column (and landing at
-                  different heights depending on how much sat above them),
-                  now share one row spanning exactly the Beat+LFO columns. */}
-              <div className="col-span-2 pr-1">
-                <TimingPhaseRow />
               </div>
             </div>
           </div>
@@ -453,13 +448,13 @@ function PrecisionControls({ mapping }: { mapping: AudioMapping }) {
   // phase indicators now — a per-mapping output meter was visual noise next to
   // them and was part of what made this column tall. This is controls only.
   return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-1">
-        <span className="w-12 text-[9px] text-zinc-500">Curve</span>
+    <div className="space-y-1.5">
+      <div className="space-y-0.5">
+        <span className="text-[9px] text-zinc-500">Curve</span>
         <select
           value={mapping.curve}
           onChange={(e) => updateMapping(mapping.id, { curve: e.target.value as never })}
-          className="min-w-0 flex-1 rounded bg-zinc-800 px-1 py-0.5 text-[10px] text-zinc-300 outline-none"
+          className="w-full rounded bg-zinc-800 px-1.5 py-1 text-[10px] text-zinc-300 outline-none"
         >
           <option value="exponential">Exponential</option>
           <option value="linear">Linear</option>
@@ -505,18 +500,18 @@ function Knob({
   onChange: (v: number) => void;
 }) {
   return (
-    <div className="flex items-center gap-1">
-      <span className="w-12 flex-shrink-0 text-[9px] text-zinc-500">{label}</span>
+    <div className="space-y-0.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[9px] text-zinc-500">{label}</span>
+        <span className="text-[9px] tabular-nums text-zinc-600">{format(value)}</span>
+      </div>
       <input
         type="range"
         min={min} max={max} step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500"
+        className="h-1 w-full cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500"
       />
-      <span className="w-9 flex-shrink-0 text-right text-[9px] tabular-nums text-zinc-600">
-        {format(value)}
-      </span>
     </div>
   );
 }
