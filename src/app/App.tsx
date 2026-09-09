@@ -504,7 +504,7 @@ function AppContent({ onCanvasReady }: { onCanvasReady?: () => void }) {
         onLeftPanelToggle={() => setLeftPanelCollapsed(!leftPanelCollapsed)}
         onRightPanelToggle={() => setRightPanelCollapsed(!rightPanelCollapsed)}
         onOpenTutorial={tutorial.openTutorial}
-        onEnableGatedEffect={(field) => setEffects((prev) => ({ ...prev, [field]: true }))}
+        onSetGatedEffect={(field, enabled) => setEffects((prev) => ({ ...prev, [field]: enabled }))}
       />
 
       <div className="flex-1 flex overflow-hidden">

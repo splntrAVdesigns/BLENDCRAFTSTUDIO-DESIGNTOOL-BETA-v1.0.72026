@@ -43,7 +43,7 @@ import {
 } from '../audioMapping';
 import { useLayerRoster } from '../audioLayerRoster';
 import { requestMasterPlay } from '../audioTransport';
-import { syncGatedEffectForTarget } from '../audioEffectsGateSync';
+import { syncGatedEffectForTarget, syncGatedEffectAfterRouteChange } from '../audioEffectsGateSync';
 import { BandMeter } from './BandMeter';
 import { BeatControls, LFOControls } from './TimingControls';
 
@@ -228,10 +228,20 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
                       onClick={() => {
                         const nowEnabled = !m.enabled;
                         updateMapping(m.id, { enabled: nowEnabled });
-                        // Re-enabling a mapping that already targets a
-                        // gated effect syncs the toggle too — not just
-                        // picking a new target (below).
-                        if (nowEnabled) syncGatedEffectForTarget(m.target);
+                        if (nowEnabled) {
+                          // Re-enabling a mapping that already targets a
+                          // gated effect syncs the toggle on — not just
+                          // picking a new target (below).
+                          syncGatedEffectForTarget(m.target);
+                        } else {
+                          // Sprint 2.7: disabling a mapping that targets a
+                          // gated effect syncs the toggle back off, unless
+                          // some OTHER enabled mapping still covers it.
+                          syncGatedEffectAfterRouteChange(
+                            m.target,
+                            mappings.map((mm) => (mm.id === m.id ? { ...mm, enabled: false } : mm))
+                          );
+                        }
                       }}
                       className={`h-3 w-3 rounded-sm border transition-colors ${
                         m.enabled ? 'border-blue-500 bg-blue-500' : 'border-zinc-600 bg-transparent'
@@ -248,11 +258,19 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
                     <Picker
                       value={m.target}
                       onChange={(v) => {
+                        const previousTarget = m.target;
                         updateMapping(m.id, { target: v as never });
                         // Option A: selecting a gated target auto-enables
                         // its effect toggle — audio modulates, the user
                         // shouldn't also have to flip a second switch.
                         syncGatedEffectForTarget(v);
+                        // Sprint 2.7: and moving AWAY from a gated target
+                        // syncs the old one's toggle back off, unless some
+                        // OTHER enabled mapping still targets it.
+                        syncGatedEffectAfterRouteChange(
+                          previousTarget,
+                          mappings.map((mm) => (mm.id === m.id ? { ...mm, target: v } : mm))
+                        );
                       }}
                       options={AUDIO_TARGETS.map((t) => ({ value: t.id, label: t.label }))}
                       title={target?.hint}

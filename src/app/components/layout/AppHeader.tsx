@@ -43,7 +43,7 @@ interface AppHeaderProps {
   onRightPanelToggle: () => void;
   onOpenTutorial?: () => void;
   /** Option A: routing-driven effect toggle sync, handed down to AudioReactiveMount. */
-  onEnableGatedEffect: (field: GatedToggleField) => void;
+  onSetGatedEffect: (field: GatedToggleField, enabled: boolean) => void;
 }
 
 export function AppHeader({
@@ -59,7 +59,7 @@ export function AppHeader({
   onLeftPanelToggle,
   onRightPanelToggle,
   onOpenTutorial,
-  onEnableGatedEffect,
+  onSetGatedEffect,
 }: AppHeaderProps) {
   const { tooltipsEnabled, toggleTooltips } = useTooltipContext();
   /**
@@ -253,7 +253,7 @@ export function AppHeader({
           <AudioReactiveMount
             isPlaying={isPlaying}
             onPlayPauseToggle={onPlayPauseToggle}
-            onEnableGatedEffect={onEnableGatedEffect}
+            onSetGatedEffect={onSetGatedEffect}
           />
 
           <div className="w-px h-6 bg-zinc-700" />

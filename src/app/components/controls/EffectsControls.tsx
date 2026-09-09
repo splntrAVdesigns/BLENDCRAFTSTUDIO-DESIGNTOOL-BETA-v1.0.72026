@@ -10,6 +10,8 @@ import { Sparkles, Copy, Clipboard } from 'lucide-react';
 import { copyEffects, pasteEffects, hasEffectsInClipboard } from '../../utils/effectsClipboard';
 import { SpatialChainOrderControl } from './SpatialChainOrderControl';
 import { toast } from 'sonner';
+import { useAudioMappings } from '../../audio/audioMapping';
+import { TARGET_TO_PROTECTED_FIELDS } from '../../audio/audioEffectsGateSync';
 
 // ── Sprint 1.1/1.4: Effects Layering chain ──────────────────────────────
 // The set of stages that compose into one running color (+ UV, for the
@@ -323,6 +325,29 @@ export const EffectsControls = memo(function EffectsControls({
   // leave the highlight alone.
   const [activePresetName, setActivePresetName] = useState<string | null>(null);
 
+  // Sprint 2.7: which EffectsConfig fields are currently "owned" by a live,
+  // enabled audio route — a preset apply/clear must not stomp these. Reads
+  // the audio mapping store directly (a plain hook, no props needed — see
+  // audioEffectsGateSync.ts for why the OTHER direction, effects into the
+  // audio panel, needed a bridge instead of just doing this).
+  const audioMappingsForPresets = useAudioMappings();
+  const applyPresetWithAudioProtection = (targetEffects: EffectsConfig) => {
+    const protectedFields = new Set<string>();
+    audioMappingsForPresets.forEach((m) => {
+      if (!m.enabled) return;
+      (TARGET_TO_PROTECTED_FIELDS[m.target] || []).forEach((f) => protectedFields.add(f));
+    });
+    if (protectedFields.size === 0) {
+      onChange(targetEffects);
+      return;
+    }
+    const merged: EffectsConfig = { ...targetEffects };
+    protectedFields.forEach((field) => {
+      (merged as unknown as Record<string, unknown>)[field] = (effects as unknown as Record<string, unknown>)[field];
+    });
+    onChange(merged);
+  };
+
   // moving sections around. Effects Layering is pinned outside this
   // accordion entirely (always visible, same treatment as Effect Presets)
   // since it's meant to stay glanceable while a detail section is open.
@@ -481,11 +506,12 @@ export const EffectsControls = memo(function EffectsControls({
                     if (isActive) {
                       // Second click on the active preset — clear it back
                       // to the baseline rather than leaving it applied
-                      // with nothing to show it's still "on".
-                      onChange(defaultEffects);
+                      // with nothing to show it's still "on". Still
+                      // protects any live audio-routed fields.
+                      applyPresetWithAudioProtection(defaultEffects);
                       setActivePresetName(null);
                     } else {
-                      onChange(preset.effects);
+                      applyPresetWithAudioProtection(preset.effects);
                       setActivePresetName(preset.name);
                     }
                   }}
@@ -493,7 +519,7 @@ export const EffectsControls = memo(function EffectsControls({
                   aria-pressed={isActive}
                   className={`h-7 px-2 transition-all ${
                     isActive
-                      ? 'border-blue-500 bg-zinc-800/60'
+                      ? 'border-blue-500 dark:border-blue-500 bg-zinc-800/60 dark:bg-zinc-800/60'
                       : 'border-zinc-700 hover:border-blue-400 hover:bg-zinc-800/50'
                   }`}
                 >
