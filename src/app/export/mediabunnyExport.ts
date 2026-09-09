@@ -33,6 +33,8 @@ export interface MediabunnyEncodeOptions {
   drawFrame: (frameIndex: number, timeSeconds: number) => Promise<RenderedTimelineFrameState | void> | RenderedTimelineFrameState | void;
   /** Maximum seconds between keyframes. Mediabunny defaults to 2s if omitted. */
   keyFrameIntervalSeconds?: number;
+  /** VP9 latency policy. High-fidelity tiers use quality; preview may opt into realtime. */
+  webmLatencyMode?: 'quality' | 'realtime';
   signal?: AbortSignal;
   onProgress?: (progress: number, message?: string) => void;
   /** Called once Mediabunny supplies the active browser encoder config. */
@@ -194,7 +196,17 @@ export async function encodeVideoWithMediabunny(
   document.head.appendChild(quietStyle);
   let finished = false;
   try {
-    await client.request({ type: 'init', container, bitrate, fps, keyFrameInterval: options.keyFrameIntervalSeconds ?? 2 });
+    await client.request({
+      type: 'init',
+      container,
+      bitrate,
+      fps,
+      keyFrameInterval: options.keyFrameIntervalSeconds ?? 1,
+      // Keep the proven realtime VP9 path as the production default. Quality
+      // gains are supplied by the explicit bitrate tiers and 1:1 source path;
+      // changing latency mode here would also change the now-stable export time.
+      webmLatencyMode: options.webmLatencyMode ?? 'realtime',
+    });
     let renderMs = 0;
     let encodeMs = 0;
     const timelineFrames: ExportTimelineFrameCertification[] = [];
@@ -211,7 +223,11 @@ export async function encodeVideoWithMediabunny(
       // no image resizing, second canvas draw, dropped frames or display-paced wait.
       const timestamp = Math.round(i * 1_000_000 / fps);
       const duration = Math.round((i + 1) * 1_000_000 / fps) - timestamp;
-      const frame = new VideoFrame(stagingCanvas, { timestamp, duration, alpha: 'discard' });
+      const frame = new VideoFrame(stagingCanvas, {
+        timestamp,
+        duration,
+        alpha: 'discard',
+      });
       try { await client.request({ type: 'frame', frame }, [frame]); }
       finally { frame.close(); }
       throwIfAborted(signal);
