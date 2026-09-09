@@ -282,6 +282,22 @@ const EFFECT_PRESETS: { name: string; effects: EffectsConfig; description: strin
       saturation: 1.1,
     },
   },
+  {
+    name: 'Strobe',
+    description: 'Fast light flash',
+    effects: {
+      ...defaultEffects,
+      flashEnabled: true,
+      flashType: 'quick',
+      flashMode: 'stutter',
+      flashSpeed: 9,
+      flashIntensity: 0.9,
+      flashPosition: 'full',
+      flashEasing: 'easeOut',
+      flashAfterGlow: 0,
+      flashSyncAnimation: false,
+    },
+  },
 ];
 
 export const EffectsControls = memo(function EffectsControls({ 
@@ -751,16 +767,18 @@ export const EffectsControls = memo(function EffectsControls({
           </AccordionTrigger>
           <AccordionContent className="pb-4 pt-2">
             <div className="space-y-4">
-              {/* Shared Creative Shape Selector */}
-              <div className="space-y-2 rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
-                <Label className="text-xs text-zinc-500">Creative Shape</Label>
-                <SelectWrapper
-                  value={effects.creativeShape}
-                  onValueChange={(value: any) => updateEffect('creativeShape', value)}
-                  options={creativeShapeOptions}
-                  triggerClassName="border-zinc-700 text-zinc-100 hover:border-zinc-600"
-                  contentClassName="bg-zinc-900 border-zinc-700"
-                />
+              {/* Shared Creative Shape Selector — label + dropdown on one row */}
+              <div className="flex items-center justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
+                <Label className="text-xs text-zinc-500 shrink-0">Creative Shape</Label>
+                <div className="w-[150px]">
+                  <SelectWrapper
+                    value={effects.creativeShape}
+                    onValueChange={(value: any) => updateEffect('creativeShape', value)}
+                    options={creativeShapeOptions}
+                    triggerClassName="border-zinc-700 text-zinc-100 hover:border-zinc-600"
+                    contentClassName="bg-zinc-900 border-zinc-700"
+                  />
+                </div>
               </div>
 
               {/* Posterize */}
