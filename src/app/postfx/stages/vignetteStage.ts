@@ -1,6 +1,6 @@
 import * as THREE from '../../lib/three';
 import { EffectsConfig } from '../../components/controls/EffectsControls';
-import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../types';
+import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
 
 // Vignette — radial darkening toward the frame edges, ported unchanged
 // from the pre-expansion finishing shader. Pure per-pixel color transform
@@ -9,7 +9,7 @@ import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../t
 // stage so it can be freely reordered relative to the other 11 in the
 // unified Effects Layering list.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform float vignette;
   varying vec2 vUv;
@@ -37,18 +37,20 @@ export function createVignetteStage(): PostProcessStage {
       vignette: { value: 0 },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
     id: 'vignette',
     material,
-    isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean {
-      const value = overrides?.amount ?? effects.vignette ?? 0;
+    isActive(effects: EffectsConfig, liveOverride?: number): boolean {
+      const value = liveOverride ?? effects.vignette ?? 0;
       return value > 0.01;
     },
-    syncUniforms(effects: EffectsConfig, _time: number, _resolution: THREE.Vector2, overrides?: StageOverrides): void {
-      material.uniforms.vignette.value = overrides?.amount ?? effects.vignette ?? 0;
+    syncUniforms(effects: EffectsConfig, _time: number, _resolution: THREE.Vector2, liveOverride?: number): void {
+      material.uniforms.vignette.value = liveOverride ?? effects.vignette ?? 0;
     },
   };
 }
