@@ -159,13 +159,11 @@ export const AUDIO_TARGETS: Array<{
   { id: 'hue',           label: 'Hue',            hint: 'Colour rotation', universal: true },
   { id: 'intensity',     label: 'Intensity',      hint: 'Gradient energy / contrast', universal: true },
   { id: 'chroma',        label: 'RGB Split',      hint: 'Chromatic aberration — whole frame', universal: true, global: true },
-  { id: 'brightness',    label: 'Brightness',     hint: 'Whole frame', universal: true, global: true },
+  { id: 'glitch',        label: 'Glitch',         hint: 'UV tear/slice distortion — works on any visible layer', universal: false },
   { id: 'blur',          label: 'Blur',           hint: 'Gaussian blur radius — whole frame', universal: true, global: true },
   { id: 'saturation',    label: 'Saturation',     hint: 'Colour saturation boost — whole frame', universal: true, global: true },
   { id: 'vignette',      label: 'Vignette',       hint: 'Edge darkening — whole frame', universal: true, global: true },
-  { id: 'strobe',        label: 'Strobe',         hint: 'Flash-to-white on beat — whole frame', universal: true, global: true },
   { id: 'speed',         label: 'Speed',          hint: 'Surges animation rate on hit then returns to normal — works on any animated layer', universal: false },
-  { id: 'glitch',        label: 'Glitch',         hint: 'UV tear/slice distortion — works on any visible layer', universal: false },
   // Sprint 2.1
   { id: 'displaceAmount',  label: 'Displace Amount',  hint: 'Noise Displacement strength — whole frame (Displacement must be enabled)', universal: true, global: true },
   { id: 'sliceAmount',     label: 'Slice Amount',     hint: 'Graphic Slice tear strength — whole frame (Graphic Slice must be enabled)', universal: true, global: true },
@@ -248,8 +246,18 @@ const DEFAULTS: AudioMapping[] = [
 ];
 
 const SOURCE_IDS: AudioSourceId[] = ['subBass','low','mid','high','level','subBassHit','lowHit','midHit','highHit','levelHit','beat','beatDown','beatOff','beatBar','beat8','beat16','lfo'];
+// Sprint 2.8: brightness/strobe removed from the UI-facing AUDIO_TARGETS
+// above and this validation list — Flash: Dark/Light/Color Cycle cover
+// what Strobe did, Brightness wasn't pulling its weight as a routing
+// target. RANGE/stepAllMappings below still compute deltas for both
+// (harmless, unreachable dead code) in case either comes back later —
+// only this list changed, so nothing can select or keep them selected.
+// Any mapping a user already had pointed at 'brightness' or 'strobe'
+// self-migrates to 'layerPunch' via normalize()'s existing fallback,
+// the same mechanism that already handled the v1 'scale' rename — no
+// new migration code needed.
 const TARGET_IDS: AudioTargetId[] = [
-  'gradientScale','layerPunch','shake','hue','intensity','glitch','speed','chroma','brightness','blur','saturation','vignette','strobe',
+  'gradientScale','layerPunch','shake','hue','intensity','glitch','speed','chroma','blur','saturation','vignette',
   'displaceAmount','sliceAmount','sliceRate','pixelateAmount','filmGrainAmount','flashDark','flashLight','flashColorCycle',
 ];
 const CURVES: ResponseCurve[] = ['linear','exponential','gate'];

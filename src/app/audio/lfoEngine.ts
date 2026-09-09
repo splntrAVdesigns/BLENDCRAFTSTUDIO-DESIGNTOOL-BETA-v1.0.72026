@@ -28,6 +28,7 @@
 
 import { useSyncExternalStore } from 'react';
 import { sampleWaveform, type WaveformShape } from './waveformShapes';
+import { getExportDurationSeconds } from './exportDurationBridge';
 
 export type LFOSyncMode = 'free' | 'bpm' | 'exportLocked';
 
@@ -119,10 +120,13 @@ export function updateLFO_frame(dtMs: number, bpm: number): void {
       hz = (bpm / 60) * config.bpmMultiplier;
       break;
     case 'exportLocked':
-      // Behaves as free at a rate that would fit a whole number of cycles in a
-      // nominal loop; the true snap happens at export time. Uses a 5s nominal
-      // window to match the export cadence the app already favours.
-      hz = config.cyclesPerExport / 5;
+      // Sprint 2.8: was hardcoded to a "nominal 5s window" regardless of the
+      // user's actual configured export duration — reads live from
+      // ExportPanel.tsx now, so what you see while tuning matches what
+      // actually renders. Still an approximation of the true export-time
+      // snap (real export math lives elsewhere), but now correctly scoped
+      // to the real duration instead of a fixed guess.
+      hz = config.cyclesPerExport / getExportDurationSeconds();
       break;
     default:
       hz = config.rateHz;

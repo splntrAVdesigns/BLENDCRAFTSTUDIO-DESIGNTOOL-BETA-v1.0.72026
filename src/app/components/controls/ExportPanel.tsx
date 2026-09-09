@@ -49,6 +49,7 @@ import {
   type ExportKind,
 } from '../../state/exportStatus';
 import { createLayerExportDurationPlan } from '../../export/ExportDurationPlan';
+import { setExportDurationSeconds } from '../../audio/exportDurationBridge';
 import { resolveVideoOutputDimensions } from '../../export/VideoOutputPlan';
 import { isolatePreview } from '../../export/recording/PreviewIsolationController';
 
@@ -141,6 +142,12 @@ export function ExportPanel({
   // so 0.75× ≈ 1.8× faster and 0.5× ≈ 4× faster. 1.0 is unchanged behaviour.
   const [webmRenderScale, setWebmRenderScale] = useState(1);
   const [webmDuration, setWebmDuration] = useState(5);
+  // Sprint 2.8: publish the real configured duration for the LFO's
+  // exportLocked sync mode, which used to assume a hardcoded 5s regardless
+  // of what's actually set here — see exportDurationBridge.ts.
+  useEffect(() => {
+    setExportDurationSeconds(webmDuration);
+  }, [webmDuration]);
   // STAGE 2.7.8 (A): the duration <input> is a CONTROLLED number field. The old
   // onChange did `parseInt(value) || 5`, so the instant the field was emptied to
   // type a new number, parseInt('') → NaN → NaN || 5 → 5 snapped back and the

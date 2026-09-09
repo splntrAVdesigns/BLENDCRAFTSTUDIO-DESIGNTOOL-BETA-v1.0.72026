@@ -23,7 +23,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Upload, Play, Pause, Square, X, Music } from 'lucide-react';
+import { Upload, Play, Pause, Square, X, Music, ChevronDown, ChevronUp } from 'lucide-react';
 import {
   loadAudioFile,
   playAudio,
@@ -45,7 +45,7 @@ import { useLayerRoster } from '../audioLayerRoster';
 import { requestMasterPlay } from '../audioTransport';
 import { syncGatedEffectForTarget, syncGatedEffectAfterRouteChange } from '../audioEffectsGateSync';
 import { BandMeter } from './BandMeter';
-import { BeatControls, LFOControls } from './TimingControls';
+import { BeatControls, LFOControls, TimingPhaseRow } from './TimingControls';
 
 interface AudioReactivePanelProps {
   /** Master transport state, so play can sync without toggling it off. */
@@ -60,6 +60,10 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
     () => getAudioSourceInfo()?.fileName ?? null,
   );
   const [dragOver, setDragOver] = useState(false);
+  // Sprint 2.8: collapsed to a slim strip by default — the full panel only
+  // appears once the person actually wants to tune something, rather than
+  // permanently occupying a wide band across the bottom of the canvas.
+  const [collapsed, setCollapsed] = useState(true);
   // Which mapping the Precision column edits. Defaults to the first, so the
   // column is never empty and the controls always have a subject.
   const [selectedId, setSelectedId] = useState<string>(() => mappings[0]?.id ?? 'm1');
@@ -100,11 +104,19 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
   }, [handleFile]);
 
   return (
-    <div className="pointer-events-auto absolute bottom-4 left-4 z-30 w-[1440px] max-w-[calc(100%-2rem)]">
+    <div className={`pointer-events-auto absolute bottom-4 left-4 z-30 ${
+      collapsed ? 'w-auto' : 'w-[1280px] max-w-[calc(100%-2rem)]'
+    }`}>
       <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/95 shadow-2xl backdrop-blur-sm">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-2.5 py-1.5">
+          <button
+            type="button"
+            onClick={() => setCollapsed(!collapsed)}
+            className="flex items-center gap-2"
+            title={collapsed ? 'Expand audio panel' : 'Collapse audio panel'}
+            aria-expanded={!collapsed}
+          >
             <Music className="h-3.5 w-3.5 text-blue-400" />
             <span className="text-[11px] font-semibold tracking-wide text-zinc-200">
               Audio Reactive
@@ -115,7 +127,12 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
                 <span className="text-[9px] text-zinc-500">{ui.active ? 'analyzing' : ui.status}</span>
               </span>
             )}
-          </div>
+            {collapsed ? (
+              <ChevronUp className="h-3 w-3 text-zinc-600" />
+            ) : (
+              <ChevronDown className="h-3 w-3 text-zinc-600" />
+            )}
+          </button>
           <button
             type="button"
             onClick={() => setAudioReactiveEnabled(false)}
@@ -127,11 +144,13 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
           </button>
         </div>
 
+        {!collapsed && (
+        <>
         {/* Four columns. Explicit widths so the routing sliders can't be
             squeezed off the edge as they were in 3.0.2. */}
-        <div className="grid grid-cols-[168px_100px_minmax(0,440px)_minmax(0,1fr)] divide-x divide-zinc-800">
+        <div className="grid grid-cols-[152px_92px_minmax(0,400px)_minmax(0,1fr)] divide-x divide-zinc-800">
           {/* ── SOURCE ── */}
-          <div className="space-y-2 px-3 py-2.5">
+          <div className="space-y-2 px-2.5 py-2">
             <SectionLabel>Source</SectionLabel>
             {!hasSource ? (
               <button
@@ -187,13 +206,13 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
           </div>
 
           {/* ── LEVELS ── */}
-          <div className="space-y-2 px-3 py-2.5">
+          <div className="space-y-2 px-2.5 py-2">
             <SectionLabel>Levels</SectionLabel>
             <BandMeter low={ui.low} mid={ui.mid} high={ui.high} />
           </div>
 
           {/* ── ROUTING ── */}
-          <div className="min-w-0 space-y-2 px-3 py-2.5">
+          <div className="min-w-0 space-y-2 px-2.5 py-2">
             {/* STAGE 3.0.5a: the per-target info line moved up here, right of the
                 header, so it no longer adds a row at the bottom that pushed the
                 panel taller. Shows the SELECTED mapping's target hint. */}
@@ -319,16 +338,20 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
               STAGE 3.0.5: Beat | LFO | Selected Mapping, side by side. 3.0.4a
               stacked Beat above LFO in one sub-column, which was the last thing
               forcing height. Three flat columns keep the panel slim. */}
-          <div className="px-3 py-2.5">
+          <div className="px-2.5 py-2">
             <SectionLabel>Precision &amp; Specialty</SectionLabel>
-            <div className="mt-2 grid grid-cols-[0.55fr_1fr_1fr] gap-x-3 divide-x divide-zinc-800">
+            {/* Sprint 2.8: switched from `divide-x` (border by DOM order) to
+                explicit per-column borders, since the DOM order trick breaks
+                the moment a 4th item — the shared phase row below — needs to
+                span two columns instead of occupying its own. */}
+            <div className="mt-2 grid grid-cols-[0.55fr_1fr_1fr] gap-x-3">
               <div className="pr-1">
                 <BeatControls />
               </div>
-              <div className="pl-3 pr-1">
+              <div className="border-l border-zinc-800 pl-3 pr-1">
                 <LFOControls />
               </div>
-              <div className="pl-3">
+              <div className="border-l border-zinc-800 pl-3">
                 <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-500">
                   Selected mapping
                 </div>
@@ -338,9 +361,18 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
                   <p className="text-[10px] text-zinc-600">Select a routing row to tune it.</p>
                 )}
               </div>
+              {/* Sprint 2.8: Beat's and LFO's phase meters, previously each
+                  nested at the bottom of their own column (and landing at
+                  different heights depending on how much sat above them),
+                  now share one row spanning exactly the Beat+LFO columns. */}
+              <div className="col-span-2 pr-1">
+                <TimingPhaseRow />
+              </div>
             </div>
           </div>
         </div>
+        </>
+        )}
       </div>
     </div>
   );

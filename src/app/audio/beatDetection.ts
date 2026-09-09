@@ -42,8 +42,15 @@ export const BEAT_SUBDIVISIONS: Array<{ id: BeatSubdivision; label: string; hint
   { id: 'beat16',   label: '16th note',  hint: 'Four times per beat — rapid stutter' },
 ];
 
-const MIN_BPM = 70;
-const MAX_BPM = 180;
+// Sprint 2.8: widened from 70–180. That range clipped slower material
+// (ballads/ambient sit around 60–80) and pushed against the ceiling for
+// faster genres (drum & bass/hardcore run 170–200+). 60–200 covers the
+// large majority of real-world tempos while still being tight enough to
+// resist half/double-tempo octave errors, which get more likely the wider
+// this range gets — this is the practical ceiling before that tradeoff
+// starts to bite.
+const MIN_BPM = 60;
+const MAX_BPM = 200;
 const IOI_HISTORY = 8;
 
 interface BeatState {
@@ -110,8 +117,16 @@ function registerOnset(nowMs: number): void {
     }
     // Nudge the phase clock so beat 0 aligns with strong onsets — keeps the
     // grid locked without hard-resetting on every hit (which would jitter).
+    // Sprint 2.8: was a 50% pull (`*= 0.5`) — correct in direction but heavy
+    // in practice: a strong onset arriving late in the beat (phase near 1)
+    // yanked the clock back by nearly half a beat's worth of visual motion
+    // in one frame, which reads as a jump rather than a lock. Retaining 85%
+    // of the existing phase (a 15% pull toward the boundary) is a standard,
+    // gentler correction strength for this kind of phase-lock nudge — same
+    // mechanism, softer pull, so a slightly early or late onset settles the
+    // grid instead of visibly kicking it.
     if (!s.usingTap) {
-      s.beatPhase *= 0.5; // pull toward a beat boundary
+      s.beatPhase *= 0.85;
     }
   }
   s.lastOnsetAt = nowMs;

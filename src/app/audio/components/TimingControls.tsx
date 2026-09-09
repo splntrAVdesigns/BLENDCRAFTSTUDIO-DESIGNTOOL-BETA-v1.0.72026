@@ -20,7 +20,6 @@ import { PhaseIndicator } from './PhaseIndicator';
 export function BeatControls() {
   const beatClock = useBeatClock();
   const [beat, setBeat] = useState(() => getBeatInfo());
-  const [beatPhase, setBeatPhase] = useState(0);
   const [clockActive, setClockActive] = useState(false);
 
   useEffect(() => {
@@ -30,7 +29,6 @@ export function BeatControls() {
       if (t - last >= 50) {
         last = t;
         setBeat(getBeatInfo());
-        setBeatPhase(getBeatPhase());
         setClockActive(isBeatClockActive());
       }
       raf = requestAnimationFrame(tick);
@@ -94,29 +92,12 @@ export function BeatControls() {
           {clockActive ? 'Beat is driving Speed' : 'Waiting for confident beat…'}
         </p>
       )}
-      {/* STAGE 3.0.5a: indicator at the BOTTOM of the section, below Tap tempo. */}
-      <PhaseIndicator phase={beatPhase} active={beat.confidence > 0.3 || beat.usingTap} />
     </div>
   );
 }
 
 export function LFOControls() {
   const lfo = useLFOConfig();
-  const [lfoPhase, setLfoPhase] = useState(0);
-
-  useEffect(() => {
-    let raf = 0;
-    let last = 0;
-    const tick = (t: number) => {
-      if (t - last >= 50) {
-        last = t;
-        setLfoPhase(getLFOPhase());
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
 
   return (
     <div className="space-y-1.5">
@@ -177,8 +158,46 @@ export function LFOControls() {
           format={(v) => `${v}`}
           onChange={(v) => updateLFO({ cyclesPerExport: v })} />
       )}
-      {/* STAGE 3.0.5a: indicator at the BOTTOM of the section, matching Beat. */}
-      <PhaseIndicator phase={lfoPhase} active={lfo.enabled} />
+    </div>
+  );
+}
+
+/**
+ * Sprint 2.8: Beat's and LFO's phase meters used to each render at the
+ * bottom of their own sub-column, so they landed at different vertical
+ * positions whenever the content above them was a different height —
+ * Beat and LFO don't have the same number of controls. Pulling both into
+ * one shared row (still separately labelled, one poll loop instead of the
+ * two BeatControls/LFOControls used to run independently) guarantees they
+ * sit level with each other regardless of what's above.
+ */
+export function TimingPhaseRow() {
+  const lfo = useLFOConfig();
+  const [beatPhase, setBeatPhase] = useState(0);
+  const [beatActive, setBeatActive] = useState(false);
+  const [lfoPhase, setLfoPhase] = useState(0);
+
+  useEffect(() => {
+    let raf = 0;
+    let last = 0;
+    const tick = (t: number) => {
+      if (t - last >= 50) {
+        last = t;
+        const beat = getBeatInfo();
+        setBeatPhase(getBeatPhase());
+        setBeatActive(beat.confidence > 0.3 || beat.usingTap);
+        setLfoPhase(getLFOPhase());
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return (
+    <div className="mt-1.5 grid grid-cols-2 gap-x-3">
+      <PhaseIndicator phase={beatPhase} label="Beat" active={beatActive} />
+      <PhaseIndicator phase={lfoPhase} label="LFO" active={lfo.enabled} />
     </div>
   );
 }
