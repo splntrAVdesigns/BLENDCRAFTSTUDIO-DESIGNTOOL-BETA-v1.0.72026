@@ -49,6 +49,7 @@ import {
   type ExportKind,
 } from '../../state/exportStatus';
 import { createLayerExportDurationPlan } from '../../export/ExportDurationPlan';
+import { resolveVideoOutputDimensions } from '../../export/VideoOutputPlan';
 import { isolatePreview } from '../../export/recording/PreviewIsolationController';
 
 interface ExportPanelProps {
@@ -180,6 +181,12 @@ export function ExportPanel({
   const [webmCustomWidth, setWebmCustomWidth] = useState(() => canvasSettings.width || 1920);
   const [webmCustomHeight, setWebmCustomHeight] = useState(() => canvasSettings.height || 1080);
   const [webmAspectLocked, setWebmAspectLocked] = useState(true);
+  const [videoResolutionFollowsCanvas, setVideoResolutionFollowsCanvas] = useState(true);
+  // Derive the canvas-following values during render. Avoiding a synchronization
+  // effect prevents an intermediate stale resolution and an extra render when
+  // Canvas Settings changes dimensions.
+  const followedWebmWidth = Math.max(2, Math.min(7680, Math.round(canvasSettings.width / 2) * 2));
+  const followedWebmHeight = Math.max(2, Math.min(4320, Math.round(canvasSettings.height / 2) * 2));
 
   // One-tap resync if the user changes Canvas Settings after opening the
   // Export panel, or wants to snap back after picking a named preset —
@@ -190,6 +197,7 @@ export function ExportPanel({
     setWebmCustomWidth(w);
     setWebmCustomHeight(h);
     setWebmPreset('Custom');
+    setVideoResolutionFollowsCanvas(true);
     toast.success(`Export resolution matched to canvas: ${w}×${h}`);
   };
 
@@ -385,6 +393,9 @@ ${colorInterpExpanded}
   };
 
   const getWebmResolution = (): { width: number; height: number } => {
+    if (videoResolutionFollowsCanvas) {
+      return { width: followedWebmWidth, height: followedWebmHeight };
+    }
     if (webmPreset === 'Custom') {
       // clamp to even dimensions — VP9 encoder requires even width/height
       return {
@@ -399,6 +410,7 @@ ${colorInterpExpanded}
   // When a named preset is selected, sync the custom W/H fields so
   // switching to Custom afterwards starts from the preset's dimensions.
   const handleWebmPresetChange = (preset: string) => {
+    setVideoResolutionFollowsCanvas(false);
     setWebmPreset(preset);
     if (preset !== 'Custom') {
       const found = WEBM_PRESETS.find(p => p.label === preset);
@@ -410,6 +422,7 @@ ${colorInterpExpanded}
   };
 
   const handleWebmWidthChange = (raw: number) => {
+    setVideoResolutionFollowsCanvas(false);
     const w = Math.max(2, Math.min(7680, Math.round((raw || 1920) / 2) * 2));
     setWebmCustomWidth(w);
     if (webmAspectLocked && webmCustomHeight > 0) {
@@ -420,6 +433,7 @@ ${colorInterpExpanded}
   };
 
   const handleWebmHeightChange = (raw: number) => {
+    setVideoResolutionFollowsCanvas(false);
     const h = Math.max(2, Math.min(4320, Math.round((raw || 1080) / 2) * 2));
     setWebmCustomHeight(h);
     if (webmAspectLocked && webmCustomWidth > 0) {
@@ -445,7 +459,9 @@ ${colorInterpExpanded}
   const loopLockStatusLine = durationPlan.statusLabel;
 
   // Inline export metrics for the summary row
-  const { width: summaryW, height: summaryH } = getWebmResolution();
+  const summaryBase = getWebmResolution();
+  const summaryOutput = resolveVideoOutputDimensions(summaryBase.width, summaryBase.height, webmRenderScale);
+  const { width: summaryW, height: summaryH } = summaryOutput;
   const summaryFrames  = Math.round(effectiveDurationSec * webmFps);
   const summaryWarnLevel: 'ok' | 'warn' | 'cap' =
     summaryFrames >= WEBM_FRAME_CONFIRM_LIMIT ? 'cap' :
@@ -589,8 +605,8 @@ ${colorInterpExpanded}
 
     const base = getWebmResolution();
     // STAGE 3.2: apply render scale, keeping even dimensions (VP9 requires even).
-    const width  = Math.max(2, Math.round(base.width  * webmRenderScale / 2) * 2);
-    const height = Math.max(2, Math.round(base.height * webmRenderScale / 2) * 2);
+    const outputDimensions = resolveVideoOutputDimensions(base.width, base.height, webmRenderScale);
+    const { width, height } = outputDimensions;
     const plan = planWebMExport({
       width,
       height,
@@ -990,7 +1006,7 @@ ${colorInterpExpanded}
                     <Input
                       type="number"
                       min={64} max={7680} step={2}
-                      value={webmCustomWidth}
+                      value={videoResolutionFollowsCanvas ? followedWebmWidth : webmCustomWidth}
                       onChange={(e) => handleWebmWidthChange(parseInt(e.target.value) || 1920)}
                       className="border-zinc-700 bg-zinc-900 text-xs"
                     />
@@ -1000,7 +1016,7 @@ ${colorInterpExpanded}
                     <Input
                       type="number"
                       min={64} max={4320} step={2}
-                      value={webmCustomHeight}
+                      value={videoResolutionFollowsCanvas ? followedWebmHeight : webmCustomHeight}
                       onChange={(e) => handleWebmHeightChange(parseInt(e.target.value) || 1080)}
                       className="border-zinc-700 bg-zinc-900 text-xs"
                     />
@@ -1159,6 +1175,7 @@ ${colorInterpExpanded}
                     setWebmCustomWidth(w);
                     setWebmCustomHeight(h);
                     setWebmPreset('Custom');
+                    setVideoResolutionFollowsCanvas(false);
                     toast.success(`Export resolution matched to source: ${w}×${h}`);
                   }}
                 >
