@@ -265,10 +265,24 @@ export const EffectsControls = memo(function EffectsControls({
   // 🔥 LOCAL STATE FOR SLIDERS (COMMIT-BASED PATTERN)
   const [localEffects, setLocalEffects] = useState(effects);
   
-  // Load accordion state from localStorage
-  const [openSections, setOpenSections] = useState<string[]>(() => {
+  // Accordion state: single-open, so opening one detail section (Color
+  // Adjustments/Visual Effects/Creative Effects/Light Flash Effects) closes
+  // whichever else was open — this is what actually cuts the clutter, not
+  // moving sections around. Effects Layering is pinned outside this
+  // accordion entirely (always visible, same treatment as Effect Presets)
+  // since it's meant to stay glanceable while a detail section is open.
+  const [openSection, setOpenSection] = useState<string>(() => {
     const saved = localStorage.getItem('effects-accordion-state');
-    return saved ? JSON.parse(saved) : ['visual-effects'];
+    if (!saved) return 'visual-effects';
+    try {
+      const parsed = JSON.parse(saved);
+      // Migrate from the old type="multiple" array-based stored value.
+      if (Array.isArray(parsed)) return parsed[0] || 'visual-effects';
+      if (typeof parsed === 'string') return parsed;
+    } catch {
+      // fall through to default
+    }
+    return 'visual-effects';
   });
 
   // Sync local state when props change (from external updates)
@@ -278,8 +292,8 @@ export const EffectsControls = memo(function EffectsControls({
 
   // Save accordion state to localStorage
   useEffect(() => {
-    localStorage.setItem('effects-accordion-state', JSON.stringify(openSections));
-  }, [openSections]);
+    localStorage.setItem('effects-accordion-state', JSON.stringify(openSection));
+  }, [openSection]);
 
   // 🔥 COMMIT PATTERN: Update local state during drag
   const updateLocalEffect = (key: keyof EffectsConfig, value: any) => {
@@ -402,25 +416,46 @@ export const EffectsControls = memo(function EffectsControls({
             </ConditionalTooltip>
           </div>
         </div>
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-3 gap-1.5">
           {EFFECT_PRESETS.map((preset) => (
-            <Button
-              key={preset.name}
-              onClick={() => onChange(preset.effects)}
-              variant="outline"
-              className="h-auto flex-col items-start p-2 border-zinc-700 hover:border-blue-400 hover:bg-zinc-800/50 transition-all"
-            >
-              <span className="text-[11px] font-medium text-[#51a2ff]">{preset.name}</span>
-              <span className="text-[9px] text-zinc-500 line-clamp-1">{preset.description}</span>
-            </Button>
+            <ConditionalTooltip key={preset.name} content={preset.description}>
+              <Button
+                onClick={() => onChange(preset.effects)}
+                variant="outline"
+                className="h-7 px-2 border-zinc-700 hover:border-blue-400 hover:bg-zinc-800/50 transition-all"
+              >
+                <span className="text-[11px] font-medium text-[#51a2ff] truncate">{preset.name}</span>
+              </Button>
+            </ConditionalTooltip>
           ))}
         </div>
       </div>
 
+      {/* Effects Layering — pinned open, not part of the accordion below,
+          same treatment as Effect Presets. Darker background + thin blue
+          outline so it stands out as the "master control" it is. */}
+      <div className="mb-4 rounded-lg border border-blue-500/40 bg-zinc-950/70 p-4 space-y-2">
+        <span className="text-sm font-medium text-zinc-100">Effects Layering</span>
+        <p className="text-[10px] text-zinc-500">
+          Effects Layering — drag a slot to change the order they apply in.
+        </p>
+        <SpatialChainOrderControl
+          order={
+            Array.isArray(effects.spatialChainOrder) && effects.spatialChainOrder.length === 12
+              ? effects.spatialChainOrder
+              : DEFAULT_SPATIAL_CHAIN_ORDER
+          }
+          activeStages={activeSpatialStages}
+          onChange={(order) => onChange({ ...effects, spatialChainOrder: order })}
+          onCommitHistory={onCommitHistory}
+        />
+      </div>
+
       <Accordion
-        type="multiple"
-        value={openSections}
-        onValueChange={setOpenSections}
+        type="single"
+        collapsible
+        value={openSection}
+        onValueChange={setOpenSection}
         className="space-y-4"
       >
         {/* Color Adjustments */}
@@ -556,30 +591,6 @@ export const EffectsControls = memo(function EffectsControls({
                   onCheckedChange={(checked) => updateEffect('invert', checked)}
                 />
               </div>
-            </div>
-          </AccordionContent>
-        </AccordionItem>
-
-        {/* Effects Layering */}
-        <AccordionItem value="effects-layering" className="border-none">
-          <AccordionTrigger className="py-3 px-4 hover:no-underline">
-            <span className="text-sm font-medium text-zinc-100">Effects Layering</span>
-          </AccordionTrigger>
-          <AccordionContent className="pb-4 pt-2">
-            <div className="space-y-2">
-              <p className="text-[10px] text-zinc-500 px-1">
-                Effects Layering — drag a slot to change the order they apply in.
-              </p>
-              <SpatialChainOrderControl
-                order={
-                  Array.isArray(effects.spatialChainOrder) && effects.spatialChainOrder.length === 12
-                    ? effects.spatialChainOrder
-                    : DEFAULT_SPATIAL_CHAIN_ORDER
-                }
-                activeStages={activeSpatialStages}
-                onChange={(order) => onChange({ ...effects, spatialChainOrder: order })}
-                onCommitHistory={onCommitHistory}
-              />
             </div>
           </AccordionContent>
         </AccordionItem>
