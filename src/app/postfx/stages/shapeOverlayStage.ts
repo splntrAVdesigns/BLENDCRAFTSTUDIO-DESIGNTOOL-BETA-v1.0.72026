@@ -16,7 +16,7 @@ function shapeToInt(shape: string): number {
 // triangle/lines), ported unchanged from the pre-multipass finishing
 // shader, including the edge-wrap handling for seamless cell boundaries.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform float shapeOverlay;
   uniform int creativeShape;
@@ -121,7 +121,9 @@ export function createShapeOverlayStage(): PostProcessStage {
       resolution: { value: new THREE.Vector2(1920, 1080) },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
