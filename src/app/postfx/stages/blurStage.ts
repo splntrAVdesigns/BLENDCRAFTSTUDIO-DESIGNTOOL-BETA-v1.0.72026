@@ -1,6 +1,6 @@
 import * as THREE from '../../lib/three';
 import { EffectsConfig } from '../../components/controls/EffectsControls';
-import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../types';
+import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
 
 // Blur — simple 5x5 box blur, ported unchanged from the pre-multipass
 // finishing shader. This is the effect that made multi-pass unavoidable:
@@ -9,7 +9,7 @@ import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../t
 // as an actual texture (this pass's tSource) — a single-pass shader has no
 // way to ask "what did the pixel next to me end up as after Mirror ran".
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform float blur;
   varying vec2 vUv;
@@ -39,18 +39,20 @@ export function createBlurStage(): PostProcessStage {
       blur: { value: 0 },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
     id: 'blur',
     material,
-    isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean {
-      const value = overrides?.amount ?? effects.blur ?? 0;
+    isActive(effects: EffectsConfig, liveOverride?: number): boolean {
+      const value = liveOverride ?? effects.blur ?? 0;
       return value > 0.01;
     },
-    syncUniforms(effects: EffectsConfig, _time: number, _resolution: THREE.Vector2, overrides?: StageOverrides): void {
-      material.uniforms.blur.value = overrides?.amount ?? effects.blur ?? 0;
+    syncUniforms(effects: EffectsConfig, _time: number, _resolution: THREE.Vector2, liveOverride?: number): void {
+      material.uniforms.blur.value = liveOverride ?? effects.blur ?? 0;
     },
   };
 }
