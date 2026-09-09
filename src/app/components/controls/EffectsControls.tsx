@@ -253,6 +253,35 @@ const EFFECT_PRESETS: { name: string; effects: EffectsConfig; description: strin
       saturation: 1.1,
     },
   },
+  // Sprint 2.4 — showcase presets for the three Noise & Symmetry effects.
+  {
+    name: 'Kaleidoscope Glitch',
+    description: 'Mirrored + torn',
+    effects: {
+      ...defaultEffects,
+      quadMirrorEnabled: true,
+      quadMirrorCenterX: 0.5,
+      quadMirrorCenterY: 0.5,
+      graphicSliceEnabled: true,
+      graphicSliceBands: 12,
+      graphicSliceAmount: 0.1,
+      graphicSliceRate: 6,
+      chromaticAberration: 0.15,
+    },
+  },
+  {
+    name: 'Liquid Warp',
+    description: 'Organic noise churn',
+    effects: {
+      ...defaultEffects,
+      noiseDisplaceEnabled: true,
+      noiseDisplaceAmount: 0.15,
+      noiseDisplaceScale: 2.5,
+      noiseDisplaceSpeed: 0.4,
+      blur: 1,
+      saturation: 1.1,
+    },
+  },
 ];
 
 export const EffectsControls = memo(function EffectsControls({ 
@@ -991,10 +1020,13 @@ export const EffectsControls = memo(function EffectsControls({
                   <Label className="text-xs font-medium text-zinc-300">Noise & Symmetry</Label>
                 </div>
 
-                {/* Quad Mirror */}
+                {/* Quad Mirror — family: Mirror */}
                 <div className="space-y-2">
+                  <span className="text-[9px] font-medium uppercase tracking-wider text-zinc-600">Mirror</span>
                   <div className="flex items-center justify-between">
-                    <Label className="text-xs text-zinc-400">Quad Mirror</Label>
+                    <ConditionalTooltip content="4-way kaleidoscope fold — mirrors the frame across an adjustable center point">
+                      <Label className="text-xs text-zinc-400">Quad Mirror</Label>
+                    </ConditionalTooltip>
                     <Switch
                       checked={effects.quadMirrorEnabled}
                       onCheckedChange={(checked) => updateEffect('quadMirrorEnabled', checked)}
@@ -1040,10 +1072,13 @@ export const EffectsControls = memo(function EffectsControls({
                   )}
                 </div>
 
-                {/* Noise Displacement */}
+                {/* Noise Displacement — family: Warp */}
                 <div className="space-y-2 border-t border-zinc-800 pt-3">
+                  <span className="text-[9px] font-medium uppercase tracking-wider text-zinc-600">Warp</span>
                   <div className="flex items-center justify-between">
-                    <Label className="text-xs text-zinc-400">Noise Displacement</Label>
+                    <ConditionalTooltip content="Smooth animated noise pushes pixels around — organic churn and drift">
+                      <Label className="text-xs text-zinc-400">Noise Displacement</Label>
+                    </ConditionalTooltip>
                     <Switch
                       checked={effects.noiseDisplaceEnabled}
                       onCheckedChange={(checked) => updateEffect('noiseDisplaceEnabled', checked)}
@@ -1106,10 +1141,13 @@ export const EffectsControls = memo(function EffectsControls({
                   )}
                 </div>
 
-                {/* Graphic Slice */}
+                {/* Graphic Slice — family: Slice */}
                 <div className="space-y-2 border-t border-zinc-800 pt-3">
+                  <span className="text-[9px] font-medium uppercase tracking-wider text-zinc-600">Slice</span>
                   <div className="flex items-center justify-between">
-                    <Label className="text-xs text-zinc-400">Graphic Slice</Label>
+                    <ConditionalTooltip content="Stepped glitch-cut bands tear the frame on a clock — digital slice artifacts">
+                      <Label className="text-xs text-zinc-400">Graphic Slice</Label>
+                    </ConditionalTooltip>
                     <Switch
                       checked={effects.graphicSliceEnabled}
                       onCheckedChange={(checked) => updateEffect('graphicSliceEnabled', checked)}

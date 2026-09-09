@@ -26,6 +26,7 @@ import {
   runSpatialChain,
   SpatialChainCompositor,
 } from '../../postfx/pingPongCompositor';
+import { StageOverrides } from '../../postfx/types';
 import { InteractiveControls } from '../controls/InteractiveControls';
 import { sortColorStops } from '../../utils/colorStopValidation';
 import { hexToShaderRgb } from '../../utils/colors';
@@ -84,21 +85,55 @@ interface FlashState {
   beatGroup: number; posInt: number; blendMode: number;
 }
 
+// Sprint 2.1: what a winning Flash: Dark/Light/Color Cycle audio route
+// carries down to computeFlashState. `type` uses the same 'dark'|'quick'|
+// 'color' vocabulary as ef.flashType (flashLight → 'quick' — Quick is
+// flashType's existing name for the plain white flash).
+export interface AudioFlashOverride {
+  type: 'dark' | 'quick' | 'color';
+  opacity: number;
+}
+
 /**
  * computeFlashState — pure, module-level, no closures over component refs.
  * @param ef      Current EffectsConfig snapshot
  * @param t       Time value in seconds (independent clock or animation master)
  * @param layerColors First visible layer's color stops (for 'color' flash type)
+ * @param audioOverride When a Flash: Dark/Light/Color Cycle audio route is
+ *   currently the strongest-firing of the three (see the winner-takes-
+ *   strongest-envelope resolution in audioMapping.ts), this replaces the
+ *   internal flashMode/flashSpeed LFO clock for this frame — the real
+ *   detected signal drives opacity and picks the flash character instead
+ *   of the self-contained deterministic waveform. Still gated on
+ *   ef.flashEnabled: audio modulates an enabled flash, it doesn't turn one
+ *   on by itself, matching every other audio-routable effect in Sprint 2.1.
  */
 function computeFlashState(
   ef: EffectsConfig,
   t: number,
   layerColors?: Array<{ color: string }> | null,
+  audioOverride?: AudioFlashOverride,
 ): FlashState {
   if (!ef.flashEnabled) return { opacity: 0, r: 1, g: 1, b: 1, beatGroup: 0, posInt: 0, blendMode: 0 };
+
   const hz    = Math.max(0.1, ef.flashSpeed ?? 2);
-  const phase = (t * hz) % 1;
   const beat  = Math.floor(t * hz);
+  const maxGroup = ef.flashPosition === 'cornersAlt' ? 4 : 2;
+
+  if (audioOverride && audioOverride.opacity > 0.0001) {
+    let hexColor  = '#ffffff';
+    let blendMode = 0;
+    if (audioOverride.type === 'dark') {
+      blendMode = 1;
+    } else if (audioOverride.type === 'color' && layerColors?.length) {
+      hexColor = layerColors[beat % layerColors.length]?.color ?? '#ffffff';
+    }
+    const [r, g, b] = flashHexToRgb01(hexColor);
+    const opacity = Math.max(0, Math.min(1, audioOverride.opacity * (ef.flashIntensity ?? 0.7)));
+    return { opacity, r, g, b, beatGroup: beat % maxGroup, posInt: flashPosToInt(ef.flashPosition ?? 'full'), blendMode };
+  }
+
+  const phase = (t * hz) % 1;
 
   // LFO waveform
   let raw = 0;
@@ -126,7 +161,6 @@ function computeFlashState(
   }
   const [r, g, b] = flashHexToRgb01(hexColor);
 
-  const maxGroup = ef.flashPosition === 'cornersAlt' ? 4 : 2;
   return { opacity, r, g, b, beatGroup: beat % maxGroup, posInt: flashPosToInt(ef.flashPosition ?? 'full'), blendMode };
 }
 // ── end Flash FX module-level helpers ──────────────────────────────────────
@@ -3670,20 +3704,32 @@ export const GradientCanvas = memo(function GradientCanvas({
       // replacing them, so a scene with chromatic aberration already dialled in
       // gets audio movement around that setting instead of having it reset.
       //
-      // Sprint 1.2/1.4: Chromatic Aberration, Blur, and Vignette uniforms no
+      // Sprint 1.2/1.4/2.1: Chromatic Aberration, Blur, Vignette, Noise
+      // Displacement, Graphic Slice, Pixelate, and Film Grain uniforms no
       // longer live on effectsMaterial (the finishing pass) — they moved to
       // their own postfx stage materials. audioSpatialOverrides carries this
       // frame's final (base + audio delta) values down to the
       // runSpatialChain() call below, which is what actually drives those
-      // three stages now.
-      let audioSpatialOverrides: Partial<Record<SpatialStageId, number>>;
+      // stages now.
+      let audioSpatialOverrides: Partial<Record<SpatialStageId, StageOverrides>>;
       {
         const g = getGlobalAudioDeltas();
         audioSpatialOverrides = {
-          chroma: effectsRef.current.chromaticAberration + g.chromaAdd,
-          blur: effectsRef.current.blur + g.blurAdd,
-          vignette: effectsRef.current.vignette + g.vignetteAdd,
+          chroma: { amount: effectsRef.current.chromaticAberration + g.chromaAdd },
+          blur: { amount: effectsRef.current.blur + g.blurAdd },
+          vignette: { amount: effectsRef.current.vignette + g.vignetteAdd },
+          displace: { amount: (effectsRef.current.noiseDisplaceAmount ?? 0) + g.displaceAmountAdd },
+          slice: {
+            amount: (effectsRef.current.graphicSliceAmount ?? 0) + g.sliceAmountAdd,
+            rate: (effectsRef.current.graphicSliceRate ?? 0) + g.sliceRateAdd,
+          },
+          pixelate: { amount: (effectsRef.current.pixelate ?? 0) + g.pixelateAmountAdd },
+          filmGrain: { amount: (effectsRef.current.filmGrain ?? 0) + g.filmGrainAmountAdd },
         };
+        // Note: Flash's own audio override is read independently inside its
+        // own RAF loop further below (a separate useEffect/tick, not this
+        // animate() callback) — not shared here, since flash runs on its
+        // own independent clock.
         if (effectsMaterial.uniforms.brightness) {
           // Strobe maps to brightness: a full hit flashes the frame white.
           effectsMaterial.uniforms.brightness.value =
@@ -4088,8 +4134,17 @@ export const GradientCanvas = memo(function GradientCanvas({
       // Get colors from the first visible layer for the 'color' flash type
       const layerColors = layersRef.current.find(l => l.visible)?.gradient?.colors ?? null;
 
+      // Sprint 2.1: this flash loop runs independently of the main animate()
+      // RAF loop (its own useEffect/tick above), so it reads the audio
+      // deltas fresh here rather than sharing a variable across scopes —
+      // same pattern as getExportFlashOverlay below.
+      const tickFlashAudio = getGlobalAudioDeltas();
+      const tickAudioFlashOverride = tickFlashAudio.flashOverrideType
+        ? { type: tickFlashAudio.flashOverrideType, opacity: tickFlashAudio.flashOverrideOpacity }
+        : undefined;
+
       // computeFlashState is now a module-level pure function — no stale closures
-      const state = computeFlashState(effectsRef.current, t, layerColors);
+      const state = computeFlashState(effectsRef.current, t, layerColors, tickAudioFlashOverride);
 
       // After-glow: peak memory with exponential decay
       const afterGlow = effects.flashAfterGlow ?? 0;
@@ -4651,10 +4706,17 @@ export const GradientCanvas = memo(function GradientCanvas({
     const flashMaterial = effectsMaterialRef.current;
     if (flashMaterial?.uniforms) {
       const flashBase = exportSnapshot?.flashTime ?? flashTimeRef.current ?? 0;
+      // Sprint 2.1: same audio-flash override as the live path, using the
+      // deterministic exportGlobal deltas already computed above so export
+      // and preview never disagree about which flash route is firing.
+      const exportFlashOverride = exportGlobal.flashOverrideType
+        ? { type: exportGlobal.flashOverrideType, opacity: exportGlobal.flashOverrideOpacity }
+        : undefined;
       const flashState = computeFlashState(
         flashEffects,
         Math.max(0, flashBase + deterministicTime),
         exportCache.visibleGradientColors as any,
+        exportFlashOverride,
       );
       if (flashMaterial.uniforms.uFlashOpacity) flashMaterial.uniforms.uFlashOpacity.value = flashState.opacity;
       if (flashMaterial.uniforms.uFlashColor) flashMaterial.uniforms.uFlashColor.value.set(flashState.r, flashState.g, flashState.b);
@@ -4944,17 +5006,25 @@ export const GradientCanvas = memo(function GradientCanvas({
     // export frame, on top of the user's manual effect settings — mirroring the
     // live global write so the exported frame matches the preview.
     //
-    // Sprint 1.2/1.4: Chromatic Aberration, Blur, and Vignette no longer have
+    // Sprint 1.2/1.4/2.1: Chromatic Aberration, Blur, Vignette, Noise
+    // Displacement, Graphic Slice, Pixelate, and Film Grain no longer have
     // uniforms on effectsMaterial (the finishing pass) — they're postfx
     // stages now. exportSpatialOverrides carries this frame's final (base +
     // audio delta) values to the runSpatialChain() call below, computed
     // unconditionally (matching shouldUsePostProcess's own unconditional
     // read of exportGlobal a few lines down) so export stays correct
     // whether or not exportAudioActive happens to be true.
-    const exportSpatialOverrides: Partial<Record<SpatialStageId, number>> = {
-      chroma: effectsRef.current.chromaticAberration + exportGlobal.chromaAdd,
-      blur: effectsRef.current.blur + exportGlobal.blurAdd,
-      vignette: effectsRef.current.vignette + exportGlobal.vignetteAdd,
+    const exportSpatialOverrides: Partial<Record<SpatialStageId, StageOverrides>> = {
+      chroma: { amount: effectsRef.current.chromaticAberration + exportGlobal.chromaAdd },
+      blur: { amount: effectsRef.current.blur + exportGlobal.blurAdd },
+      vignette: { amount: effectsRef.current.vignette + exportGlobal.vignetteAdd },
+      displace: { amount: (effectsRef.current.noiseDisplaceAmount ?? 0) + exportGlobal.displaceAmountAdd },
+      slice: {
+        amount: (effectsRef.current.graphicSliceAmount ?? 0) + exportGlobal.sliceAmountAdd,
+        rate: (effectsRef.current.graphicSliceRate ?? 0) + exportGlobal.sliceRateAdd,
+      },
+      pixelate: { amount: (effectsRef.current.pixelate ?? 0) + exportGlobal.pixelateAmountAdd },
+      filmGrain: { amount: (effectsRef.current.filmGrain ?? 0) + exportGlobal.filmGrainAmountAdd },
     };
     if (exportAudioActive && effectsMaterialRef.current?.uniforms) {
       const eu = effectsMaterialRef.current.uniforms;
@@ -5310,7 +5380,15 @@ export const GradientCanvas = memo(function GradientCanvas({
     const snapshot = exportSnapshotRef.current;
     const t = Math.max(0, (snapshot?.flashTime ?? flashTimeRef.current ?? 0) + time);
     const layerColors = layersRef.current.find(l => l.visible)?.gradient?.colors ?? null;
-    const state = computeFlashState(ef, t, layerColors);
+    // Sprint 2.1: same audio-flash override as the other two flash paths —
+    // this callback writes uFlashOpacity directly too, so it needs the same
+    // wiring or export could show a different flash than preview depending
+    // on which code path exportUtils happens to call.
+    const overlayFlashAudio = getGlobalAudioDeltas();
+    const overlayFlashOverride = overlayFlashAudio.flashOverrideType
+      ? { type: overlayFlashAudio.flashOverrideType, opacity: overlayFlashAudio.flashOverrideOpacity }
+      : undefined;
+    const state = computeFlashState(ef, t, layerColors, overlayFlashOverride);
     const mat = effectsMaterialRef.current;
     if (mat?.uniforms) {
       mat.uniforms.uFlashOpacity.value   = state.opacity;

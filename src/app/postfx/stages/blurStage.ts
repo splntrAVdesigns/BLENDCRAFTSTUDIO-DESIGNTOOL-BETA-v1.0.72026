@@ -1,6 +1,6 @@
 import * as THREE from '../../lib/three';
 import { EffectsConfig } from '../../components/controls/EffectsControls';
-import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
+import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../types';
 
 // Blur — simple 5x5 box blur, ported unchanged from the pre-multipass
 // finishing shader. This is the effect that made multi-pass unavoidable:
@@ -47,12 +47,12 @@ export function createBlurStage(): PostProcessStage {
   return {
     id: 'blur',
     material,
-    isActive(effects: EffectsConfig, liveOverride?: number): boolean {
-      const value = liveOverride ?? effects.blur ?? 0;
+    isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean {
+      const value = overrides?.amount ?? effects.blur ?? 0;
       return value > 0.01;
     },
-    syncUniforms(effects: EffectsConfig, _time: number, _resolution: THREE.Vector2, liveOverride?: number): void {
-      material.uniforms.blur.value = liveOverride ?? effects.blur ?? 0;
+    syncUniforms(effects: EffectsConfig, _time: number, _resolution: THREE.Vector2, overrides?: StageOverrides): void {
+      material.uniforms.blur.value = overrides?.amount ?? effects.blur ?? 0;
     },
   };
 }
