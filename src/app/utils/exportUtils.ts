@@ -137,6 +137,15 @@ export interface ExportFlashOverlayFrame {
   position: string;
 }
 
+/** Resolution tier based on total encoded pixels, so portrait and square
+ * exports receive the same quality budget as landscape frames of equal area. */
+function videoResolutionTier(width: number, height: number): '1080p' | '1440p' | '4k' {
+  const pixels = Math.max(1, width) * Math.max(1, height);
+  if (pixels >= 3840 * 2160) return '4k';
+  if (pixels >= 2560 * 1440) return '1440p';
+  return '1080p';
+}
+
 
 export const VIDEO_QUALITY_PRESETS: Record<VideoQuality, VideoQualityConfig> = {
   // ── STAGE 2.8.6: BITRATE LADDER RECALIBRATED ──
@@ -156,58 +165,48 @@ export const VIDEO_QUALITY_PRESETS: Record<VideoQuality, VideoQualityConfig> = {
   standard: {
     label: 'Standard / Fast Preview',
     bitrate: (w, h) => {
-      if (w >= 3840) return 24_000_000; // 4K preview
-      if (w >= 2560) return 16_000_000; // 1440p preview
+      if (videoResolutionTier(w, h) === '4k') return 24_000_000;
+      if (videoResolutionTier(w, h) === '1440p') return 16_000_000;
       return 12_000_000; // 1080p preview
     },
   },
   high: {
     label: 'High / Balanced',
     bitrate: (w, h) => {
-      if (w >= 3840) return 52_000_000; // 4K dense gradients
-      if (w >= 2560) return 34_000_000; // 1440p dense gradients
-      return 24_000_000; // 1080p dense gradients
+      if (videoResolutionTier(w, h) === '4k') return 80_000_000;
+      if (videoResolutionTier(w, h) === '1440p') return 54_000_000;
+      return 36_000_000; // 1080p dense gradients and high-frequency masks
     },
   },
   ultra: {
     label: 'Max Quality',
     bitrate: (w, h) => {
-      if (w >= 3840) return 90_000_000;
-      if (w >= 2560) return 58_000_000;
-      return 42_000_000;
+      if (videoResolutionTier(w, h) === '4k') return 120_000_000;
+      if (videoResolutionTier(w, h) === '1440p') return 80_000_000;
+      return 60_000_000;
     },
   },
   max: {
     label: 'Max Quality',
     bitrate: (w, h) => {
-      if (w >= 3840) return 180_000_000;
-      if (w >= 2560) return 120_000_000;
-      return 90_000_000;
+      if (videoResolutionTier(w, h) === '4k') return 180_000_000;
+      if (videoResolutionTier(w, h) === '1440p') return 130_000_000;
+      return 100_000_000;
     },
   },
   sharpMax: {
     label: 'Sharp Max / Master Slow',
     bitrate: (w, h) => {
-      if (w >= 3840) return 220_000_000;
-      if (w >= 2560) return 150_000_000;
-      return 110_000_000;
+      if (videoResolutionTier(w, h) === '4k') return 240_000_000;
+      if (videoResolutionTier(w, h) === '1440p') return 180_000_000;
+      return 140_000_000;
     },
   },
 };
 
 function getWebMSourceScale(quality: VideoQuality): number {
-  // Export v3 Sprint 3:
-  // Render dense shader compositions slightly larger than the delivery frame,
-  // then downsample into the encoder canvas. This mirrors the clean PNG path and
-  // removes a lot of jagged procedural edges before VP9's 4:2:0 compression.
-  switch (quality) {
-    case 'standard': return 1.0;
-    case 'high': return 1.25;
-    case 'ultra': return 1.5;
-    case 'max': return 1.75;
-    case 'sharpMax': return 2.0;
-    default: return 1.25;
-  }
+  void quality;
+  return 1;
 }
 
 
@@ -1046,6 +1045,8 @@ export async function exportWebMFromCanvas(options: {
       totalFrames,
       bitrate,
       container: 'webm',
+      keyFrameIntervalSeconds: 1,
+      webmLatencyMode: 'realtime',
       signal: options.signal,
       onProgress,
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
@@ -1935,6 +1936,7 @@ export async function exportMP4FromCanvas(options: {
       totalFrames,
       bitrate,
       container: 'mp4',
+      keyFrameIntervalSeconds: 1,
       signal: options.signal,
       onProgress,
       onEncoderConfig: (info) => { encoderConfigInfo = info; },
@@ -2094,42 +2096,42 @@ export async function exportMP4FromCanvas(options: {
 export const MP4_QUALITY_PRESETS: Record<VideoQuality, VideoQualityConfig> = {
   standard: {
     label: 'Standard (H.264)',
-    bitrate: (w) => {
-      if (w >= 3840) return 35_000_000;   // 4K:    35 Mbps — YouTube/Vimeo streaming minimum
-      if (w >= 2560) return 22_000_000;   // 1440p: 22 Mbps
+    bitrate: (w, h) => {
+      if (videoResolutionTier(w, h) === '4k') return 35_000_000;
+      if (videoResolutionTier(w, h) === '1440p') return 22_000_000;
       return 16_000_000;                  // 1080p: 16 Mbps — broadcast delivery standard
     },
   },
   high: {
     label: 'High (H.264)',
-    bitrate: (w) => {
-      if (w >= 3840) return 50_000_000;   // 4K:    50 Mbps — Vimeo Pro / DCI delivery
-      if (w >= 2560) return 32_000_000;   // 1440p: 32 Mbps
-      return 24_000_000;                  // 1080p: 24 Mbps — film festival standard
+    bitrate: (w, h) => {
+      if (videoResolutionTier(w, h) === '4k') return 80_000_000;
+      if (videoResolutionTier(w, h) === '1440p') return 56_000_000;
+      return 40_000_000;                  // 1080p dense animated gradients
     },
   },
   ultra: {
     label: 'Ultra (H.264 High Profile)',
-    bitrate: (w) => {
-      if (w >= 3840) return 68_000_000;   // 4K:    68 Mbps — YouTube Max / archival
-      if (w >= 2560) return 42_000_000;   // 1440p: 42 Mbps
-      return 30_000_000;                  // 1080p: 30 Mbps — perceptually lossless gradient
+    bitrate: (w, h) => {
+      if (videoResolutionTier(w, h) === '4k') return 120_000_000;
+      if (videoResolutionTier(w, h) === '1440p') return 84_000_000;
+      return 60_000_000;
     },
   },
   max: {
     label: 'Max Quality (H.264 High Profile)',
-    bitrate: (w) => {
-      if (w >= 3840) return 90_000_000;
-      if (w >= 2560) return 56_000_000;
-      return 42_000_000;
+    bitrate: (w, h) => {
+      if (videoResolutionTier(w, h) === '4k') return 160_000_000;
+      if (videoResolutionTier(w, h) === '1440p') return 120_000_000;
+      return 90_000_000;
     },
   },
   sharpMax: {
     label: 'Sharp Max (H.264 High Profile)',
-    bitrate: (w) => {
-      if (w >= 3840) return 110_000_000;
-      if (w >= 2560) return 72_000_000;
-      return 54_000_000;
+    bitrate: (w, h) => {
+      if (videoResolutionTier(w, h) === '4k') return 200_000_000;
+      if (videoResolutionTier(w, h) === '1440p') return 150_000_000;
+      return 120_000_000;
     },
   },
 };
