@@ -1,7 +1,8 @@
 /** One worker owns one export. Native instrumentation is confined to this realm. */
 import { Output, BufferTarget, Mp4OutputFormat, WebMOutputFormat, VideoSampleSource, VideoSample } from 'mediabunny';
+import { buildCanvasSourceConfig } from './mediabunnyEncodeShared';
 
-const host = globalThis as unknown as { postMessage(message: unknown, transfer?: Transferable[]): void; onmessage: ((event: MessageEvent) => void) | null };
+const host = globalThis as unknown as { postMessage(message: unknown, transfer?: ArrayBuffer[]): void; onmessage: ((event: MessageEvent) => void) | null };
 const now = () => performance.timeOrigin + performance.now();
 let flushStartedAt: number | null = null;
 let flushCompletedAt: number | null = null;
@@ -34,12 +35,14 @@ host.onmessage = ({ data }) => {
       if (data.type === 'init') {
         target = new BufferTarget();
         output = new Output({ target, format: data.container === 'mp4' ? new Mp4OutputFormat() : new WebMOutputFormat() });
-        source = new VideoSampleSource({
-          codec: data.container === 'mp4' ? 'avc' : 'vp9', bitrate: data.bitrate,
-          ...(data.container === 'webm' ? { latencyMode: 'realtime' as const, keyFrameInterval: data.keyFrameInterval } : {}),
+        source = new VideoSampleSource(buildCanvasSourceConfig({
+          container: data.container,
+          bitrate: data.bitrate,
+          keyFrameIntervalSeconds: data.keyFrameInterval,
+          latencyMode: data.webmLatencyMode,
           onEncoderConfig: config => host.postMessage({ event: 'config', config }),
           onEncodedPacket: packet => host.postMessage({ event: 'packet', timestamp: packet.timestamp, duration: packet.duration, arrivedAt: now() }),
-        });
+        }));
         output.addVideoTrack(source, { frameRate: data.fps });
         await output.start();
         host.postMessage({ id: data.id });
