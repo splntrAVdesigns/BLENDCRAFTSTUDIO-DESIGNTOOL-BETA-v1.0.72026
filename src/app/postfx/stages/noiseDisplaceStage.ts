@@ -1,6 +1,6 @@
 import * as THREE from '../../lib/three';
 import { EffectsConfig } from '../../components/controls/EffectsControls';
-import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../types';
+import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
 
 // Noise Displacement — smooth animated 2D value-noise field offsets the
 // sample position. Ported from Visual Mood Lab's VFX rack (family: warp).
@@ -12,7 +12,7 @@ import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../t
 // inputs, but uses the precision-safe idiom regardless as a standing
 // principle for new GPU noise work. See VFX_RACK_ARCHITECTURE.md §8.1.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform float time;
   uniform float noiseDisplaceAmount;
@@ -63,24 +63,20 @@ export function createNoiseDisplaceStage(): PostProcessStage {
       noiseDisplaceSpeed: { value: 0.5 },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
     id: 'displace',
     material,
-    // Audio can push amount even when the slider itself is at 0, but only
-    // once the user has explicitly enabled Noise Displacement — audio
-    // routing modulates an already-on effect, it doesn't turn one on by
-    // itself. Matches the same reasoning as Pixelate/Graphic Slice below.
-    isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean {
-      if (!effects.noiseDisplaceEnabled) return false;
-      const amount = overrides?.amount ?? effects.noiseDisplaceAmount ?? 0;
-      return amount > 0.001;
+    isActive(effects: EffectsConfig): boolean {
+      return !!effects.noiseDisplaceEnabled && (effects.noiseDisplaceAmount || 0) > 0.001;
     },
-    syncUniforms(effects: EffectsConfig, time: number, _resolution: THREE.Vector2, overrides?: StageOverrides): void {
+    syncUniforms(effects: EffectsConfig, time: number): void {
       material.uniforms.time.value = time;
-      material.uniforms.noiseDisplaceAmount.value = overrides?.amount ?? effects.noiseDisplaceAmount ?? 0.1;
+      material.uniforms.noiseDisplaceAmount.value = effects.noiseDisplaceAmount ?? 0.1;
       material.uniforms.noiseDisplaceScale.value = effects.noiseDisplaceScale ?? 2;
       material.uniforms.noiseDisplaceSpeed.value = effects.noiseDisplaceSpeed ?? 0.5;
     },
