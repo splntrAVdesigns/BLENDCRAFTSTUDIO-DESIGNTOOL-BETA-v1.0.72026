@@ -1,6 +1,6 @@
 import * as THREE from '../../lib/three';
 import { EffectsConfig } from '../../components/controls/EffectsControls';
-import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../types';
+import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
 
 // Chromatic Aberration — lateral prismatic RGB split, ported unchanged from
 // the pre-multipass finishing shader (effectsRenderer.ts). Now runs as its
@@ -14,7 +14,7 @@ import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../t
 // well inside [0,1]; the explicit clamp() is a belt-and-suspenders guard
 // against rounding.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform float chromaticAberration;
   varying vec2 vUv;
@@ -38,18 +38,20 @@ export function createChromaticAberrationStage(): PostProcessStage {
       chromaticAberration: { value: 0 },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
     id: 'chroma',
     material,
-    isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean {
-      const value = overrides?.amount ?? effects.chromaticAberration ?? 0;
+    isActive(effects: EffectsConfig, liveOverride?: number): boolean {
+      const value = liveOverride ?? effects.chromaticAberration ?? 0;
       return value > 0.01;
     },
-    syncUniforms(effects: EffectsConfig, _time: number, _resolution: THREE.Vector2, overrides?: StageOverrides): void {
-      material.uniforms.chromaticAberration.value = overrides?.amount ?? effects.chromaticAberration ?? 0;
+    syncUniforms(effects: EffectsConfig, _time: number, _resolution: THREE.Vector2, liveOverride?: number): void {
+      material.uniforms.chromaticAberration.value = liveOverride ?? effects.chromaticAberration ?? 0;
     },
   };
 }
