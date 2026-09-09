@@ -1,13 +1,13 @@
 import * as THREE from '../../lib/three';
 import { EffectsConfig } from '../../components/controls/EffectsControls';
-import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../types';
+import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
 
 // Film Grain — high-frequency per-pixel noise, ported unchanged from the
 // finishing shader. Self-contained hash (own copy, not shared/imported)
 // per convention — this is the classic sin()-based hash, safe here since
 // it's fed uv*resolution/frequency, not raw large pixel coordinates.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform vec2 resolution;
   uniform float filmGrain;
@@ -43,21 +43,20 @@ export function createFilmGrainStage(): PostProcessStage {
       filmGrainSize: { value: 1 },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
     id: 'filmGrain',
     material,
-    // No separate enable toggle (same as Chroma/Blur/Vignette) — amount
-    // alone gates it, so audio can bring grain in from zero on its own.
-    isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean {
-      const amount = overrides?.amount ?? effects.filmGrain ?? 0;
-      return amount > 0.01;
+    isActive(effects: EffectsConfig): boolean {
+      return (effects.filmGrain || 0) > 0.01;
     },
-    syncUniforms(effects: EffectsConfig, _time: number, resolution: THREE.Vector2, overrides?: StageOverrides): void {
+    syncUniforms(effects: EffectsConfig, _time: number, resolution: THREE.Vector2): void {
       material.uniforms.resolution.value.copy(resolution);
-      material.uniforms.filmGrain.value = overrides?.amount ?? effects.filmGrain ?? 0;
+      material.uniforms.filmGrain.value = effects.filmGrain || 0;
       material.uniforms.filmGrainSize.value = effects.filmGrainSize || 1;
     },
   };
