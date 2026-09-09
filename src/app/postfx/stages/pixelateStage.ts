@@ -1,12 +1,12 @@
 import * as THREE from '../../lib/three';
 import { EffectsConfig } from '../../components/controls/EffectsControls';
-import { FULLSCREEN_VERTEX_SHADER, PostProcessStage, StageOverrides } from '../types';
+import { FULLSCREEN_VERTEX_SHADER, PostProcessStage } from '../types';
 
 // Pixelate — 4-tap supersampled grid snap, ported unchanged from the
 // pre-multipass finishing shader. Needs `resolution` (pixel grid math), so
 // unlike Chroma/Blur it takes an explicit resolution uniform.
 const FRAGMENT_SHADER = `
-  precision mediump float;
+  precision highp float;
   uniform sampler2D tSource;
   uniform float pixelate;
   uniform vec2 resolution;
@@ -38,19 +38,19 @@ export function createPixelateStage(): PostProcessStage {
       resolution: { value: new THREE.Vector2(1920, 1080) },
     },
     depthWrite: false,
-    transparent: true,
+    transparent: false,
+    blending: THREE.NoBlending,
+    depthTest: false,
   });
 
   return {
     id: 'pixelate',
     material,
-    isActive(effects: EffectsConfig, overrides?: StageOverrides): boolean {
-      if (!effects.pixelateEnabled) return false;
-      const amount = overrides?.amount ?? effects.pixelate ?? 0;
-      return amount > 0;
+    isActive(effects: EffectsConfig): boolean {
+      return !!effects.pixelateEnabled && (effects.pixelate || 0) > 0;
     },
-    syncUniforms(effects: EffectsConfig, _time: number, resolution: THREE.Vector2, overrides?: StageOverrides): void {
-      material.uniforms.pixelate.value = overrides?.amount ?? effects.pixelate ?? 0;
+    syncUniforms(effects: EffectsConfig, _time: number, resolution: THREE.Vector2): void {
+      material.uniforms.pixelate.value = effects.pixelate || 0;
       material.uniforms.resolution.value.copy(resolution);
     },
   };
