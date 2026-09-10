@@ -360,39 +360,39 @@ export function calculateAnimationOffset(
     // Orbital angle uses theta — eased orbital velocity (orbit speeds up/slows down).
     // Harmonics for scale/intensity stay on signedTime to preserve organic character.
     case 'drift': {
-      // SPRINT 3.1.0 — HARMONIC RETUNE. Orbital angle and both harmonics are now
-      // integer multiples of TAU/4s, so the whole term closes exactly at the
-      // declared 4s cycle (previously the orbit silently completed a full
-      // revolution every 1s regardless of the declared cycle — see diagnostic).
+      // SPRINT 3.1.1 REDESIGN: drift is now a clearly visible elliptical
+      // orbit of the gradient center — that's its whole identity. Breathing
+      // (scale/intensity wobble) dropped to a faint residual; that's Pulse's
+      // job, and stacking it here was part of why Drift read as "more of the
+      // same" next to Wave/Morph. Orbit math (a/t) unchanged, so loop-lock
+      // at the declared 4s cycle is untouched.
       const t = signedTime * TAU;
       const a = easing === 'linear' ? t * 0.25 : theta; // 1 revolution per 4s
       return {
         ...base,
-        xOffset: Math.cos(a) * 0.07 * i,
-        yOffset: Math.sin(a) * 0.07 * i,
-        scaleOffset:  Math.sin(t * 0.75) * 0.025 * i,
-        intensityMultiplier: 1 + Math.sin(t * 1.25) * 0.06 * i,
+        xOffset: Math.cos(a) * 0.16 * i,
+        yOffset: Math.sin(a) * 0.11 * i,
+        scaleOffset: Math.sin(t * 0.75) * 0.008 * i,
+        intensityMultiplier: 1,
         phase01, eased01, theta, signedTime, cycleSeconds,
       };
     }
 
-    // ── Multi-frequency organic motion ───────────────────────────────────────
-    // Easing applied to the slow (dominant) component only.
-    // Fast harmonics (1.9x, 2.7x) stay on signedTime — preserves organic texture.
+    // ── Ripple ────────────────────────────────────────────────────────────
     case 'ripple': {
-      // SPRINT 3.1.0 — HARMONIC RETUNE. 0.47/0.39/1.9/2.7 Hz didn't share a
-      // common period; retuned to 0.5/0.375/1.875/2.6875 Hz — all exact
-      // integer multiples of 1/16s — so the JS ripple closes at 16s, matching
-      // the shader-field ripple retune (both are "ripple" and must agree).
-      const t   = signedTime;
-      const s   = easing === 'linear' ? t : eased01; // slow/primary driver
+      // SPRINT 3.1.1 REDESIGN: the shader-side field (applyRippleField) now
+      // carries Ripple's spatial identity as genuine expanding rings from
+      // fixed point sources. This JS layer no longer bobs xOffset/yOffset —
+      // that positional wobble is what made Ripple read like a variant of
+      // Wave/Drift. It now only adds a brief synced intensity/hue pulse,
+      // like a ring passing under the whole gradient. 0.25 Hz is an exact
+      // 4x(1/16s), so it still closes at the declared 16s cycle.
+      const t = signedTime;
+      const pulse = Math.sin(t * 0.25 * TAU);
       return {
         ...base,
-        xOffset: (Math.sin(s * 0.5 * TAU) * 0.036 + Math.sin(t * 1.875 * TAU) * 0.014) * i,
-        yOffset: (Math.cos(s * 0.375 * TAU) * 0.036 + Math.cos(t * 2.6875 * TAU) * 0.014) * i,
-        scaleOffset: Math.sin(t * 1.875 * TAU + 0.4) * 0.028 * i,
-        intensityMultiplier: 1 + Math.abs(Math.sin(t * 1.875 * TAU)) * 0.10 * i,
-        hueShiftOffset: Math.sin(s * 0.5 * TAU) * 5 * i,
+        intensityMultiplier: 1 + Math.abs(pulse) * 0.08 * i,
+        hueShiftOffset: pulse * 4 * i,
         phase01, eased01, theta, signedTime, cycleSeconds,
       };
     }
@@ -550,19 +550,21 @@ export function calculateAnimationOffset(
     // ── Glitch ───────────────────────────────────────────────────────────────
     // Intentionally discrete/quantised — easing and direction are no-ops by design.
     case 'glitch': {
+      // SPRINT 3.1.1 REDESIGN: this used to move angle/position/scale every
+      // glitch tick — that whole-frame jitter WAS the "shaking the frame,
+      // not a real glitch" problem. Glitch's actual visual identity now
+      // lives in applyGlitchField (digital datamosh block-tearing, shader-
+      // side). This JS layer only adds a brief, bursty color-corruption
+      // flicker — hue snap + intensity flash — timed to the same bursts,
+      // as an accent on top of the block-tear, not a second competing effect.
       const bucket = Math.floor(animationTime * (6 + speed * 6));
       const rand = (s: number) => { const x = Math.sin(s * 12.9898) * 43758.5453; return x - Math.floor(x); };
       const isBurst = rand(bucket * 1.13) > 0.72;
-      const isMicro = rand(bucket * 1.87) > 0.52;
-      const g = isBurst ? 1 : isMicro ? 0.45 : 0.12;
+      const g = isBurst ? 1 : 0;
       return {
         ...base,
-        angleOffset:         (rand(bucket * 1.31) - 0.5) * 16   * i * g,
-        xOffset:             (rand(bucket * 1.73) - 0.5) * 0.045 * i * g,
-        yOffset:             (rand(bucket * 2.07) - 0.5) * 0.038 * i * g,
-        scaleOffset:         (rand(bucket * 2.71) - 0.5) * 0.030 * i * g,
-        intensityMultiplier: 1 + (rand(bucket * 3.17) - 0.5) * 0.18 * i * g,
-        hueShiftOffset:      (rand(bucket * 3.71) - 0.5) * 10   * i * g,
+        intensityMultiplier: 1 + (rand(bucket * 3.17) - 0.5) * 0.12 * i * g,
+        hueShiftOffset:      (rand(bucket * 3.71) - 0.5) * 14   * i * g,
         phase01, eased01, theta, signedTime, cycleSeconds,
       };
     }
@@ -586,14 +588,15 @@ export function calculateAnimationOffset(
     }
 
     case 'morph': {
-      // SPRINT 3.1.0 (revised): halved again to match the doubled 16s period.
+      // SPRINT 3.1.1 REDESIGN: the shader field (applyMorphField) now
+      // carries Morph's identity as continuous domain-warped liquid flow.
+      // This JS layer no longer bobs position/scale — that's what made
+      // Morph read like a variant of Wave/Drift. Just a faint synced
+      // intensity shimmer remains, as a subtle complement.
       const t = easing === 'linear' ? signedTime * TAU : theta;
       return {
         ...base,
-        xOffset: Math.sin(t * 0.375) * 0.025 * i,
-        yOffset: Math.cos(t * 0.4375) * 0.025 * i,
-        scaleOffset: Math.sin(t * 0.5) * 0.03 * i,
-        intensityMultiplier: 1 + 0.08 * Math.sin(t) * i,
+        intensityMultiplier: 1 + 0.05 * Math.sin(t * 0.5) * i,
         phase01, eased01, theta, signedTime, cycleSeconds,
       };
     }

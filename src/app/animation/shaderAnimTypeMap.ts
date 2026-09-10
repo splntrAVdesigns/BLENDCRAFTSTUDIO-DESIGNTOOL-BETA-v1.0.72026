@@ -26,10 +26,11 @@ export const SHADER_ANIM_TYPE_MAP: Readonly<Record<string, number>> = Object.fre
   morph:        2.0, // applyMorphField — organic UV morphing
   liquid:       2.0, // applyMorphField — liquid uses morph UV field
   vortex:       3.0, // applyVortexField — spiral whirlpool swirl
-  kaleidoscope: 4.0, // applyKaleidoField — crystalline facet distortion (newly activated)
+  kaleidoscope: 4.0, // applyKaleidoField — crystalline facet distortion
   fractalZoom:  5.0, // applyFractalZoomField — recursive zoom texture
   turbulence:   6.0, // applyTurbulenceField — multi-freq liquid chaos
-  ripple:       7.0, // applyRippleField — chaotic multi-source ripples
+  ripple:       7.0, // applyRippleField — expanding point-source rings
+  glitch:       8.0, // applyGlitchField — digital datamosh block-tearing (SPRINT 3.1.1)
 });
 
 export function getShaderAnimType(animationType: AnimationType | string): number {

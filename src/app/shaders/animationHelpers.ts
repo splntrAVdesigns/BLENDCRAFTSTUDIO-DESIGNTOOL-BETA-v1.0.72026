@@ -43,56 +43,75 @@ export const SHARED_ANIMATION_HELPERS = `
     return smoothstep(0.0, radius, d);
   }
 
+  // Single-float hash — same magic constants already used for dithering
+  // elsewhere in these shaders (see gradientShaders.ts), reused here for
+  // Glitch's discrete per-block/per-frame randomness.
+  float hash11(float p) {
+    return fract(sin(p * 12.9898) * 43758.5453123);
+  }
+
   // ===================================================================
   // PREMIUM ANIMATION FIELD TRANSFORMS
   // ===================================================================
 
-  // 1. WAVE - Continuous sheet flow with no hard phase reset.
-  // SPRINT 3.1.0 — HARMONIC RETUNE: 1.75/0.35/0.62/0.21 rad/s retuned to
-  // 8/2/3/1 x (TAU/30) so the whole field closes exactly at 30s (see
-  // estimateAnimationCycle.ts). Values are within ~5% of the originals.
+  // 1. WAVE - One coherent travelling sheet (flag/fabric/scanline-sweep
+  // character), not stacked competing frequencies.
+  // SPRINT 3.1.1 REDESIGN: dropped the nested cross-modulation and the
+  // independent "secondary" wave entirely — those were what made Wave read
+  // as just another wobble field, similar to Morph/Ripple. Now a single
+  // primary travelling wave along dir, with a subtle perpendicular
+  // shimmer phase-locked to it (not an independent frequency), so the
+  // motion stays visually singular. Rate unchanged (8x TAU/30s), so this
+  // still closes at the declared 30s cycle.
   vec2 applyWaveField(vec2 uv, vec2 center, float baseAngleDeg) {
     vec2 dir = animDirFromAngle(baseAngleDeg);
     vec2 perp = vec2(-dir.y, dir.x);
     vec2 p = uv - center;
 
     float t = uAnimTime;
-    float travel = dot(p, dir) * 10.0 + t * 1.6755;
-    float cross = dot(p, perp) * 6.5;
-
-    float primary = sin(travel + sin(cross * 0.75 + t * 0.41888) * 0.65);
-    float secondary = sin(travel * 0.58 - t * 0.62832 + sin(cross * 1.15 - t * 0.20944) * 1.15);
+    float travel = dot(p, dir) * 8.0 + t * 1.6755;
+    float primary = sin(travel);
 
     float edgeBoost = animEdgeWeight(uv, center, 0.7);
-    float amp = (0.020 + 0.022 * animSoftMod()) * uAnimIntensity;
-    amp *= (1.0 + edgeBoost * 0.28);
+    float amp = (0.024 + 0.014 * animSoftMod()) * uAnimIntensity;
+    amp *= (1.0 + edgeBoost * 0.35);
 
-    float lateral = (0.008 + 0.014 * animStrongMod()) * uAnimIntensity;
-    lateral *= (1.0 + edgeBoost * 0.18);
+    // Phase-locked shimmer (half the primary's own phase) — a hint of
+    // lateral sway riding the same wave, not a second competing frequency.
+    float shimmer = sin(travel * 0.5) * 0.30;
 
     p += perp * primary * amp;
-    p += dir * secondary * lateral;
+    p += dir * shimmer * amp * 0.4;
 
     return p + center;
   }
 
-  // 2. MORPH - Continuous organic shape evolution without cycle snap.
-  // SPRINT 3.1.0 (revised): period doubled to 16s per feedback that the
-  // crossfade (and the whole field) felt too fast at 8s — every rate below
-  // is exactly half the first-pass value, same 2/1/1/2/1 harmonic multipliers.
+  // 2. MORPH - True domain-warped liquid flow: noise sampled at a position
+  // itself displaced by noise, producing continuous fluid blob-morphing
+  // (the "liquid gradient mesh" look) instead of stacked sine wobble.
+  // SPRINT 3.1.1 REDESIGN: this was previously four independent sine terms
+  // plus a crossfade blend — structurally similar to Wave/Ripple, which was
+  // the "not enough variety" problem. Domain warping is a genuinely
+  // different mechanism. Both warp stages share the same 1x(TAU/16) base
+  // rate (sign-flipped between axes for organic asymmetry), so the field
+  // still closes at the declared 16s cycle.
   vec2 applyMorphField(vec2 uv, vec2 center) {
     vec2 p = uv - center;
     float t = uAnimTime;
-    vec2 uvA = p + vec2(
-      sin(p.y * 4.0 + t * 0.7854) * 0.03,
-      cos(p.x * 3.0 + t * 0.3927) * 0.03
-    ) * uAnimIntensity;
-    vec2 uvB = p + vec2(
-      cos(p.y * 7.0 + 1.2 + t * 0.3927) * 0.04,
-      sin(p.x * 5.0 - 0.8 + t * 0.7854) * 0.04
-    ) * uAnimIntensity;
-    float morphMix = 0.5 + 0.5 * sin(t * 0.3927);
-    vec2 result = mix(uvA, uvB, morphMix);
+
+    vec2 warpFreq = p * 2.4;
+    vec2 warp1 = vec2(
+      noise(warpFreq + vec2(t * 0.3927, 17.3)),
+      noise(warpFreq + vec2(31.9, t * 0.3927))
+    ) - 0.5;
+
+    vec2 warpedP = p + warp1 * 0.7 * uAnimIntensity;
+    vec2 warp2 = vec2(
+      noise(warpedP * 1.7 + vec2(-t * 0.3927, 53.7)),
+      noise(warpedP * 1.7 + vec2(67.1, -t * 0.3927))
+    ) - 0.5;
+
+    vec2 result = p + (warp1 * 0.55 + warp2 * 0.45) * 0.11 * uAnimIntensity;
     return result + center;
   }
 
@@ -214,44 +233,34 @@ export const SHARED_ANIMATION_HELPERS = `
     return uv + (swirl + inward + spiralArms + throatSpin + micro) * uAnimIntensity;
   }
 
-  // 7. RIPPLE - Chaotic multi-source liquid ripples across the frame.
-  // SPRINT 3.1.0 — HARMONIC RETUNE: the eleven independent frequency
-  // constants below (0.27/0.33/0.19/0.29/0.41/0.23/0.31/2.2/1.7/2.6/1.4/1.1)
-  // shared no common period. Retuned to integer multiples of TAU/16s — the
-  // six slow center-motion terms collapse to a single 1x base (0.3927
-  // rad/s), which trades a little of the "detuned" multi-source character
-  // for an exact 16s loop close; the three ripple-wave rates and the final
-  // flourish keep distinct 6x/4x/7x and 4x/3x multiples. Matches the JS
-  // ripple case's 16s retune above.
+  // 7. RIPPLE - Literal expanding rings from fixed point sources:
+  // sin(distance*freq - time*speed) with distance-decayed amplitude. Reads
+  // as genuine water ripples, not positional bobbing.
+  // SPRINT 3.1.1 REDESIGN: previously the source POINTS themselves orbited
+  // and bobbed via several independent frequencies — structurally similar
+  // to Wave/Drift, the "not enough variety" problem. Sources are now fixed;
+  // the rings expanding outward from them are what reads as motion, which
+  // is a genuinely different mechanism. Rates are 4x/3x (TAU/16), so this
+  // still closes at the declared 16s cycle.
   vec2 applyRippleField(vec2 uv, vec2 center) {
     float t = uAnimTime;
     vec2 p = uv - center;
 
-    vec2 c1 = vec2(sin(t * 0.3927) * 0.26, cos(t * 0.3927) * 0.20);
-    vec2 c2 = vec2(cos(t * 0.3927 + 1.3) * 0.34, sin(t * 0.3927 - 0.7) * 0.28);
-    vec2 c3 = vec2(sin(t * 0.3927 - 0.9) * 0.22, sin(t * 0.3927 + 0.6) * 0.34);
+    vec2 src1 = vec2(-0.18, 0.12);
+    vec2 src2 = vec2(0.20, -0.15);
 
-    vec2 d1 = p - c1;
-    vec2 d2 = p - c2;
-    vec2 d3 = p - c3;
-    float r1 = max(length(d1), 0.0001);
-    float r2 = max(length(d2), 0.0001);
-    float r3 = max(length(d3), 0.0001);
+    float r1 = length(p - src1);
+    float r2 = length(p - src2);
 
-    vec2 n1 = d1 / r1;
-    vec2 n2 = d2 / r2;
-    vec2 n3 = d3 / r3;
+    float ring1 = sin(r1 * 26.0 - t * 1.5708) * exp(-r1 * 1.4);
+    float ring2 = sin(r2 * 22.0 - t * 1.1781 + 1.0) * exp(-r2 * 1.4);
 
-    float w1 = sin(r1 * 24.0 - t * 2.356 + sin(t * 0.3927) * 0.8);
-    float w2 = sin(r2 * 20.0 - t * 1.571 + 1.3);
-    float w3 = sin(r3 * 28.0 - t * 2.749 - 0.9);
+    vec2 dir1 = (r1 > 0.0001) ? (p - src1) / r1 : vec2(0.0);
+    vec2 dir2 = (r2 > 0.0001) ? (p - src2) / r2 : vec2(0.0);
 
-    vec2 ripple = n1 * w1 * exp(-r1 * 1.8) * 0.030;
-    ripple += n2 * w2 * exp(-r2 * 1.6) * 0.028;
-    ripple += n3 * w3 * exp(-r3 * 1.9) * 0.024;
-    ripple += vec2(sin((uv.y + uv.x) * 9.0 - t * 1.571), cos((uv.x - uv.y) * 8.0 + t * 1.178)) * 0.010;
+    vec2 displacement = dir1 * ring1 * 0.045 + dir2 * ring2 * 0.045;
 
-    return uv + ripple * uAnimIntensity;
+    return uv + displacement * uAnimIntensity;
   }
 
   // 4. KALEIDOSCOPE - Continuous crystalline modulation with no phase snap.
@@ -351,6 +360,47 @@ export const SHARED_ANIMATION_HELPERS = `
     return p + flow + flow2 + flow3 + center;
   }
 
+  // 8. GLITCH - Digital datamosh: quantised horizontal block-tearing and
+  // occasional larger "stale macroblock" jumps, driven by a discrete
+  // glitch-frame clock rather than the continuous sin/cos motion every
+  // other field uses. That discreteness IS the glitch character — it's
+  // deliberately NOT smoothed.
+  // SPRINT 3.1.1: previously glitch was pure JS whole-frame position/
+  // rotation/scale jitter, which read as "shaking the frame" rather than a
+  // glitch — see calculateAnimationOffset()'s 'glitch' case, now reduced to
+  // a brief accent flicker. This field is where glitch's actual identity
+  // now lives: bands of the image intermittently tear sideways as if a
+  // corrupted motion vector displaced that block, the way real datamosh
+  // artifacts look.
+  vec2 applyGlitchField(vec2 uv, vec2 center) {
+    float t = uAnimTime;
+
+    // Discrete glitch-frame clock — a new random state roughly 12x per
+    // second at uAnimIntensity's baseline rate, independent of the smooth
+    // per-render-frame clock everything else uses.
+    float glitchFrame = floor(t * 12.0);
+
+    // Bursty, not constant: most glitch-frames do nothing at all.
+    float isActive = step(0.62, hash11(glitchFrame * 3.71));
+
+    // Horizontal block bands — each band this glitch-frame either holds
+    // still or tears sideways by its own random offset.
+    float bandCount = 5.0 + floor(hash11(glitchFrame * 1.19) * 6.0); // 5-10 bands
+    float bandIndex = floor((uv.y - center.y + 0.5) * bandCount);
+    float bandSeed = hash11(bandIndex * 7.13 + glitchFrame * 2.63);
+    float bandActive = step(0.55, bandSeed);
+    float shear = (hash11(bandIndex * 3.31 + glitchFrame * 4.09) - 0.5) * 0.14;
+
+    // Rarer, larger "stale macroblock" jump — reads as a whole corrupted
+    // block rather than a torn scanline.
+    float blockJump = step(0.93, hash11(glitchFrame * 5.53)) *
+      (hash11(glitchFrame * 6.91) - 0.5) * 0.30;
+
+    float xOffset = (shear * bandActive + blockJump) * isActive * uAnimIntensity;
+
+    return vec2(uv.x + xOffset, uv.y);
+  }
+
   // ===================================================================
   // UNIFIED ENTRY POINT
   // ===================================================================
@@ -404,6 +454,7 @@ export const SHARED_ANIMATION_HELPERS = `
     if (uAnimType < 5.5) return applyFractalZoomField(uv, center);
     if (uAnimType < 6.5) return applyTurbulenceField(uv, center);
     if (uAnimType < 7.5) return applyRippleField(uv, center);
+    if (uAnimType < 8.5) return applyGlitchField(uv, center);
     return uv;
   }
 `;
