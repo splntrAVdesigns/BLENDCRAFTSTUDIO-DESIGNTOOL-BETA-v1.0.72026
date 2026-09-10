@@ -882,8 +882,6 @@ export const starburstGradientShader = `
   }
 
   float sampleStarburstT(vec2 uvIn) {
-    // SPRINT 3.1.0: shader-field animation — previously a silent no-op (see Marble).
-    uvIn = applySharedAnimationField(uvIn, center, angle, float(segments));
     vec2 d = uvIn - center;
     float dist = length(d);
     float theta = atan(d.y, d.x) + radians(angle + uRotation);
@@ -909,11 +907,14 @@ export const starburstGradientShader = `
 
   void main() {
     vec2 aa = max(fwidth(vUv) * 0.26, vec2(0.00018));
-    float t0 = sampleStarburstT(vUv);
-    float t1 = sampleStarburstT(clamp(vUv + vec2(aa.x, 0.0), 0.0, 1.0));
-    float t2 = sampleStarburstT(clamp(vUv + vec2(-aa.x, 0.0), 0.0, 1.0));
-    float t3 = sampleStarburstT(clamp(vUv + vec2(0.0, aa.y), 0.0, 1.0));
-    float t4 = sampleStarburstT(clamp(vUv + vec2(0.0, -aa.y), 0.0, 1.0));
+    // SPRINT 3.1.0 FIX: applied once here, not inside sampleStarburstT (which runs
+    // 5x per pixel for AA) — see Diamond in diamondShader.ts for the full explanation.
+    vec2 animatedUV = applySharedAnimationField(vUv, center, angle, float(segments));
+    float t0 = sampleStarburstT(animatedUV);
+    float t1 = sampleStarburstT(clamp(animatedUV + vec2(aa.x, 0.0), 0.0, 1.0));
+    float t2 = sampleStarburstT(clamp(animatedUV + vec2(-aa.x, 0.0), 0.0, 1.0));
+    float t3 = sampleStarburstT(clamp(animatedUV + vec2(0.0, aa.y), 0.0, 1.0));
+    float t4 = sampleStarburstT(clamp(animatedUV + vec2(0.0, -aa.y), 0.0, 1.0));
     float t = mixWrapped(mixWrapped(t0, mixWrapped(t1, t2, 0.5), 0.14), mixWrapped(t3, t4, 0.5), 0.14);
 
     vec3 color = getGradientColor(t);

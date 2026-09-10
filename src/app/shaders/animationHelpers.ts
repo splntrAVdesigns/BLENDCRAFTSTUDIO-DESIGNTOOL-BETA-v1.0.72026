@@ -77,24 +77,21 @@ export const SHARED_ANIMATION_HELPERS = `
   }
 
   // 2. MORPH - Continuous organic shape evolution without cycle snap.
-  // SPRINT 3.1.0 — HARMONIC RETUNE: 1.2/1.0/0.8/1.4 rad/s retuned to
-  // 2/1/1/2 x (TAU/8). The crossfade term's original nested 0.23+sin(0.07)
-  // wobble implied a true period near 90s (0.07 rad/s dominates) — that's
-  // impractical for export, so it's compressed to the same 1x(TAU/8) base
-  // and the inner nested wobble is dropped. The crossfade now cycles
-  // noticeably faster than before — flag for review after visual test.
+  // SPRINT 3.1.0 (revised): period doubled to 16s per feedback that the
+  // crossfade (and the whole field) felt too fast at 8s — every rate below
+  // is exactly half the first-pass value, same 2/1/1/2/1 harmonic multipliers.
   vec2 applyMorphField(vec2 uv, vec2 center) {
     vec2 p = uv - center;
     float t = uAnimTime;
     vec2 uvA = p + vec2(
-      sin(p.y * 4.0 + t * 1.5708) * 0.03,
-      cos(p.x * 3.0 + t * 0.7854) * 0.03
+      sin(p.y * 4.0 + t * 0.7854) * 0.03,
+      cos(p.x * 3.0 + t * 0.3927) * 0.03
     ) * uAnimIntensity;
     vec2 uvB = p + vec2(
-      cos(p.y * 7.0 + 1.2 + t * 0.7854) * 0.04,
-      sin(p.x * 5.0 - 0.8 + t * 1.5708) * 0.04
+      cos(p.y * 7.0 + 1.2 + t * 0.3927) * 0.04,
+      sin(p.x * 5.0 - 0.8 + t * 0.7854) * 0.04
     ) * uAnimIntensity;
-    float morphMix = 0.5 + 0.5 * sin(t * 0.7854);
+    float morphMix = 0.5 + 0.5 * sin(t * 0.3927);
     vec2 result = mix(uvA, uvB, morphMix);
     return result + center;
   }
@@ -258,12 +255,9 @@ export const SHARED_ANIMATION_HELPERS = `
   }
 
   // 4. KALEIDOSCOPE - Continuous crystalline modulation with no phase snap.
-  // SPRINT 3.1.0: this function was previously unreachable — 'kaleidoscope'
-  // was never assigned a uAnimType value, so it compiled into every shader
-  // but never ran. Now wired in (see SHADER_ANIM_TYPE_MAP), so its
-  // frequencies are retuned here at the same time: 1.8/0.21/2.4/1.35 rad/s
-  // retuned to 17/2/23/13 x (TAU/60), closing at the same 60s true period as
-  // the JS rotation+hue retune above.
+  // SPRINT 3.1.0 (revised): retuned to close at 30s (was 60s, per feedback
+  // that 60s felt too long) — same 17/2/23/13 harmonic multipliers, doubled
+  // absolute rate since the base period halved.
   vec2 applyKaleidoField(vec2 uv, vec2 center, float segments) {
     vec2 p = uv - center;
     float r = max(length(p), 0.02);
@@ -275,11 +269,11 @@ export const SHARED_ANIMATION_HELPERS = `
 
     float edgeWeight = animEdgeWeight(uv, center, 0.8);
     float t = uAnimTime;
-    float facet = sin(a * 12.0 + r * 10.0 + t * 1.780 + sin(t * 0.2094) * 0.8);
+    float facet = sin(a * 12.0 + r * 10.0 + t * 3.560 + sin(t * 0.4189) * 0.8);
     float facetAmp = (0.014 + 0.028 * animSoftMod()) * uAnimIntensity;
     facetAmp *= (0.7 + edgeWeight * 0.8);
-    float tunnel = sin(r * 20.0 + t * 2.408) * 0.02 * uAnimIntensity;
-    float foldJitter = sin(t * 1.361 + r * 7.5) * 0.028 * uAnimIntensity;
+    float tunnel = sin(r * 20.0 + t * 4.817) * 0.02 * uAnimIntensity;
+    float foldJitter = sin(t * 2.723 + r * 7.5) * 0.028 * uAnimIntensity;
 
     a += foldJitter + facet * facetAmp;
     r += tunnel;

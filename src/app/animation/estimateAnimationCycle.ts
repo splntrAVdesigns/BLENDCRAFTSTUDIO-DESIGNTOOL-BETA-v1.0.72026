@@ -27,15 +27,15 @@ export function estimateCycleTime(animationType: AnimationType, speed: number): 
     case 'scale':          return 1000 / s;
     case 'drift':          return 4000 / s;   // retuned: orbital term now closes at 4s exactly (was 1s)
     case 'wave':           return 30000 / s;  // retuned: true period of the shader wave field
-    case 'morph':          return 8000 / s;   // retuned: crossfade term compressed for a practical loop
+    case 'morph':          return 16000 / s;  // revised per feedback: was 8s (felt too fast), doubled to 16s
     case 'turbulence':     return 11000 / s;  // retuned: shared by JS + shader-field turbulence
     case 'shimmer':
     case 'dualShifter':    return 1000 / s;
     case 'vortex':         return 5000 / s;
-    case 'kaleidoscope':   return 60000 / s;  // retuned: rotation (6s) and hue (60s) now close together
+    case 'kaleidoscope':   return 30000 / s;  // revised per feedback: was 60s, now 30s (rotation 5 turns, hue 1 turn)
     case 'fractalZoom':    return 5000 / s;
     case 'chromaticPulse': return 2000 / s;
-    case 'liquid':         return 8000 / s;   // retuned: unified with morph field's shared 8s base
+    case 'liquid':         return 16000 / s;  // revised per feedback: unified with morph's doubled 16s base
     case 'hueShift':       return 10000 / s;
     case 'ripple':         return 16000 / s;  // retuned: shared by JS + shader-field ripple
     case 'glitch':         return 1000 / s;   // discrete/quantised by design — see calculateAnimationOffset

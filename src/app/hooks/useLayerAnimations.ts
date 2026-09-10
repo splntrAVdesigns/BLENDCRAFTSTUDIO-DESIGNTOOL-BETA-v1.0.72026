@@ -254,23 +254,42 @@ function getPhase(
 ) {
   const cycleSeconds = Math.max(0.001, estimateCycleTime(animationType, speed) / 1000);
 
-  // Unbounded linear time — never wraps, never snaps
-  const signedTime = direction === 'reverse'
-    ? -animationTime * speed
-    : animationTime * speed;
-
-  // Bounded 0-1 phase — only needed for sweep/pingPong animations
+  // Bounded 0-1 phase — computed first now, since pingPong's signedTime fix
+  // below needs it too (not just phase01/eased01 as before).
   const basePhase = fract(animationTime / cycleSeconds);
   let phase01 = direction === 'reverse'  ? 1 - basePhase
               : direction === 'pingPong' ? triangle01(basePhase)
               : basePhase;
+
+  // SPRINT 3.1.0 FIX — DIRECTION MODE WAS INERT UNDER LINEAR EASING.
+  // Previously: signedTime only flipped sign for 'reverse'; 'pingPong' used
+  // the exact same unbounded formula as 'forward'. Since every animation
+  // case (and every GPU shader field, which is driven by uAnimTime =
+  // signedTime directly) falls back to raw signedTime whenever easing is
+  // 'linear' — the default — PingPong was pixel-for-pixel identical to
+  // Forward for every animation type, on every gradient type, as long as
+  // Easing was Linear. Direction only did anything if a non-linear easing
+  // happened to route through eased01/theta instead.
+  //
+  // Fix: for 'pingPong', signedTime now bounces through the same
+  // triangle-folded phase01 already computed above (the same technique the
+  // 'liquid' case already used locally for its own hue drift) — scaled back
+  // out to real seconds so every existing Hz/rad-per-second constant
+  // downstream keeps working unchanged. This makes PingPong visibly bounce
+  // even under Linear easing, for both JS transforms and shader fields.
+  const rawTime = animationTime * speed;
+  const signedTime = direction === 'reverse'
+    ? -rawTime
+    : direction === 'pingPong'
+    ? triangle01(basePhase) * cycleSeconds
+    : rawTime;
 
   const eased01 = applyEasing(clamp01(phase01), easing);
 
   // theta is the primary oscillation angle (unbounded radians from signedTime)
   // For eased modes, we construct theta from eased01 per-cycle; otherwise use signedTime directly
   const theta = easing === 'linear'
-    ? signedTime * TAU   // unbounded continuous wave
+    ? signedTime * TAU   // unbounded continuous wave (now pingPong-aware too)
     : eased01 * TAU;     // easing applied within each cycle boundary
 
   return { cycleSeconds, phase01, eased01, theta, signedTime };
@@ -400,19 +419,18 @@ export function calculateAnimationOffset(
     // Rotation and hue both use eased01*360 when non-linear (same as rotation).
     // Flash uses theta for easing-shaped facet pops.
     case 'kaleidoscope': {
-      // SPRINT 3.1.0 — HARMONIC RETUNE. Rotation at 54deg/s implied a 6.667s
-      // true period against a declared 4s cycle (and hue's 1.2deg/s implied
-      // ~300s) — the two components never agreed with each other or with the
-      // declared cycle. Retuned to 60deg/s (exactly 6s/turn) and 6deg/s
-      // (exactly 60s/turn) — hue now completes 1 full cycle for every 10
-      // rotation turns, so both close together at 60s exactly.
+      // SPRINT 3.1.0 (revised): rotation stays at 60deg/s (6s/turn, so 5 clean
+      // turns fit a 30s cycle). Hue was 6deg/s (needed 60s to close on its
+      // own) — doubled to 12deg/s so it closes in exactly 30s too, matching
+      // the shortened declared cycle below. Hue drift is now twice as fast
+      // as the first pass — flag if that reads as too brisk.
       const rotDeg = easing === 'linear'
         ? ((signedTime * 60) % 360 + 360) % 360
         : eased01 * 360;
       const t = easing === 'linear' ? signedTime * TAU : theta;
       const flash = Math.pow(Math.abs(Math.sin(t * 2.0)), 8.0);
       const hue   = easing === 'linear'
-        ? ((signedTime * 6) % 360 + 360) % 360
+        ? ((signedTime * 12) % 360 + 360) % 360
         : eased01 * 360;
       return {
         ...base,
@@ -507,22 +525,19 @@ export function calculateAnimationOffset(
     //   value. Now maps eased01 (triangle01 for pingPong = smooth 0->1->0) to a
     //   +-cycleSeconds range — fully continuous, no discontinuity, easing-aware.
     case 'liquid': {
-      // SPRINT 3.1.0 — HARMONIC RETUNE. 0.17/0.31/0.53/0.23/0.41 Hz shared no
-      // common period with the declared cycle. Retuned to 0.125/0.25/0.5/
-      // 0.25/0.375 Hz — integer multiples of 1/8s — so Liquid's hue+glow
-      // overlay closes at the same 8s true period as the Morph shader field
-      // it renders on top of (uAnimType maps 'liquid' to applyMorphField).
+      // SPRINT 3.1.0 (revised): halved again to match the doubled 16s period
+      // shared with the Morph field.
       const t = signedTime;
       const morphT = (direction === 'pingPong')
         ? (eased01 * 2 - 1) * cycleSeconds   // smooth bidirectional, easing-aware
         : t;                                   // forward/reverse: use signedTime
 
-      const hueDrift = Math.sin(morphT * 0.125 * TAU) * 14
-                     + Math.sin(morphT * 0.25 * TAU) *  8
-                     + Math.sin(morphT * 0.5 * TAU) *  3;
+      const hueDrift = Math.sin(morphT * 0.0625 * TAU) * 14
+                     + Math.sin(morphT * 0.125 * TAU) *  8
+                     + Math.sin(morphT * 0.25 * TAU) *  3;
 
-      const glow = 1 + Math.sin(t * 0.25 * TAU) * 0.06 * i
-                     + Math.sin(t * 0.375 * TAU) * 0.03 * i;
+      const glow = 1 + Math.sin(t * 0.125 * TAU) * 0.06 * i
+                     + Math.sin(t * 0.1875 * TAU) * 0.03 * i;
 
       return {
         ...base,
@@ -571,13 +586,12 @@ export function calculateAnimationOffset(
     }
 
     case 'morph': {
-      // SPRINT 3.1.0 — HARMONIC RETUNE. 0.7/0.9 Hz retuned to 0.75/0.875 Hz —
-      // integer multiples of 1/8s — closes at 8s with the shader field below.
+      // SPRINT 3.1.0 (revised): halved again to match the doubled 16s period.
       const t = easing === 'linear' ? signedTime * TAU : theta;
       return {
         ...base,
-        xOffset: Math.sin(t * 0.75) * 0.025 * i,
-        yOffset: Math.cos(t * 0.875) * 0.025 * i,
+        xOffset: Math.sin(t * 0.375) * 0.025 * i,
+        yOffset: Math.cos(t * 0.4375) * 0.025 * i,
         scaleOffset: Math.sin(t * 0.5) * 0.03 * i,
         intensityMultiplier: 1 + 0.08 * Math.sin(t) * i,
         phase01, eased01, theta, signedTime, cycleSeconds,

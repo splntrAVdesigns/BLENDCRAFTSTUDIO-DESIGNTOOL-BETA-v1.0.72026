@@ -79,10 +79,6 @@ export const diamondGradientShader = `
     uv += vec2(uDriftX, uDriftY);
 
     vec2 center = vec2(0.5) + vec2(mouseX, mouseY) * 0.08 * mouseIntensity;
-
-    // SPRINT 3.1.0: shader-field animation — previously impossible, see above.
-    uv = applySharedAnimationField(uv, center, angle + uRotation, 1.0);
-
     vec2 p = uv - center;
 
     float rot = radians(angle + uRotation + 45.0);
@@ -119,11 +115,19 @@ export const diamondGradientShader = `
     // resolve and clamp to the local neighborhood so no bright outliers can leak through.
     vec2 aa = max(fwidth(vUv) * 0.065, vec2(0.000045));
 
-    float t0 = sampleDiamondT(vUv);
-    float t1 = sampleDiamondT(clamp(vUv + vec2( aa.x, 0.0), 0.0, 1.0));
-    float t2 = sampleDiamondT(clamp(vUv + vec2(-aa.x, 0.0), 0.0, 1.0));
-    float t3 = sampleDiamondT(clamp(vUv + vec2(0.0,  aa.y), 0.0, 1.0));
-    float t4 = sampleDiamondT(clamp(vUv + vec2(0.0, -aa.y), 0.0, 1.0));
+    // SPRINT 3.1.0 FIX: shader-field animation is applied ONCE here, before the
+    // 5x anti-aliasing taps below — not inside sampleDiamondT, which runs 5x per
+    // pixel. The AA taps perturb around one shared animated position, which is
+    // both correct (they anti-alias the diamond edges, not the animation field)
+    // and ~5x cheaper.
+    vec2 fieldCenter = vec2(0.5) + vec2(mouseX, mouseY) * 0.08 * mouseIntensity;
+    vec2 animatedUv = applySharedAnimationField(vUv, fieldCenter, angle + uRotation, 1.0);
+
+    float t0 = sampleDiamondT(animatedUv);
+    float t1 = sampleDiamondT(clamp(animatedUv + vec2( aa.x, 0.0), 0.0, 1.0));
+    float t2 = sampleDiamondT(clamp(animatedUv + vec2(-aa.x, 0.0), 0.0, 1.0));
+    float t3 = sampleDiamondT(clamp(animatedUv + vec2(0.0,  aa.y), 0.0, 1.0));
+    float t4 = sampleDiamondT(clamp(animatedUv + vec2(0.0, -aa.y), 0.0, 1.0));
 
     float tMin = min(min(t0, t1), min(min(t2, t3), t4));
     float tMax = max(max(t0, t1), max(max(t2, t3), t4));

@@ -85,13 +85,7 @@ export const kaleidoscopeGradientShader = `
 
   float sampleKaleidoT(vec2 uvIn) {
     vec2 ctr = vec2(0.5) + vec2(mouseX, mouseY) * 0.10 * mouseIntensity;
-    // SPRINT 3.1.0: shader-field animation — previously a silent no-op (see
-    // Marble in newGradients.ts for the full explanation). This is the
-    // Kaleidoscope *gradient* type — distinct from the "kaleidoscope"
-    // *animation* type, whose facet-distortion field (applyKaleidoField) is
-    // what actually runs here when it's selected.
-    vec2 driftedUV = applySharedAnimationField(uvIn + vec2(uDriftX, uDriftY), ctr, angle + uRotation, segments);
-    vec2 p = driftedUV - ctr;
+    vec2 p = uvIn + vec2(uDriftX, uDriftY) - ctr;
     float rot = radians(angle + uRotation);
     float c = cos(rot);
     float s = sin(rot);
@@ -128,11 +122,15 @@ export const kaleidoscopeGradientShader = `
 
   void main() {
     vec2 aa = max(fwidth(vUv) * 0.16, vec2(0.00012));
-    float t0 = sampleKaleidoT(vUv);
-    float t1 = sampleKaleidoT(clamp(vUv + vec2(aa.x,  0.0),  0.0, 1.0));
-    float t2 = sampleKaleidoT(clamp(vUv + vec2(-aa.x, 0.0),  0.0, 1.0));
-    float t3 = sampleKaleidoT(clamp(vUv + vec2(0.0,   aa.y), 0.0, 1.0));
-    float t4 = sampleKaleidoT(clamp(vUv + vec2(0.0,  -aa.y), 0.0, 1.0));
+    // SPRINT 3.1.0 FIX: applied once here, not inside sampleKaleidoT (which runs
+    // 5x per pixel for AA) — see Diamond in diamondShader.ts for the full explanation.
+    vec2 fieldCenter = vec2(0.5) + vec2(mouseX, mouseY) * 0.10 * mouseIntensity;
+    vec2 animatedUV = applySharedAnimationField(vUv, fieldCenter, angle + uRotation, segments);
+    float t0 = sampleKaleidoT(animatedUV);
+    float t1 = sampleKaleidoT(clamp(animatedUV + vec2(aa.x,  0.0),  0.0, 1.0));
+    float t2 = sampleKaleidoT(clamp(animatedUV + vec2(-aa.x, 0.0),  0.0, 1.0));
+    float t3 = sampleKaleidoT(clamp(animatedUV + vec2(0.0,   aa.y), 0.0, 1.0));
+    float t4 = sampleKaleidoT(clamp(animatedUV + vec2(0.0,  -aa.y), 0.0, 1.0));
     float t  = clamp(t0 * 0.68 + (t1 + t2 + t3 + t4) * 0.08, 0.0, 1.0);
     vec3 color = getGradientColor(t) * intensity * uPulse;
     if (hasTexture > 0.5) {
