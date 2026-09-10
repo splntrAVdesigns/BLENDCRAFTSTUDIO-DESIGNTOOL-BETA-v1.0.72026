@@ -341,14 +341,18 @@ export function calculateAnimationOffset(
     // Orbital angle uses theta — eased orbital velocity (orbit speeds up/slows down).
     // Harmonics for scale/intensity stay on signedTime to preserve organic character.
     case 'drift': {
-      const a = easing === 'linear' ? signedTime * TAU : theta;
-      const t = signedTime * TAU; // harmonics on linear time — keeps organic detuning
+      // SPRINT 3.1.0 — HARMONIC RETUNE. Orbital angle and both harmonics are now
+      // integer multiples of TAU/4s, so the whole term closes exactly at the
+      // declared 4s cycle (previously the orbit silently completed a full
+      // revolution every 1s regardless of the declared cycle — see diagnostic).
+      const t = signedTime * TAU;
+      const a = easing === 'linear' ? t * 0.25 : theta; // 1 revolution per 4s
       return {
         ...base,
         xOffset: Math.cos(a) * 0.07 * i,
         yOffset: Math.sin(a) * 0.07 * i,
-        scaleOffset:  Math.sin(t * 0.7) * 0.025 * i,
-        intensityMultiplier: 1 + Math.sin(t * 1.3) * 0.06 * i,
+        scaleOffset:  Math.sin(t * 0.75) * 0.025 * i,
+        intensityMultiplier: 1 + Math.sin(t * 1.25) * 0.06 * i,
         phase01, eased01, theta, signedTime, cycleSeconds,
       };
     }
@@ -357,15 +361,19 @@ export function calculateAnimationOffset(
     // Easing applied to the slow (dominant) component only.
     // Fast harmonics (1.9x, 2.7x) stay on signedTime — preserves organic texture.
     case 'ripple': {
+      // SPRINT 3.1.0 — HARMONIC RETUNE. 0.47/0.39/1.9/2.7 Hz didn't share a
+      // common period; retuned to 0.5/0.375/1.875/2.6875 Hz — all exact
+      // integer multiples of 1/16s — so the JS ripple closes at 16s, matching
+      // the shader-field ripple retune (both are "ripple" and must agree).
       const t   = signedTime;
       const s   = easing === 'linear' ? t : eased01; // slow/primary driver
       return {
         ...base,
-        xOffset: (Math.sin(s * 0.47 * TAU) * 0.036 + Math.sin(t * 1.9 * TAU) * 0.014) * i,
-        yOffset: (Math.cos(s * 0.39 * TAU) * 0.036 + Math.cos(t * 2.7 * TAU) * 0.014) * i,
-        scaleOffset: Math.sin(t * 1.9 * TAU + 0.4) * 0.028 * i,
-        intensityMultiplier: 1 + Math.abs(Math.sin(t * 1.9 * TAU)) * 0.10 * i,
-        hueShiftOffset: Math.sin(s * 0.47 * TAU) * 5 * i,
+        xOffset: (Math.sin(s * 0.5 * TAU) * 0.036 + Math.sin(t * 1.875 * TAU) * 0.014) * i,
+        yOffset: (Math.cos(s * 0.375 * TAU) * 0.036 + Math.cos(t * 2.6875 * TAU) * 0.014) * i,
+        scaleOffset: Math.sin(t * 1.875 * TAU + 0.4) * 0.028 * i,
+        intensityMultiplier: 1 + Math.abs(Math.sin(t * 1.875 * TAU)) * 0.10 * i,
+        hueShiftOffset: Math.sin(s * 0.5 * TAU) * 5 * i,
         phase01, eased01, theta, signedTime, cycleSeconds,
       };
     }
@@ -392,13 +400,19 @@ export function calculateAnimationOffset(
     // Rotation and hue both use eased01*360 when non-linear (same as rotation).
     // Flash uses theta for easing-shaped facet pops.
     case 'kaleidoscope': {
+      // SPRINT 3.1.0 — HARMONIC RETUNE. Rotation at 54deg/s implied a 6.667s
+      // true period against a declared 4s cycle (and hue's 1.2deg/s implied
+      // ~300s) — the two components never agreed with each other or with the
+      // declared cycle. Retuned to 60deg/s (exactly 6s/turn) and 6deg/s
+      // (exactly 60s/turn) — hue now completes 1 full cycle for every 10
+      // rotation turns, so both close together at 60s exactly.
       const rotDeg = easing === 'linear'
-        ? ((signedTime * 54) % 360 + 360) % 360
+        ? ((signedTime * 60) % 360 + 360) % 360
         : eased01 * 360;
       const t = easing === 'linear' ? signedTime * TAU : theta;
       const flash = Math.pow(Math.abs(Math.sin(t * 2.0)), 8.0);
       const hue   = easing === 'linear'
-        ? ((signedTime * 1.2) % 360 + 360) % 360
+        ? ((signedTime * 6) % 360 + 360) % 360
         : eased01 * 360;
       return {
         ...base,
@@ -493,17 +507,22 @@ export function calculateAnimationOffset(
     //   value. Now maps eased01 (triangle01 for pingPong = smooth 0->1->0) to a
     //   +-cycleSeconds range — fully continuous, no discontinuity, easing-aware.
     case 'liquid': {
+      // SPRINT 3.1.0 — HARMONIC RETUNE. 0.17/0.31/0.53/0.23/0.41 Hz shared no
+      // common period with the declared cycle. Retuned to 0.125/0.25/0.5/
+      // 0.25/0.375 Hz — integer multiples of 1/8s — so Liquid's hue+glow
+      // overlay closes at the same 8s true period as the Morph shader field
+      // it renders on top of (uAnimType maps 'liquid' to applyMorphField).
       const t = signedTime;
       const morphT = (direction === 'pingPong')
         ? (eased01 * 2 - 1) * cycleSeconds   // smooth bidirectional, easing-aware
         : t;                                   // forward/reverse: use signedTime
 
-      const hueDrift = Math.sin(morphT * 0.17 * TAU) * 14
-                     + Math.sin(morphT * 0.31 * TAU) *  8
-                     + Math.sin(morphT * 0.53 * TAU) *  3;
+      const hueDrift = Math.sin(morphT * 0.125 * TAU) * 14
+                     + Math.sin(morphT * 0.25 * TAU) *  8
+                     + Math.sin(morphT * 0.5 * TAU) *  3;
 
-      const glow = 1 + Math.sin(t * 0.23 * TAU) * 0.06 * i
-                     + Math.sin(t * 0.41 * TAU) * 0.03 * i;
+      const glow = 1 + Math.sin(t * 0.25 * TAU) * 0.06 * i
+                     + Math.sin(t * 0.375 * TAU) * 0.03 * i;
 
       return {
         ...base,
@@ -552,11 +571,13 @@ export function calculateAnimationOffset(
     }
 
     case 'morph': {
+      // SPRINT 3.1.0 — HARMONIC RETUNE. 0.7/0.9 Hz retuned to 0.75/0.875 Hz —
+      // integer multiples of 1/8s — closes at 8s with the shader field below.
       const t = easing === 'linear' ? signedTime * TAU : theta;
       return {
         ...base,
-        xOffset: Math.sin(t * 0.7) * 0.025 * i,
-        yOffset: Math.cos(t * 0.9) * 0.025 * i,
+        xOffset: Math.sin(t * 0.75) * 0.025 * i,
+        yOffset: Math.cos(t * 0.875) * 0.025 * i,
         scaleOffset: Math.sin(t * 0.5) * 0.03 * i,
         intensityMultiplier: 1 + 0.08 * Math.sin(t) * i,
         phase01, eased01, theta, signedTime, cycleSeconds,
@@ -573,12 +594,15 @@ export function calculateAnimationOffset(
     }
 
     case 'turbulence': {
+      // SPRINT 3.1.0 — HARMONIC RETUNE. 1.3/1.1/0.7 Hz retuned to 14/11,
+      // 12/11, 8/11 Hz — integer multiples of 1/11s — closes at 11s with the
+      // shader field below. 2.0 Hz already fit (22/11) — unchanged.
       const t = easing === 'linear' ? signedTime * TAU : theta;
       return {
         ...base,
-        xOffset: 0.012 * Math.sin(t * 1.3) * i,
-        yOffset: 0.012 * Math.cos(t * 1.1) * i,
-        scaleOffset: 0.015 * Math.sin(t * 0.7) * i,
+        xOffset: 0.012 * Math.sin(t * (14 / 11)) * i,
+        yOffset: 0.012 * Math.cos(t * (12 / 11)) * i,
+        scaleOffset: 0.015 * Math.sin(t * (8 / 11)) * i,
         intensityMultiplier: 1 + 0.06 * Math.sin(t * 2.0) * i,
         phase01, eased01, theta, signedTime, cycleSeconds,
       };

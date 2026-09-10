@@ -1,4 +1,5 @@
 import { SHARED_FUNCTIONS } from './gradientShaders';
+import { SHARED_ANIMATION_HELPERS } from './animationHelpers';
 
 // PLASMA GRADIENT SHADER
 // Creates flowing, psychedelic interference patterns using multiple sine wave combinations
@@ -70,9 +71,19 @@ export const plasmaGradientShader = `
   // in WebGL (GLSL ES 1.00 / 3.00) and produce a completely black shader output.
   // This was the root cause of Plasma rendering as a black canvas.
 
+  // SPRINT 3.1.0: shader-driven animation uniforms — Plasma had none of
+  // these before, so Wave/Morph/Liquid/Vortex/Kaleidoscope/FractalZoom/
+  // Turbulence/Ripple were a complete no-op.
+  uniform float uAnimPhase;
+  uniform float uAnimEased;
+  uniform float uAnimTime;
+  uniform float uAnimIntensity;
+  uniform float uAnimType;
+
   varying vec2 vUv;
   
   ${SHARED_FUNCTIONS}
+  ${SHARED_ANIMATION_HELPERS}
 
   // Smooth interpolation between colors
   vec3 getGradientColor(float t) {
@@ -109,6 +120,9 @@ export const plasmaGradientShader = `
       animatedUV.x += noise(animatedUV * 5.0 + time) * uTurbulence * 0.05;
       animatedUV.y += noise(animatedUV * 5.0 - time) * uTurbulence * 0.05;
     }
+
+    // SPRINT 3.1.0: shader-field animation — previously impossible, see above.
+    animatedUV = applySharedAnimationField(animatedUV, vec2(0.5), angle, 1.0);
     
     // Center coordinates around (0, 0)
     vec2 centered = (animatedUV - 0.5) * 2.0;

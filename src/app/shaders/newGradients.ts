@@ -122,6 +122,12 @@ export const marbleGradientShader = `
       animatedUV.x += noise(animatedUV * 5.0 + time) * uTurbulence * 0.05;
       animatedUV.y += noise(animatedUV * 5.0 - time) * uTurbulence * 0.05;
     }
+
+    // SPRINT 3.1.0: shader-field animation (Wave/Morph/Liquid/Vortex/Kaleidoscope/
+    // FractalZoom/Turbulence/Ripple) — previously the uniforms were declared and
+    // the helpers imported but never invoked, so these animation types were a
+    // silent no-op on Marble.
+    animatedUV = applySharedAnimationField(animatedUV, vec2(0.5), angle, 1.0);
     
     // Center coordinates
     vec2 centered = (animatedUV - 0.5) * 2.0;
@@ -309,6 +315,9 @@ export const concentricGradientShader = `
       animatedUV.y += noise(animatedUV * 5.0 - time) * uTurbulence * 0.05;
     }
     
+    // SPRINT 3.1.0: shader-field animation — previously a silent no-op (see Marble).
+    animatedUV = applySharedAnimationField(animatedUV, center, angle, 1.0);
+
     // Apply mouse interaction to center
     vec2 interactiveCenter = center + vec2(mouseX, mouseY) * 0.5 * mouseIntensity;
 
@@ -488,6 +497,9 @@ export const radialWavesGradientShader = `
     
     // Use centerX and centerY for main wave origin
     vec2 mainCenter = vec2(centerX, centerY);
+
+    // SPRINT 3.1.0: shader-field animation — previously a silent no-op (see Marble).
+    animatedUV = applySharedAnimationField(animatedUV, mainCenter, angle, 1.0);
 
     // Apply rotation (angle slider + animation uRotation) around the wave center
     float totalRotation = radians(angle + uRotation);
@@ -685,6 +697,9 @@ export const mandalaGradientShader = `
       animatedUV.y += noise(animatedUV * 5.0 - time) * uTurbulence * 0.05;
     }
     
+    // SPRINT 3.1.0: shader-field animation — previously a silent no-op (see Marble).
+    animatedUV = applySharedAnimationField(animatedUV, vec2(0.5), angle, float(segments));
+
     // Center coordinates
     vec2 centered = (animatedUV - 0.5) * 2.0;
     
@@ -867,6 +882,8 @@ export const starburstGradientShader = `
   }
 
   float sampleStarburstT(vec2 uvIn) {
+    // SPRINT 3.1.0: shader-field animation — previously a silent no-op (see Marble).
+    uvIn = applySharedAnimationField(uvIn, center, angle, float(segments));
     vec2 d = uvIn - center;
     float dist = length(d);
     float theta = atan(d.y, d.x) + radians(angle + uRotation);
@@ -1021,6 +1038,9 @@ export const fourCornersGradientShader = `
       uv.x += noise(uv * 5.0 + time) * uTurbulence * 0.05;
       uv.y += noise(uv * 5.0 - time) * uTurbulence * 0.05;
     }
+
+    // SPRINT 3.1.0: shader-field animation — previously a silent no-op (see Marble).
+    uv = applySharedAnimationField(uv, center, angle, 1.0);
 
     // Apply scale (zoom from center) - do this BEFORE rotation
     vec2 scaledUV = (uv - center) / (scale * uScale) + center;

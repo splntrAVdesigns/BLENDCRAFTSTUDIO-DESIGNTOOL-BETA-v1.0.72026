@@ -1,4 +1,5 @@
 import { SHARED_FUNCTIONS } from './gradientShaders';
+import { SHARED_ANIMATION_HELPERS } from './animationHelpers';
 
 // Diamond gradient shader - restore clean diamond lattice with full-pattern twist
 export const diamondGradientShader = `
@@ -46,8 +47,19 @@ export const diamondGradientShader = `
   uniform float mouseIntensity;
   uniform sampler2D uDisplacementMap;
   uniform float uDisplacementStrength;
+
+  // SPRINT 3.1.0: shader-driven animation uniforms — Diamond had none of
+  // these before, so Wave/Morph/Liquid/Vortex/Kaleidoscope/FractalZoom/
+  // Turbulence/Ripple were a complete no-op regardless of gradient content.
+  uniform float uAnimPhase;
+  uniform float uAnimEased;
+  uniform float uAnimTime;
+  uniform float uAnimIntensity;
+  uniform float uAnimType;
+
   varying vec2 vUv;
   ${SHARED_FUNCTIONS}
+  ${SHARED_ANIMATION_HELPERS}
 
   vec3 getGradientColor(float t) {
     t = clamp(t, 0.0, 1.0);
@@ -67,6 +79,10 @@ export const diamondGradientShader = `
     uv += vec2(uDriftX, uDriftY);
 
     vec2 center = vec2(0.5) + vec2(mouseX, mouseY) * 0.08 * mouseIntensity;
+
+    // SPRINT 3.1.0: shader-field animation — previously impossible, see above.
+    uv = applySharedAnimationField(uv, center, angle + uRotation, 1.0);
+
     vec2 p = uv - center;
 
     float rot = radians(angle + uRotation + 45.0);

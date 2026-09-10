@@ -10,6 +10,7 @@ import { Layer, InteractionState, CanvasSettings, LayerTransformState, GradientC
 import { EffectsConfig, SpatialStageId } from '../controls/EffectsControls';
 import { renderGradientLayer, getAnimationTypeValue } from '../../utils/gradientRenderer';
 import { calculateAnimationOffset, applyEasing, estimateCycleTime } from '../../hooks/useLayerAnimations';
+import { SHADER_ANIM_TYPE_MAP } from '../../animation/shaderAnimTypeMap';
 import { getAudioDeltasForLayer, tickAudioFrame, getGlobalAudioDeltas, tickAudioExportFrame } from '../../audio/audioReactiveRender';
 import { bakeEnvelope, clearBakedEnvelope, getBakedInfo } from '../../audio/envelopeBaker';
 import { getDecodedAudioBuffer } from '../../audio/audioEngine';
@@ -419,15 +420,9 @@ interface GradientCanvasProps {
  * Frozen so an accidental write is a loud failure rather than a silent
  * cross-frame mutation.
  */
-const SHADER_ANIM_TYPE_MAP: Readonly<Record<string, number>> = Object.freeze({
-  wave:        1.0,  // applyWaveField — travelling wave sheet
-  morph:       2.0,  // applyMorphField — organic UV morphing
-  liquid:      2.0,  // applyMorphField — liquid uses morph UV field
-  vortex:      3.0,  // applyVortexField — spiral whirlpool swirl
-  fractalZoom: 5.0,  // applyFractalZoomField — recursive zoom texture
-  turbulence:  6.0,  // applyTurbulenceField — multi-freq liquid chaos
-  ripple:      7.0,  // applyRippleField — chaotic multi-source ripples
-});
+// SPRINT 3.1.0: SHADER_ANIM_TYPE_MAP now lives in '../../animation/shaderAnimTypeMap'
+// as the single source of truth shared with the export render loop below —
+// see that module for why, and for the newly-activated 'kaleidoscope' entry.
 
 export const GradientCanvas = memo(function GradientCanvas({
   layers,
@@ -4895,16 +4890,10 @@ export const GradientCanvas = memo(function GradientCanvas({
           material.uniforms.uAnimIntensity.value = layer.animation.intensity;
         }
         if (material.uniforms.uAnimType) {
-          const shaderAnimTypeMap: Record<string, number> = {
-            wave:        1.0,
-            morph:       2.0,
-            liquid:      2.0,
-            vortex:      3.0,
-            fractalZoom: 5.0,
-            turbulence:  6.0,
-            ripple:      7.0,
-          };
-          material.uniforms.uAnimType.value = shaderAnimTypeMap[layer.animation.type] ?? 0.0;
+          // SPRINT 3.1.0: was a hand-duplicated, per-frame-reallocated literal —
+          // now the same module-scope constant the preview loop uses, so the two
+          // paths cannot silently diverge again, and the allocation is gone.
+          material.uniforms.uAnimType.value = SHADER_ANIM_TYPE_MAP[layer.animation.type] ?? 0.0;
         }
       }
     });

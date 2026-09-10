@@ -85,7 +85,13 @@ export const kaleidoscopeGradientShader = `
 
   float sampleKaleidoT(vec2 uvIn) {
     vec2 ctr = vec2(0.5) + vec2(mouseX, mouseY) * 0.10 * mouseIntensity;
-    vec2 p = uvIn + vec2(uDriftX, uDriftY) - ctr;
+    // SPRINT 3.1.0: shader-field animation — previously a silent no-op (see
+    // Marble in newGradients.ts for the full explanation). This is the
+    // Kaleidoscope *gradient* type — distinct from the "kaleidoscope"
+    // *animation* type, whose facet-distortion field (applyKaleidoField) is
+    // what actually runs here when it's selected.
+    vec2 driftedUV = applySharedAnimationField(uvIn + vec2(uDriftX, uDriftY), ctr, angle + uRotation, segments);
+    vec2 p = driftedUV - ctr;
     float rot = radians(angle + uRotation);
     float c = cos(rot);
     float s = sin(rot);
