@@ -9,17 +9,19 @@
  * itself. That reuse is the whole point of adding them as sources: everything
  * 3.0.3 built (curves, envelopes, targets, per-layer scope) applies unchanged.
  *
- * ── SPRINT 2.9 LAYOUT ─────────────────────────────────────────────────────
- * Every control here is stacked (label above, control below) instead of
- * label-left/control-right — that's what lets BPM, LFO, and Mapping each
- * get their own narrower column in AudioReactivePanel.tsx without anything
- * getting squeezed. Sprint 2.8 pulled the phase meters into one shared row
- * spanning two of the three columns, which fixed vertical alignment but
- * added a whole extra row of height and left the third column short — the
- * actual complaint. That shared row is gone: each meter is back under its
- * own section's header line, and they land in the same visual row because
- * both sit at the same consistent first position in same-height columns,
- * not because they're one shared component.
+ * ── SPRINT 2.10 LAYOUT ────────────────────────────────────────────────────
+ * Sprint 2.9 stacked every control here (label above, control below) to
+ * match a mockup — but the mockup's stacking was illustrative of the
+ * COLUMN split (BPM/LFO/Mapping each getting their own section), not a
+ * literal instruction to stack every label above every dropdown and
+ * slider. That over-application is what made the panel taller, not
+ * shorter. Reverted: Shape/Sync/Per-beat/Rate/Cycles are back to
+ * inline label-left/control-right, one line each, matching how every
+ * other control in this panel already works. The phase meter stays under
+ * each section's own header line (that part of 2.9 was correct — it's
+ * what fixed the meters landing at different heights), and Tap
+ * tempo/Sync anim stay full-width stacked buttons since a button has no
+ * separate label to misalign in the first place.
  */
 
 import { useEffect, useState } from 'react';
@@ -143,12 +145,12 @@ export function LFOControls() {
       </div>
       <PhaseIndicator phase={lfoPhase} active={lfo.enabled} />
 
-      <div className="space-y-0.5">
-        <span className="text-[9px] text-zinc-500">Shape</span>
+      <div className="flex items-center gap-1">
+        <span className="w-10 flex-shrink-0 text-[9px] text-zinc-500">Shape</span>
         <select
           value={lfo.shape}
           onChange={(e) => updateLFO({ shape: e.target.value as never })}
-          className="w-full rounded bg-zinc-800 px-1.5 py-1 text-[10px] text-zinc-300 outline-none"
+          className="min-w-0 flex-1 rounded bg-zinc-800 px-1 py-0.5 text-[10px] text-zinc-300 outline-none"
         >
           {WAVEFORM_SHAPES.map((w) => (
             <option key={w.id} value={w.id}>{w.label}</option>
@@ -156,12 +158,12 @@ export function LFOControls() {
         </select>
       </div>
 
-      <div className="space-y-0.5">
-        <span className="text-[9px] text-zinc-500">Sync</span>
+      <div className="flex items-center gap-1">
+        <span className="w-10 flex-shrink-0 text-[9px] text-zinc-500">Sync</span>
         <select
           value={lfo.syncMode}
           onChange={(e) => updateLFO({ syncMode: e.target.value as never })}
-          className="w-full rounded bg-zinc-800 px-1.5 py-1 text-[10px] text-zinc-300 outline-none"
+          className="min-w-0 flex-1 rounded bg-zinc-800 px-1 py-0.5 text-[10px] text-zinc-300 outline-none"
         >
           <option value="bpm">BPM-locked</option>
           <option value="free">Free (Hz)</option>
@@ -201,18 +203,18 @@ function RateRow({
   onChange: (v: number) => void;
 }) {
   return (
-    <div className="space-y-0.5">
-      <div className="flex items-center justify-between">
-        <span className="text-[9px] text-zinc-500">{label}</span>
-        <span className="text-[9px] tabular-nums text-zinc-600">{format(value)}</span>
-      </div>
+    <div className="flex items-center gap-1">
+      <span className="w-10 flex-shrink-0 text-[9px] text-zinc-500">{label}</span>
       <input
         type="range"
         min={min} max={max} step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="h-1 w-full cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500"
+        className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500"
       />
+      <span className="w-9 flex-shrink-0 text-right text-[9px] tabular-nums text-zinc-600">
+        {format(value)}
+      </span>
     </div>
   );
 }

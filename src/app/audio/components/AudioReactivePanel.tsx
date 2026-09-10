@@ -105,7 +105,7 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
 
   return (
     <div className={`pointer-events-auto absolute bottom-4 left-4 z-30 ${
-      collapsed ? 'w-auto' : 'w-[1280px] max-w-[calc(100%-2rem)]'
+      collapsed ? 'w-auto' : 'w-fit max-w-[calc(100%-2rem)]'
     }`}>
       <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/95 shadow-2xl backdrop-blur-sm">
         {/* Header */}
@@ -146,9 +146,14 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
 
         {!collapsed && (
         <>
-        {/* Four columns. Explicit widths so the routing sliders can't be
-            squeezed off the edge as they were in 3.0.2. */}
-        <div className="grid grid-cols-[152px_92px_minmax(0,400px)_minmax(0,1fr)] divide-x divide-zinc-800">
+        {/* Six columns: Source, Levels, Routing, then BPM/LFO/Mapping as
+            genuine top-level sections (no "Precision & Specialty" wrapper —
+            that was a redundant header once each of the three has its own).
+            `items-start` matters here: without it, CSS Grid's default
+            `stretch` forces every column to the height of the tallest one
+            (usually Routing), which is what left visible empty space at
+            the bottom of every shorter column. */}
+        <div className="grid grid-cols-[152px_92px_minmax(0,400px)_120px_140px_140px] items-start divide-x divide-zinc-800">
           {/* ── SOURCE ── */}
           <div className="space-y-2 px-2.5 py-1.5">
             <SectionLabel>Source</SectionLabel>
@@ -334,36 +339,31 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
               to spare, so the two go SIDE BY SIDE instead: Beat/LFO on the
               left, the selected mapping's controls on the right. Height drops
               back to the 3.0.3 profile. */}
-          {/* ── PRECISION & SPECIALTY — three even columns ──
-              Sprint 2.9: BPM | LFO | Mapping, each stacked (label above,
-              control below) instead of label-left/control-right — that's
-              what makes three genuinely separate columns fit without
-              anything getting squeezed. Replaces Sprint 2.8's shared
-              phase-meter row (which fixed alignment by adding a whole
-              extra row of height and leaving the third column short) —
-              each meter is back under its own section's header line now,
-              and they land in the same row because both columns are the
-              same height by construction, not because of a shared row. */}
+          {/* ── BPM / LFO / MAPPING — three top-level columns ──
+              Sprint 2.10: no more "Precision & Specialty" wrapper around
+              these three — BPM and LFO already render their own header
+              line internally, and Mapping gets one directly below, so a
+              wrapper label above all three was purely redundant. Each is
+              its own top-level grid column now (matching Source/Levels/
+              Routing's treatment) rather than a nested 3-column grid
+              inside a single wrapped column — that nesting was part of
+              what made 2.9's version read as more boxed-in than it
+              needed to be. */}
           <div className="px-2.5 py-1.5">
-            <SectionLabel>Precision &amp; Specialty</SectionLabel>
-            <div className="mt-1.5 grid grid-cols-3 gap-x-3">
-              <div className="pr-1">
-                <BeatControls />
-              </div>
-              <div className="border-l border-zinc-800 pl-3 pr-1">
-                <LFOControls />
-              </div>
-              <div className="border-l border-zinc-800 pl-3">
-                <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-500">
-                  Mapping
-                </div>
-                {selected ? (
-                  <PrecisionControls mapping={selected} />
-                ) : (
-                  <p className="text-[10px] text-zinc-600">Select a routing row to tune it.</p>
-                )}
-              </div>
+            <BeatControls />
+          </div>
+          <div className="px-2.5 py-1.5">
+            <LFOControls />
+          </div>
+          <div className="px-2.5 py-1.5">
+            <div className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-500">
+              Mapping
             </div>
+            {selected ? (
+              <PrecisionControls mapping={selected} />
+            ) : (
+              <p className="text-[10px] text-zinc-600">Select a routing row to tune it.</p>
+            )}
           </div>
         </div>
         </>
@@ -449,12 +449,12 @@ function PrecisionControls({ mapping }: { mapping: AudioMapping }) {
   // them and was part of what made this column tall. This is controls only.
   return (
     <div className="space-y-1.5">
-      <div className="space-y-0.5">
-        <span className="text-[9px] text-zinc-500">Curve</span>
+      <div className="flex items-center gap-1">
+        <span className="w-12 flex-shrink-0 text-[9px] text-zinc-500">Curve</span>
         <select
           value={mapping.curve}
           onChange={(e) => updateMapping(mapping.id, { curve: e.target.value as never })}
-          className="w-full rounded bg-zinc-800 px-1.5 py-1 text-[10px] text-zinc-300 outline-none"
+          className="min-w-0 flex-1 rounded bg-zinc-800 px-1 py-0.5 text-[10px] text-zinc-300 outline-none"
         >
           <option value="exponential">Exponential</option>
           <option value="linear">Linear</option>
@@ -500,18 +500,18 @@ function Knob({
   onChange: (v: number) => void;
 }) {
   return (
-    <div className="space-y-0.5">
-      <div className="flex items-center justify-between">
-        <span className="text-[9px] text-zinc-500">{label}</span>
-        <span className="text-[9px] tabular-nums text-zinc-600">{format(value)}</span>
-      </div>
+    <div className="flex items-center gap-1">
+      <span className="w-12 flex-shrink-0 text-[9px] text-zinc-500">{label}</span>
       <input
         type="range"
         min={min} max={max} step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="h-1 w-full cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500"
+        className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500"
       />
+      <span className="w-9 flex-shrink-0 text-right text-[9px] tabular-nums text-zinc-600">
+        {format(value)}
+      </span>
     </div>
   );
 }
