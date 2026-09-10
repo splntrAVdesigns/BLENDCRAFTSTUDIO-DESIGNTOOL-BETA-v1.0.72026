@@ -726,4 +726,4 @@ function AppContent({ onCanvasReady }: { onCanvasReady?: () => void }) {
       )}
     </div>
   );
-}  
+}   
