@@ -324,7 +324,7 @@ export function AudioReactivePanel({ isPlaying }: AudioReactivePanelProps) {
                       max={100}
                       value={Math.round(m.amount * 100)}
                       onChange={(e) => updateMapping(m.id, { amount: Number(e.target.value) / 100 })}
-                      className="h-1 w-full cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500"
+                      className="h-1 w-full cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-blue-500 [&::-moz-range-thumb]:h-2.5 [&::-moz-range-thumb]:w-2.5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-none [&::-moz-range-thumb]:bg-blue-500"
                       title={`Amount ${Math.round(m.amount * 100)}%`}
                     />
                   </div>
@@ -500,18 +500,20 @@ function Knob({
   onChange: (v: number) => void;
 }) {
   return (
-    <div className="flex items-center gap-1">
-      <span className="w-12 flex-shrink-0 text-[9px] text-zinc-500">{label}</span>
-      <input
-        type="range"
-        min={min} max={max} step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500"
-      />
-      <span className="w-9 flex-shrink-0 text-right text-[9px] tabular-nums text-zinc-600">
-        {format(value)}
-      </span>
+    <div className="space-y-0.5">
+      <span className="text-[9px] text-zinc-500">{label}</span>
+      <div className="flex items-center gap-1">
+        <input
+          type="range"
+          min={min} max={max} step={step}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full bg-zinc-700 accent-blue-500 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-blue-500 [&::-moz-range-thumb]:h-2.5 [&::-moz-range-thumb]:w-2.5 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-none [&::-moz-range-thumb]:bg-blue-500"
+        />
+        <span className="w-9 flex-shrink-0 text-right text-[9px] tabular-nums text-zinc-600">
+          {format(value)}
+        </span>
+      </div>
     </div>
   );
 }
