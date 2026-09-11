@@ -246,6 +246,10 @@ export interface AnimationConfig {
   easing: EasingType;
   direction: AnimationDirection;
   resetCounter?: number; // Increments to trigger animation reset to t=0
+  // SPRINT 3.1.2: Glitch-only controls. Optional/defaulted so every other
+  // animation type and every existing saved project is unaffected.
+  glitchSeed?: number;   // 0-1, shifts the whole hash sequence — a different tear layout
+  glitchChaos?: number;  // 0-1, 0=sparse/chunky tearing, 1=dense/aggressive
 }
 
 // Animation evaluation result - extended with phase data for shader-driven animations

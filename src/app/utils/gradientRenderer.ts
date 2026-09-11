@@ -270,6 +270,10 @@ function createGradientMaterial(
     uAnimTime: { value: 0.0 }, // Signed unbounded time
     uAnimIntensity: { value: 0.0 }, // Animation intensity
     uAnimType: { value: 0.0 }, // Animation type ID (0=none, 1=wave, 2=morph, 3=vortex, etc.)
+    // SPRINT 3.1.2: Glitch-only controls — harmless defaults for every other
+    // animation type, since applyGlitchField only runs when uAnimType===8.
+    uGlitchSeed: { value: 0.5 },
+    uGlitchChaos: { value: 0.5 },
     // PHASE 7.3E.10: normalized export-loop authority. Preview remains unchanged.
     uExportLoopEnabled: { value: 0.0 },
     uExportLoopPhase: { value: 0.0 },

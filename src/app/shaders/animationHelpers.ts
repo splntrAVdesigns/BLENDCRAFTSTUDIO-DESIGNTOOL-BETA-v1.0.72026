@@ -7,6 +7,11 @@
 export const SHARED_ANIMATION_HELPERS = `
   const float TAU = 6.28318530718;
 
+  // SPRINT 3.1.2: Glitch-only controls, declared here (not per-shader) since
+  // this block is injected into every gradient shader already.
+  uniform float uGlitchSeed;
+  uniform float uGlitchChaos;
+
   float animClamp01(float v) {
     return clamp(v, 0.0, 1.0);
   }
@@ -372,29 +377,32 @@ export const SHARED_ANIMATION_HELPERS = `
   // now lives: bands of the image intermittently tear sideways as if a
   // corrupted motion vector displaced that block, the way real datamosh
   // artifacts look.
+  // SPRINT 3.1.2: added uGlitchSeed (shifts the entire hash sequence, so
+  // toggling to a new seed — or two layers with different seeds — tear in a
+  // different pattern each time, instead of the identical layout every time)
+  // and uGlitchChaos (0 = sparse/chunky tearing, 1 = dense/aggressive).
+  // Defaults (seed baseline, chaos=0.5) reproduce the original fixed-constant
+  // behaviour almost exactly, so existing projects don't visibly jump.
   vec2 applyGlitchField(vec2 uv, vec2 center) {
     float t = uAnimTime;
+    float seed = uGlitchSeed * 97.0;
+    float chaos = clamp(uGlitchChaos, 0.0, 1.0);
 
-    // Discrete glitch-frame clock — a new random state roughly 12x per
-    // second at uAnimIntensity's baseline rate, independent of the smooth
-    // per-render-frame clock everything else uses.
     float glitchFrame = floor(t * 12.0);
+    float activeThreshold = mix(0.85, 0.35, chaos);
+    float isActive = step(activeThreshold, hash11(glitchFrame * 3.71 + seed));
 
-    // Bursty, not constant: most glitch-frames do nothing at all.
-    float isActive = step(0.62, hash11(glitchFrame * 3.71));
-
-    // Horizontal block bands — each band this glitch-frame either holds
-    // still or tears sideways by its own random offset.
-    float bandCount = 5.0 + floor(hash11(glitchFrame * 1.19) * 6.0); // 5-10 bands
+    float bandCount = 3.0 + floor(hash11(glitchFrame * 1.19 + seed) * mix(4.0, 14.0, chaos));
     float bandIndex = floor((uv.y - center.y + 0.5) * bandCount);
-    float bandSeed = hash11(bandIndex * 7.13 + glitchFrame * 2.63);
-    float bandActive = step(0.55, bandSeed);
-    float shear = (hash11(bandIndex * 3.31 + glitchFrame * 4.09) - 0.5) * 0.14;
+    float bandSeed = hash11(bandIndex * 7.13 + glitchFrame * 2.63 + seed);
+    float bandThreshold = mix(0.75, 0.35, chaos);
+    float bandActive = step(bandThreshold, bandSeed);
+    float shearAmp = mix(0.06, 0.20, chaos);
+    float shear = (hash11(bandIndex * 3.31 + glitchFrame * 4.09 + seed) - 0.5) * shearAmp;
 
-    // Rarer, larger "stale macroblock" jump — reads as a whole corrupted
-    // block rather than a torn scanline.
-    float blockJump = step(0.93, hash11(glitchFrame * 5.53)) *
-      (hash11(glitchFrame * 6.91) - 0.5) * 0.30;
+    float jumpAmp = mix(0.14, 0.40, chaos);
+    float blockJump = step(0.93, hash11(glitchFrame * 5.53 + seed)) *
+      (hash11(glitchFrame * 6.91 + seed) - 0.5) * jumpAmp;
 
     float xOffset = (shear * bandActive + blockJump) * isActive * uAnimIntensity;
 

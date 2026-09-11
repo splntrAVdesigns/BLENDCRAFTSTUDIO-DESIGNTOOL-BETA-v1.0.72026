@@ -3560,6 +3560,13 @@ export const GradientCanvas = memo(function GradientCanvas({
             // is a plain lookup. Removes one allocation per layer per frame.
             material.uniforms.uAnimType.value = SHADER_ANIM_TYPE_MAP[layer.animation.type] ?? 0.0;
           }
+          // SPRINT 3.1.2: Glitch-only controls — no-ops for every other type.
+          if (material.uniforms.uGlitchSeed) {
+            material.uniforms.uGlitchSeed.value = layer.animation.glitchSeed ?? 0.5;
+          }
+          if (material.uniforms.uGlitchChaos) {
+            material.uniforms.uGlitchChaos.value = layer.animation.glitchChaos ?? 0.5;
+          }
         });
       }
 
@@ -4894,6 +4901,13 @@ export const GradientCanvas = memo(function GradientCanvas({
           // now the same module-scope constant the preview loop uses, so the two
           // paths cannot silently diverge again, and the allocation is gone.
           material.uniforms.uAnimType.value = SHADER_ANIM_TYPE_MAP[layer.animation.type] ?? 0.0;
+        }
+        // SPRINT 3.1.2: Glitch-only controls — no-ops for every other type.
+        if (material.uniforms.uGlitchSeed) {
+          material.uniforms.uGlitchSeed.value = layer.animation.glitchSeed ?? 0.5;
+        }
+        if (material.uniforms.uGlitchChaos) {
+          material.uniforms.uGlitchChaos.value = layer.animation.glitchChaos ?? 0.5;
         }
       }
     });

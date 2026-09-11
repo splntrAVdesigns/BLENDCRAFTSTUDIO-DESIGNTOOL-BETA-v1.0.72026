@@ -7,7 +7,7 @@ import { SelectWrapper } from '../ui/select-wrapper';
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '../ui/accordion';
 import { AnimationPresetsPanel } from './AnimationPresetsPanel';
 import { memo, useMemo, useState, useEffect } from 'react';
-import { RotateCcw } from 'lucide-react';
+import { RotateCcw, Shuffle } from 'lucide-react';
 import { toast } from 'sonner';
 import type { AnimationConfig, AnimationType, EasingType, AnimationDirection } from '../../types/gradient';
 
@@ -44,6 +44,9 @@ export const AnimationControls = memo(function AnimationControls({
   // 🔥 LOCAL STATE FOR SLIDERS (COMMIT-BASED PATTERN)
   const [localSpeed, setLocalSpeed] = useState(safeAnimation.speed);
   const [localIntensity, setLocalIntensity] = useState(safeAnimation.intensity);
+  // SPRINT 3.1.2: Glitch-only controls, same commit pattern.
+  const [localGlitchSeed, setLocalGlitchSeed] = useState(safeAnimation.glitchSeed ?? 0.5);
+  const [localGlitchChaos, setLocalGlitchChaos] = useState(safeAnimation.glitchChaos ?? 0.5);
 
   // Sync local state when props change (from external updates)
   useEffect(() => {
@@ -53,6 +56,14 @@ export const AnimationControls = memo(function AnimationControls({
   useEffect(() => {
     setLocalIntensity(safeAnimation.intensity);
   }, [safeAnimation.intensity]);
+
+  useEffect(() => {
+    setLocalGlitchSeed(safeAnimation.glitchSeed ?? 0.5);
+  }, [safeAnimation.glitchSeed]);
+
+  useEffect(() => {
+    setLocalGlitchChaos(safeAnimation.glitchChaos ?? 0.5);
+  }, [safeAnimation.glitchChaos]);
 
   const updateAnimation = (updates: Partial<AnimationConfig>) => {
     onChange({ ...safeAnimation, ...updates });
@@ -68,17 +79,34 @@ export const AnimationControls = memo(function AnimationControls({
     onEndDrag?.();
   };
 
+  const commitGlitchSeed = (value: number) => {
+    updateAnimation({ glitchSeed: value });
+    onEndDrag?.();
+  };
+
+  const commitGlitchChaos = (value: number) => {
+    updateAnimation({ glitchChaos: value });
+    onEndDrag?.();
+  };
+
+  const shuffleGlitchSeed = () => {
+    const next = Math.random();
+    setLocalGlitchSeed(next);
+    updateAnimation({ glitchSeed: next });
+    toast.success('New glitch pattern', { duration: 1200 });
+  };
+
   const animationTypes: { value: AnimationType; label: string; description: string }[] = [
     { value: 'rotation', label: 'Rotation', description: 'Spin continuously' },
     { value: 'pulse', label: 'Pulse', description: 'Breathe in/out' },
-    { value: 'wave', label: 'Wave', description: 'Flow motion' },
-    { value: 'morph', label: 'Morph', description: 'Blend colors' },
-    { value: 'drift', label: 'Drift', description: 'Drift & rotate' },
+    { value: 'wave', label: 'Wave', description: 'Travelling sheet sweep' },
+    { value: 'morph', label: 'Morph', description: 'Liquid blob warp' },
+    { value: 'drift', label: 'Drift', description: 'Circular orbit' },
     { value: 'scale', label: 'Scale', description: 'Zoom in/out' },
     { value: 'turbulence', label: 'Turbulence', description: 'Chaotic organic' },
-    { value: 'glitch', label: 'Glitch', description: 'Digital corruption' },
+    { value: 'glitch', label: 'Glitch', description: 'Digital datamosh tear' },
     { value: 'hueShift', label: 'Hue Shift', description: 'Color rotation' },
-    { value: 'ripple', label: 'Ripple', description: 'Erratic waves' },
+    { value: 'ripple', label: 'Ripple', description: 'Expanding rings' },
     { value: 'dualShifter', label: 'Dual Shifter', description: 'Frame shift w/ vortex' },
     { value: 'vortex', label: 'Vortex', description: 'Spiral swirl' },
     { value: 'kaleidoscope', label: 'Kaleidoscope', description: 'Spinning gem rotation' },
@@ -203,13 +231,63 @@ export const AnimationControls = memo(function AnimationControls({
       </div>
       )}
 
-      {/* Glitch note — shown instead of easing/direction */}
+      {/* Glitch controls — shown instead of easing/direction */}
       {safeAnimation.type === 'glitch' && (
-        <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800">
-          <p className="text-[10px] text-zinc-500">
-            Glitch uses pseudo-random bucket timing — easing and direction don't apply to this type.
-          </p>
-        </div>
+        <>
+          <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800">
+            <p className="text-[10px] text-zinc-500">
+              Glitch uses pseudo-random bucket timing — easing and direction don't apply to this type.
+            </p>
+          </div>
+
+          {/* SPRINT 3.1.2: two new controls so glitch doesn't tear the same
+              way every time it's turned on — Pattern picks WHERE it tears,
+              Chaos controls HOW MUCH. */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Pattern</Label>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-zinc-400">{Math.round(localGlitchSeed * 100)}</span>
+                <button
+                  type="button"
+                  onClick={shuffleGlitchSeed}
+                  className="p-1 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+                  title="Shuffle pattern"
+                >
+                  <Shuffle className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+            <Slider
+              value={[localGlitchSeed * 100]}
+              onValueChange={([value]) => setLocalGlitchSeed(value / 100)}
+              onValueCommit={([value]) => commitGlitchSeed(value / 100)}
+              min={0}
+              max={100}
+              step={1}
+            />
+            <p className="text-xs text-zinc-500">Which bands tear and when — shuffle for a different layout</p>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Chaos</Label>
+              <span className="text-sm text-zinc-400">{Math.round(localGlitchChaos * 100)}%</span>
+            </div>
+            <Slider
+              value={[localGlitchChaos * 100]}
+              onValueChange={([value]) => setLocalGlitchChaos(value / 100)}
+              onValueCommit={([value]) => commitGlitchChaos(value / 100)}
+              min={0}
+              max={100}
+              step={1}
+            />
+            <div className="flex justify-between text-xs text-zinc-500">
+              <span>Sparse</span>
+              <span>Aggressive</span>
+            </div>
+          </div>
+        </>
       )}
 
       {/* Direction — hidden for glitch */}
