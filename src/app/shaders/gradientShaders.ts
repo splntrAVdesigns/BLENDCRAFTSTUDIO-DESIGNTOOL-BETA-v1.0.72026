@@ -616,7 +616,55 @@ export const SHARED_FUNCTIONS = `
     
     return animatedUV;
   }
-  
+
+  // SPRINT 3.2.0: geometry-preserving texture animation, for patterns where
+  // bending a straight line or a regular grid reads as a rendering glitch
+  // rather than motion (Lines, Dots, Shape Pattern's tile grid).
+  //
+  // Spin/Scale/PingPong/Drift are reimplemented HERE as true rigid
+  // operations (real rotation, real uniform scale, real translation) rather
+  // than reusing animateTextureUV()'s versions directly — the center-delta
+  // trick used elsewhere in this file (compare animation-at-time vs
+  // animation-at-zero at a single reference point) silently produces zero
+  // motion for Spin and Scale specifically, because both are defined to
+  // leave the center point invariant. Doing the rigid math explicitly here
+  // sidesteps that rather than working around it.
+  //
+  // Non-rigid types (Warp/Tectonic/Breathing/Seismic/Shear/Vortex/Fluid)
+  // fall back to a dampened blend of the real animateTextureUV() distortion
+  // — enough to read as motion, restrained enough not to visibly bend
+  // straight geometry. 0.28 is a starting point, not a derived constant —
+  // worth tuning after a visual pass.
+  vec2 animateRigidUV(vec2 uv, float animationType, float time) {
+    if (animationType < 0.5) {
+      // SPIN — true rotation, same rate as animateTextureUV's own Spin.
+      vec2 centered = uv - 0.5;
+      float angle = time * 1.8;
+      float cosA = cos(angle);
+      float sinA = sin(angle);
+      return vec2(
+        centered.x * cosA - centered.y * sinA,
+        centered.x * sinA + centered.y * cosA
+      ) + 0.5;
+    } else if (animationType > 1.5 && animationType < 2.5) {
+      // PING PONG — pure translation, identical to animateTextureUV's version.
+      float pingPong = sin(time) * 0.1;
+      return uv + vec2(pingPong, pingPong * 0.5);
+    } else if (animationType > 2.5 && animationType < 3.5) {
+      // SCALE — true uniform scale about center.
+      float scalePulse = 1.0 + sin(time * 1.05) * 0.18;
+      vec2 centered = (uv - 0.5) * scalePulse;
+      return centered + 0.5;
+    } else if (animationType > 3.5 && animationType < 4.5) {
+      // DRIFT — near-pure translation (tiny per-axis phase offset, same as
+      // animateTextureUV's version — small enough not to read as bending).
+      float phaseX = sin(uv.y * 2.4 + time * 0.45) * 0.012;
+      float phaseY = cos(uv.x * 1.9 + time * 0.35) * 0.009;
+      return uv + vec2(phaseX, phaseY);
+    }
+    return mix(uv, animateTextureUV(uv, animationType, time), 0.28);
+  }
+
   // Apply texture overlay based on type
   // PHASE5_CACHE_REFRESH: textureAngle is separate from gradient angle to prevent conflicts
   // ── GRUNGE HELPER ─── defined HERE so it comes AFTER noise() ────────────────
@@ -633,8 +681,15 @@ export const SHARED_FUNCTIONS = `
 
 
   vec3 applyTexture(vec3 color, vec2 uv, float textureType, float scale, float intensity, float time, float blur, float distortion, float textureAngle, float blendMode, float opacity, float gridSize, float complexity, float chromaticShift, float animationType, float ridgeCount, float ridgeIrregularity, float blockIrregularity, float turbulence, float waveCount, float colorIntensity, float elevationShift, float lineThickness) {
-    // Apply animation to UV BEFORE texture sampling
-    vec2 animatedUV = animateTextureUV(uv, animationType, time);
+    // SPRINT 3.2.0: gated behind animateTexture. Previously this ran
+    // unconditionally on every fragment regardless of the toggle, which
+    // (a) cost every texture type the animateTextureUV() transform even when
+    // animation was off, and (b) baked in a frozen MID-ANIMATION distortion
+    // once textureTime had ever advanced, since the JS side freezes the
+    // clock rather than resetting it when the toggle turns off (see
+    // GradientCanvas.tsx's texture transport). Off now means a true identity
+    // UV every time, not "whatever time happened to be when you paused."
+    vec2 animatedUV = (animateTexture > 0.5) ? animateTextureUV(uv, animationType, time) : uv;
     
     vec3 textureColor = color;
     
@@ -656,18 +711,27 @@ export const SHARED_FUNCTIONS = `
       float n = noise(animatedUV * scale * 10.0);
       textureColor = mix(color, color * (0.5 + n * 0.5), intensity); }
     } else if (textureType < 2.5) { {
-      // Type 2: Dots - Fixed: Use original UV to prevent bent pattern
-      // Dots should form a straight grid, rotation can be added later if needed
-      vec2 pos = fract(uv * scale * 20.0) - 0.5;
+      // Type 2: Dots
+      // SPRINT 3.2.0: now animates via animateRigidUV() — Spin/Scale/PingPong/
+      // Drift move the whole dot grid as a true rigid rotation/scale/
+      // translation (never bends the grid); other animation types apply a
+      // dampened distortion. The original "use raw uv" fix this replaces
+      // was solving real bending, but did it by disabling all animation
+      // rather than only the types that actually caused it.
+      vec2 dotUV = (animateTexture > 0.5) ? animateRigidUV(uv, animationType, time) : uv;
+      vec2 pos = fract(dotUV * scale * 20.0) - 0.5;
       float d = length(pos);
       float dots = smoothstep(0.25, 0.2, d);
       textureColor = mix(color, color * 0.5, dots * intensity); }
     } else if (textureType < 3.5) { {
-      // Type 3: Lines - with angle rotation support (use original UV for straight lines)
+      // Type 3: Lines - with angle rotation support
+      // SPRINT 3.2.0: same fix as Dots above — animates via animateRigidUV()
+      // instead of being permanently static.
+      vec2 lineUV = (animateTexture > 0.5) ? animateRigidUV(uv, animationType, time) : uv;
       float angleRad = radians(textureAngle);
       vec2 rotatedUV = vec2(
-        uv.x * cos(angleRad) - uv.y * sin(angleRad),
-        uv.x * sin(angleRad) + uv.y * cos(angleRad)
+        lineUV.x * cos(angleRad) - lineUV.y * sin(angleRad),
+        lineUV.x * sin(angleRad) + lineUV.y * cos(angleRad)
       );
       float lineField = rotatedUV.x * scale * 30.0;
       float lines = aaPulse(lineField, 0.18, 1.5);
@@ -1280,9 +1344,20 @@ export const SHARED_FUNCTIONS = `
       float densityMul = pow(2.0, (clamp(uPatternDensity, 0.0, 100.0) - 50.0) / 25.0);
       float effectiveScale = scale * densityMul;
 
+      // SPRINT 3.2.0: the whole tile grid now moves via animateRigidUV() —
+      // Spin genuinely rotates the grid, Scale genuinely pulses tile density,
+      // PingPong/Drift translate it. Previously only per-shape internal
+      // detail (spUV/gUV further down) animated; the grid itself was static
+      // because it fed straight off raw uv. This replaces the narrower
+      // center-delta nudge that used to run further down (see below) — that
+      // trick only ever produced a translation, and produced exactly zero
+      // motion for Spin/Scale specifically, since both leave the center
+      // point invariant by construction.
+      vec2 gridUV = (animateTexture > 0.5) ? animateRigidUV(uv, animationType, time) : uv;
+
       vec2 tiledUV = vec2(
-        (uv.x - 0.5) * effectiveScale * BASE_TILES       + 0.5 + uPatternOffset.x,
-        (uv.y - 0.5) * effectiveScale * BASE_TILES / ar  + 0.5 + uPatternOffset.y
+        (gridUV.x - 0.5) * effectiveScale * BASE_TILES       + 0.5 + uPatternOffset.x,
+        (gridUV.y - 0.5) * effectiveScale * BASE_TILES / ar  + 0.5 + uPatternOffset.y
       );
 
       if (uPatternStaggerRows > 0.001) {
@@ -1360,12 +1435,12 @@ export const SHARED_FUNCTIONS = `
         patternUV = clamp(localUV, vec2(tileGuard), vec2(1.0 - tileGuard));
       }
 
-      if (animateTexture > 0.5) {
-        vec2 centerUV   = vec2(0.5, 0.5);
-        vec2 centerAnim = animateTextureUV(centerUV, animationType, time);
-        vec2 centerRest = animateTextureUV(centerUV, animationType, 0.0);
-        patternUV = patternUV + (centerAnim - centerRest);
-      }
+      // SPRINT 3.2.0: the center-delta nudge that used to run here is gone —
+      // superseded by gridUV above, which now carries Spin/Scale/PingPong/
+      // Drift/dampened-other motion into tiledUV (and therefore into
+      // patternUV, whether or not per-cell transforms are active) upstream
+      // of this point. Leaving both in would double-apply translation-type
+      // motion.
 
       // WebGL1/Figma Make compatibility: texture2DGrad is not available in the
       // GLSL profile used by this preview iframe, so sampling with it prevents
