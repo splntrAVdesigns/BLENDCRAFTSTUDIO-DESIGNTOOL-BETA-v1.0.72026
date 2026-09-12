@@ -123,12 +123,20 @@ export const GradientControls = memo(function GradientControls({ gradient, onCha
 
   // Handle gradient type change with auto-reset to defaults
   const handleTypeChange = (newType: GradientType) => {
+    // TEMP DIAGNOSTIC (Sprint: gradient-type-switch investigation) — marks
+    // the click itself so we can see if there's a gap between clicking and
+    // GradientCanvas's material-swap effect actually starting (e.g. React
+    // scheduling, or cost inside applyGradientDefaults/onCommitHistory).
+    // Safe to remove once root-caused.
+    (window as any).__typeSwitchClickAt = performance.now();
+    console.log(`[TypeSwitchDiag] handleTypeChange(${newType}) clicked`);
     try {
       const updatedGradient = applyGradientDefaults(gradient, newType);
       onChange(updatedGradient);
       if (onCommitHistory) {
         onCommitHistory();
       }
+      console.log(`[TypeSwitchDiag] handleTypeChange synchronous work done at +${(performance.now() - (window as any).__typeSwitchClickAt).toFixed(1)}ms`);
     } catch (error) {
       // Fallback: just change the type without applying defaults
       onChange({ ...gradient, type: newType });

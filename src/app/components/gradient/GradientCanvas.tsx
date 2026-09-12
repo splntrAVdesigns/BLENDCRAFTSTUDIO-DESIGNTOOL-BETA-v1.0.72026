@@ -462,6 +462,9 @@ export const GradientCanvas = memo(function GradientCanvas({
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.OrthographicCamera | null>(null);
   const meshesRef = useRef<THREE.Mesh[]>([]);
+  // Race-guard for the mesh-rebuild effect's async shader pre-warm (below) —
+  // same purpose as materialSwapTokenRef for the lighter type-switch path.
+  const meshRebuildSwapTokenRef = useRef(0);
   // Race-guard for the async shader pre-warm in the material-swap effect below:
   // if the user switches gradient type again before a prior compileAsync()
   // resolves, the stale promise's .then() must not fire needsRenderRef or
@@ -2128,14 +2131,24 @@ export const GradientCanvas = memo(function GradientCanvas({
     // GPU recompilation. On the first frame after rebuild the compiled program may not
     // be ready yet, causing a single black frame. Forcing two consecutive render ticks
     // gives the GPU one warmup frame then a second frame with the compiled shader.
-    needsRenderRef.current = true;
-
-    // SHADER PRE-WARM: compile all materials now in the scene so the GPU driver
-    // finishes GLSL compilation before the first user-visible render frame.
-    // Without this, Three.js compiles on the first renderer.render() call —
-    // a ~100-300ms synchronous stall that shows as a black flash on type switches.
-    if (rendererRef.current && sceneRef.current && cameraRef.current) {
-      rendererRef.current.compile(sceneRef.current, cameraRef.current);
+    //
+    // SHADER PRE-WARM (non-blocking) — same fix as the type-switch material-swap
+    // effect below: renderer.compile() forces a synchronous GLSL compile+link
+    // before returning, a real main-thread stall on every texture toggle / full
+    // mesh rebuild. compileAsync() polls compile status non-blockingly instead;
+    // needsRenderRef only flips once the promise resolves (or immediately, as a
+    // fallback, if the renderer/scene/camera aren't available).
+    const rebuildRenderer = rendererRef.current;
+    const rebuildCamera = cameraRef.current;
+    if (rebuildRenderer && scene && rebuildCamera) {
+      const token = ++meshRebuildSwapTokenRef.current;
+      const markReadyIfCurrent = () => {
+        if (meshRebuildSwapTokenRef.current !== token) return;
+        needsRenderRef.current = true;
+      };
+      rebuildRenderer.compileAsync(scene, rebuildCamera).then(markReadyIfCurrent).catch(markReadyIfCurrent);
+    } else {
+      needsRenderRef.current = true;
     }
   }, [
     isInitialized, 
@@ -2152,6 +2165,19 @@ export const GradientCanvas = memo(function GradientCanvas({
     if (!isInitialized || meshesRef.current.length === 0) return;
     const scene = sceneRef.current;
     if (!scene) return;
+
+    // TEMP DIAGNOSTIC (Sprint: gradient-type-switch investigation) — the
+    // reported 3+ second lag persisted after compileAsync + material reuse,
+    // which means the actual bottleneck hasn't been located yet. This times
+    // the three phases of a type switch so we can see exactly where the time
+    // goes instead of guessing further. Safe to remove once root-caused —
+    // logs only fire on an actual type switch, not per-frame.
+    const __swapStart = performance.now();
+    const __clickAt = (window as any).__typeSwitchClickAt;
+    const __sinceClick = typeof __clickAt === 'number' ? (__swapStart - __clickAt).toFixed(1) : 'n/a';
+    const __glCtxForExt = rendererRef.current?.getContext?.();
+    const __hasParallelCompile = !!__glCtxForExt?.getExtension?.('KHR_parallel_shader_compile');
+    console.log(`[TypeSwitchDiag] material-swap effect started (+${__sinceClick}ms since click) — KHR_parallel_shader_compile supported: ${__hasParallelCompile}`);
 
     const visibleLayers = layers; // STAGE 2.7A: meshes exist for all layers
 
@@ -2285,7 +2311,9 @@ export const GradientCanvas = memo(function GradientCanvas({
     });
 
     // Re-apply mask textures to the new materials
+    console.log(`[TypeSwitchDiag] mesh swap loop done at +${(performance.now() - __swapStart).toFixed(1)}ms`);
     setMaskTextureVersion(prev => prev + 1);
+    console.log(`[TypeSwitchDiag] setMaskTextureVersion dispatched at +${(performance.now() - __swapStart).toFixed(1)}ms`);
 
     // SHADER PRE-WARM (non-blocking). Previously this called the synchronous
     // renderer.compile(), which forces the GPU driver to finish GLSL
@@ -2312,11 +2340,13 @@ export const GradientCanvas = memo(function GradientCanvas({
     const camera = cameraRef.current;
     if (renderer && scene && camera) {
       const token = ++materialSwapTokenRef.current;
+      const __compileCallStart = performance.now();
       const markReadyIfCurrent = () => {
         // Stale if another type switch started (and possibly already
         // resolved) while this compile was in flight — that newer swap owns
         // needsRenderRef now, this callback has nothing left to do.
         if (materialSwapTokenRef.current !== token) return;
+        console.log(`[TypeSwitchDiag] compileAsync resolved after ${(performance.now() - __compileCallStart).toFixed(1)}ms (total since swap start: ${(performance.now() - __swapStart).toFixed(1)}ms)`);
         needsRenderRef.current = true;
         markRenderNeededNextFrame(needsRenderRef);
       };
@@ -2372,6 +2402,12 @@ export const GradientCanvas = memo(function GradientCanvas({
   // causes double-writes per frame and stutter during animation playback.
   useEffect(() => {
     if (!isInitialized || meshesRef.current.length === 0) return;
+    // TEMP DIAGNOSTIC (Sprint: gradient-type-switch investigation) — this
+    // sweep also runs on every type switch (via the maskTextureVersion bump
+    // in the material-swap effect above). Timing it to rule in/out whether
+    // it's contributing to the reported 3+ second lag. Safe to remove once
+    // root-caused.
+    const __sweepStart = performance.now();
     // When playing, the RAF loop handles gradient/color/texture per-frame updates.
     // But mask uniforms are NEVER written by the RAF loop, so they must always run
     // regardless of play state (fixes: texture-toggle-while-playing drops mask shape,
@@ -3123,6 +3159,7 @@ export const GradientCanvas = memo(function GradientCanvas({
     // The RAF loop polls needsRenderRef on every tick â€” setting it true
     // is sufficient; no forcePreviewRender call needed.
     needsRenderRef.current = true;
+    console.log(`[TypeSwitchDiag] uniform-sweep effect done after ${(performance.now() - __sweepStart).toFixed(1)}ms (${meshesRef.current.length} mesh(es))`);
   // isPlaying intentionally removed from deps â€” reading isPlayingRef.current instead.
   // This prevents a full uniform sweep on every play/pause toggle.
   }, [isInitialized, gradientTransformKey, gradientColorsKey, interactionEnabled, activeLayerId,
