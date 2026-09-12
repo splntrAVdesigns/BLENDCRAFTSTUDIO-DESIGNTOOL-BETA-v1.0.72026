@@ -54,6 +54,8 @@ interface DraggableLayerItemProps {
   layersLength: number;
   blendModes: BlendMode[];
   onReorderCommit?: () => void;
+  /** Commit-based history, same as onReorderCommit — see Opacity slider below. */
+  onCommitHistory?: () => void;
 }
 
 const LAYER_ITEM_TYPE = 'layer';
@@ -147,6 +149,7 @@ const DraggableLayerItem = ({
   layersLength,
   blendModes,
   onReorderCommit,
+  onCommitHistory,
 }: DraggableLayerItemProps) => {
   const ref = useRef<HTMLDivElement>(null);
   const dragHandleRef = useRef<HTMLDivElement>(null);
@@ -259,7 +262,21 @@ const DraggableLayerItem = ({
     return () => cancelAnimationFrame(raf);
   }, [isActive]);
 
-  const opacity = Math.round(layer.opacity * 100);
+  // 🔥 COMMIT-BASED PATTERN (same as GradientControls/EffectsControls): the
+  // Opacity slider previously called updateLayer() directly on every
+  // onValueChange tick, pushing a brand-new `layers` array up to app state on
+  // every pointer-move during a drag. That forces GradientCanvas's
+  // layersDataKey (and everything keyed off it) to rebuild every tick, which
+  // is what made the slider thumb visibly lag behind the cursor. Track the
+  // live value locally during drag; only commit to parent state (and history)
+  // when the drag ends.
+  const [localOpacity, setLocalOpacity] = useState<number | null>(null);
+  useEffect(() => {
+    setLocalOpacity(null);
+  }, [layer.opacity]);
+
+  const displayOpacity = localOpacity ?? layer.opacity;
+  const opacity = Math.round(displayOpacity * 100);
 
   return (
     <div
@@ -412,8 +429,13 @@ const DraggableLayerItem = ({
             </div>
             <div onPointerDown={(e) => e.stopPropagation()}>
               <Slider
-                value={[layer.opacity * 100]}
-                onValueChange={([value]) => updateLayer(layer.id, { opacity: value / 100 })}
+                value={[displayOpacity * 100]}
+                onValueChange={([value]) => setLocalOpacity(value / 100)}
+                onValueCommit={([value]) => {
+                  updateLayer(layer.id, { opacity: value / 100 });
+                  setLocalOpacity(null);
+                  onCommitHistory?.();
+                }}
                 min={0}
                 max={100}
                 step={1}
@@ -620,6 +642,7 @@ export function LayerPanel({ layers, activeLayerId, onLayersChange, onActiveLaye
                   layersLength={layers.length}
                   blendModes={blendModes}
                   onReorderCommit={onCommitHistory}
+                  onCommitHistory={onCommitHistory}
                 />
               ))}
             </DndProvider>

@@ -10,7 +10,7 @@
  * @version 2.0.0
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { toast } from 'sonner';
 import { logger } from '../utils/logger';
 import { hashDocumentState, sanitizeLayer } from '../utils/documentState';
@@ -88,22 +88,35 @@ export function useHistory(): UseHistoryReturn {
   const [memoryWarning, setMemoryWarning] = useState(false);
   const lastPushTime = useRef(0);
 
-  // Calculate total memory usage whenever history changes
-  useEffect(() => {
-    let total = 0;
-    for (const state of history) {
-      total += estimateStateSize(state);
-    }
+  // PERF FIX: previously a useEffect re-ran on every `history` reference
+  // change and did `JSON.stringify(state)` for EVERY entry (up to 50) to
+  // recompute totalMemoryUsage from scratch. Any component that called
+  // onCommitHistory() per drag-tick (e.g. a slider without a commit-on-
+  // release pattern) paid that cost on every pointer-move — a direct cause
+  // of input lag. sizesRef now tracks each entry's byte size incrementally,
+  // parallel to `history` by index, so the total is a cheap running sum
+  // instead of a full re-serialization.
+  const sizesRef = useRef<number[]>([]);
+
+  // Recomputes totalMemoryUsage/memoryWarning from a given sizes array and
+  // pushes the result via setState. Called synchronously from INSIDE the
+  // setHistory updater below (not after it) — React doesn't guarantee an
+  // updater function runs synchronously at call time, so reading sizesRef.current
+  // right after calling setHistory() could see stale data. Calling other
+  // setters from within a setState updater is safe and avoids that hazard.
+  const applySizes = useCallback((sizes: number[]) => {
+    const total = sizes.reduce((sum, n) => sum + n, 0);
     setTotalMemoryUsage(total);
-    
-    // Set warning if usage is high
-    if (total > WARNING_THRESHOLD_BYTES && !memoryWarning) {
-      console.warn(`[History] Memory usage high: ${Math.round(total / 1024 / 1024)}MB`);
-      setMemoryWarning(true);
-    } else if (total <= WARNING_THRESHOLD_BYTES && memoryWarning) {
-      setMemoryWarning(false);
-    }
-  }, [history, memoryWarning]);
+    setMemoryWarning(prevWarning => {
+      if (total > WARNING_THRESHOLD_BYTES) {
+        if (!prevWarning) {
+          console.warn(`[History] Memory usage high: ${Math.round(total / 1024 / 1024)}MB`);
+        }
+        return true;
+      }
+      return false;
+    });
+  }, []);
 
   // Push new state to history
   const pushState = useCallback((state: Omit<HistoryState, 'timestamp'>) => {
@@ -112,15 +125,23 @@ export function useHistory(): UseHistoryReturn {
     setHistory(prev => {
       // Debounce rapid pushes (e.g., slider dragging)
       if (now - lastPushTime.current < DEBOUNCE_MS) {
+        const replacement: HistoryState = { ...state, timestamp: now };
+        const replacementSize = estimateStateSize(replacement);
+
         if (prev.length === 0) {
           lastPushTime.current = now;
-          return [{ ...state, timestamp: now }];
+          sizesRef.current = [replacementSize];
+          applySizes(sizesRef.current);
+          return [replacement];
         }
         
         // Replace last state instead of adding new one
         const newHistory = [...prev];
-        newHistory[newHistory.length - 1] = { ...state, timestamp: now };
+        newHistory[newHistory.length - 1] = replacement;
         lastPushTime.current = now;
+        sizesRef.current = [...sizesRef.current];
+        sizesRef.current[sizesRef.current.length - 1] = replacementSize;
+        applySizes(sizesRef.current);
         return newHistory;
       }
 
@@ -128,6 +149,10 @@ export function useHistory(): UseHistoryReturn {
 
       // Remove any future states if we're not at the end
       const newHistory = prev.slice(0, currentIndex + 1);
+      // Local copy only — NOT committed to sizesRef.current until we know
+      // we're actually keeping this push (see compareStates bailout below,
+      // where `prev`/sizesRef.current must stay untouched and in sync).
+      const newSizes = sizesRef.current.slice(0, currentIndex + 1);
       
       // OPTIMIZATION: Skip if state is identical to last state
       if (newHistory.length > 0) {
@@ -173,13 +198,18 @@ export function useHistory(): UseHistoryReturn {
       
       // Add new state
       newHistory.push(newState);
+      newSizes.push(estimateStateSize(newState));
       
       // Limit history size (remove oldest)
       if (newHistory.length > MAX_HISTORY_SIZE) {
         newHistory.shift();
+        newSizes.shift();
         setCurrentIndex(prev => prev - 1);
       }
       
+      // Commit the size tracking in lockstep with the history we're returning.
+      sizesRef.current = newSizes;
+      applySizes(sizesRef.current);
       return newHistory;
     });
 
@@ -187,7 +217,7 @@ export function useHistory(): UseHistoryReturn {
       const newIndex = Math.min(prev + 1, MAX_HISTORY_SIZE - 1);
       return newIndex;
     });
-  }, [currentIndex]);
+  }, [currentIndex, applySizes]);
 
   // Undo to previous state
   const undo = useCallback((): HistoryState | null => {
@@ -211,6 +241,7 @@ export function useHistory(): UseHistoryReturn {
   const clearHistory = useCallback(() => {
     setHistory([]);
     setCurrentIndex(-1);
+    sizesRef.current = [];
     setTotalMemoryUsage(0);
     setMemoryWarning(false);
     if (typeof import.meta !== 'undefined' && import.meta.env?.DEV) {

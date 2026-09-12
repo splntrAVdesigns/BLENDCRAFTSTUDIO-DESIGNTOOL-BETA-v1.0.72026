@@ -24,6 +24,22 @@ export function ColorStopsSection({ colors, onColorsChange, onCommitHistory }: C
     localStorage.setItem('color-stops-accordion-state', JSON.stringify(openSections));
   }, [openSections]);
 
+  // 🔥 COMMIT-BASED PATTERN (same as GradientControls/EffectsControls): the
+  // Position slider previously called onColorsChange() + onCommitHistory() on
+  // every onValueChange tick during a drag — i.e. every pointer-move, not just
+  // on release. That pushed a new `layers` array up on every tick (forcing
+  // GradientCanvas's layersDataKey to rebuild) AND pushed a history entry on
+  // every tick, which is what made the slider thumb visibly lag behind the
+  // cursor. Track the live value locally per-index during drag; only commit
+  // to parent state + history when the drag ends.
+  const [localPositions, setLocalPositions] = useState<Record<number, number>>({});
+
+  // Drop any local drag overrides when the source-of-truth colors array
+  // changes from elsewhere (add/remove/reverse stop, external reset, etc.)
+  useEffect(() => {
+    setLocalPositions({});
+  }, [colors]);
+
   const updateColor = (index: number, updates: Partial<ColorStop>) => {
     const newColors = [...colors];
     newColors[index] = { ...newColors[index], ...updates };
@@ -31,6 +47,20 @@ export function ColorStopsSection({ colors, onColorsChange, onCommitHistory }: C
     // so unsorted arrays during live drag are handled correctly.
     onColorsChange(newColors);
     if (onCommitHistory) onCommitHistory(); // 🔥 COMMIT-BASED HISTORY
+  };
+
+  const updateLocalPosition = (index: number, value: number) => {
+    setLocalPositions(prev => ({ ...prev, [index]: value }));
+  };
+
+  const commitPosition = (index: number, value: number) => {
+    updateColor(index, { position: value });
+    setLocalPositions(prev => {
+      if (!(index in prev)) return prev;
+      const next = { ...prev };
+      delete next[index];
+      return next;
+    });
   };
 
   const addColorStop = () => {
@@ -111,14 +141,15 @@ export function ColorStopsSection({ colors, onColorsChange, onCommitHistory }: C
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] text-zinc-500 w-14">Position:</span>
                       <Slider
-                        value={[stop.position * 100]}
-                        onValueChange={([value]) => updateColor(index, { position: value / 100 })}
+                        value={[(localPositions[index] ?? stop.position) * 100]}
+                        onValueChange={([value]) => updateLocalPosition(index, value / 100)}
+                        onValueCommit={([value]) => commitPosition(index, value / 100)}
                         min={0}
                         max={100}
                         step={1}
                         className="flex-1"
                       />
-                      <span className="text-[10px] text-zinc-400 w-10 text-right">{Math.round(stop.position * 100)}%</span>
+                      <span className="text-[10px] text-zinc-400 w-10 text-right">{Math.round((localPositions[index] ?? stop.position) * 100)}%</span>
                     </div>
                   </div>
                   {colors.length > 2 && (
