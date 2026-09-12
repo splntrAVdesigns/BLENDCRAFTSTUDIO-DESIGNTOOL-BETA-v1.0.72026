@@ -36,6 +36,76 @@ const noise2D = createNoise2D();
 // Log shader version to verify cache bust
 console.log('[GradientRenderer] Shader module version:', SHADER_VERSION_TIMESTAMP);
 
+// TICKET 8 — GPU-compile reuse across gradient type switches.
+//
+// Previously every call to renderGradientLayer() did `new THREE.ShaderMaterial(...)`
+// directly, and GradientCanvas's material-swap effect called `oldMaterial.dispose()`
+// the instant you switched away from a type. Three.js's own internal WebGLProgram
+// cache is refcounted per compiled-program: disposing the only material using a
+// given (vertexShader, fragmentShader, defines) combo drops that refcount to zero
+// and the compiled GPU program is torn down — so switching Linear → Voronoi → back
+// to Linear paid a full GLSL recompile on the *second* Linear selection too, not
+// just the first.
+//
+// Fix: keep one retained "template" material per unique (vertexShader,
+// fragmentShader, defines) combo alive for the life of the session — the set of
+// combos is small and bounded (24 gradient types × a handful of texture states),
+// so this is a few dozen entries at most, trivial memory. Every caller still gets
+// its own independent material instance (via .clone() + a fresh deep-cloned
+// uniforms object built from THIS call's actual values) — per-layer uniform
+// independence is unchanged from before. Disposing a *clone* never touches the
+// retained template, so Three's internal program refcount never drops to zero for
+// a combo we've already compiled, and GradientCanvas's existing dispose-on-swap
+// logic needs no changes at all.
+//
+// This deliberately does NOT touch the existing textureTypeComment/shaderDefines
+// cache-busting below — different texture states already produce a different
+// final fragmentShader string and a different defines object, so they naturally
+// get different cache keys here. (See technical-learnings: reordering that
+// cache-busting has previously caused a black-canvas regression — this addition
+// reads the shader/defines it's given, it doesn't change how they're built.)
+const MAX_GRADIENT_MATERIAL_TEMPLATES = 96;
+const gradientMaterialTemplateCache = new Map<string, THREE.ShaderMaterial>();
+
+function getOrCreateGradientMaterial(
+  vertexShaderSrc: string,
+  fragmentShaderSrc: string,
+  defines: { [key: string]: string },
+  uniforms: { [key: string]: THREE.IUniform },
+  options: THREE.ShaderMaterialParameters
+): THREE.ShaderMaterial {
+  const key = `${vertexShaderSrc}||${fragmentShaderSrc}||${JSON.stringify(defines)}`;
+
+  let template = gradientMaterialTemplateCache.get(key);
+  if (!template) {
+    template = new THREE.ShaderMaterial({
+      vertexShader: vertexShaderSrc,
+      fragmentShader: fragmentShaderSrc,
+      uniforms,
+      defines,
+      ...options,
+    });
+    gradientMaterialTemplateCache.set(key, template);
+
+    // Defensive cap in case new gradient types/texture states grow this set
+    // over time — evict oldest-inserted (Map preserves insertion order).
+    if (gradientMaterialTemplateCache.size > MAX_GRADIENT_MATERIAL_TEMPLATES) {
+      const oldestKey = gradientMaterialTemplateCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        gradientMaterialTemplateCache.get(oldestKey)?.dispose();
+        gradientMaterialTemplateCache.delete(oldestKey);
+      }
+    }
+  }
+
+  // Never hand out the retained template itself — always return an independent
+  // clone with this call's actual uniform values, so per-layer state and
+  // dispose-on-swap behavior are unaffected by the cache existing.
+  const material = template.clone();
+  material.uniforms = THREE.UniformsUtils.clone(uniforms);
+  return material;
+}
+
 export function renderGradientLayer(
   layer: Layer,
   width: number,
@@ -635,15 +705,17 @@ function createGradientMaterial(
     shaderDefines[`TEXTURE_TYPE_${Math.floor(getTextureTypeValue(texture.type))}`] = '1';
   }
 
-  return new THREE.ShaderMaterial({
+  return getOrCreateGradientMaterial(
     vertexShader,
     fragmentShader,
-    uniforms: { ...baseUniforms, ...additionalUniforms },
-    defines: shaderDefines, // This forces Three.js to create a new program cache entry
-    transparent: true,
-    premultipliedAlpha: false, // Use straight alpha for clean masking edges
-    depthWrite: false, // Important for proper layer opacity blending
-  });
+    shaderDefines, // This forces Three.js to create a new program cache entry
+    { ...baseUniforms, ...additionalUniforms },
+    {
+      transparent: true,
+      premultipliedAlpha: false, // Use straight alpha for clean masking edges
+      depthWrite: false, // Important for proper layer opacity blending
+    }
+  );
 }
 
 function getTextureTypeValue(type: string): number {

@@ -462,6 +462,11 @@ export const GradientCanvas = memo(function GradientCanvas({
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.OrthographicCamera | null>(null);
   const meshesRef = useRef<THREE.Mesh[]>([]);
+  // Race-guard for the async shader pre-warm in the material-swap effect below:
+  // if the user switches gradient type again before a prior compileAsync()
+  // resolves, the stale promise's .then() must not fire needsRenderRef or
+  // touch a mesh that's already moved on to a newer material.
+  const materialSwapTokenRef = useRef(0);
   const animationFrameRef = useRef<number>();
   const renderTargetRef = useRef<THREE.WebGLRenderTarget | null>(null);
   // Separate read-back RT used by readFramePixels for accurate PNG/video export.
@@ -2281,14 +2286,45 @@ export const GradientCanvas = memo(function GradientCanvas({
 
     // Re-apply mask textures to the new materials
     setMaskTextureVersion(prev => prev + 1);
-    // SHADER PRE-WARM: compile the scene immediately after swapping the material.
-    // Forces the GPU driver to finish GLSL compilation synchronously before the
-    // first needsRender tick — eliminates the black-flash on gradient type switches.
-    if (rendererRef.current && sceneRef.current && cameraRef.current) {
-      rendererRef.current.compile(sceneRef.current, cameraRef.current);
+
+    // SHADER PRE-WARM (non-blocking). Previously this called the synchronous
+    // renderer.compile(), which forces the GPU driver to finish GLSL
+    // compile+link before returning to JS — a real main-thread stall, and
+    // the direct cause of "gradient type is slow to load on switch."
+    // compileAsync() issues the same compile/link work but resolves via a
+    // non-blocking KHR_parallel_shader_compile poll instead of forcing an
+    // immediate synchronous status readback, so the main thread stays free
+    // while the driver finishes in the background. needsRenderRef is only
+    // flipped once the promise resolves, so a paused/idle canvas — the
+    // common case of picking a new type and looking at it — never renders
+    // the not-yet-ready material, which avoids the original black-flash bug
+    // too (no synchronous compile needed to "beat" the render).
+    //
+    // NOTE: if the canvas is actively playing or audio-reactive, the main
+    // RAF loop renders every frame regardless of needsRenderRef (see
+    // `shouldRenderFrame` in the animate() loop below), so a type switch
+    // mid-playback can still hit Three's one-time first-use program setup on
+    // that frame. That's bounded by whatever the driver already finished in
+    // the background by then — not a full cold-start block like before —
+    // and ticket 8 (compiled-material reuse in gradientRenderer.ts) removes
+    // the cold compile entirely for any type already visited this session.
+    const renderer = rendererRef.current;
+    const camera = cameraRef.current;
+    if (renderer && scene && camera) {
+      const token = ++materialSwapTokenRef.current;
+      const markReadyIfCurrent = () => {
+        // Stale if another type switch started (and possibly already
+        // resolved) while this compile was in flight — that newer swap owns
+        // needsRenderRef now, this callback has nothing left to do.
+        if (materialSwapTokenRef.current !== token) return;
+        needsRenderRef.current = true;
+        markRenderNeededNextFrame(needsRenderRef);
+      };
+      renderer.compileAsync(scene, camera).then(markReadyIfCurrent).catch(markReadyIfCurrent);
+    } else {
+      needsRenderRef.current = true;
+      markRenderNeededNextFrame(needsRenderRef);
     }
-    needsRenderRef.current = true;
-    markRenderNeededNextFrame(needsRenderRef);
   }, [meshMaterialKey, isInitialized, canvasSettings.width, canvasSettings.height]);
 
   // Handle mesh resolution changes separately (without full recreation)
